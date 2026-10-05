@@ -1,5 +1,5 @@
 """
-Application Streamlit - Traitement des Données GPS Catapult One & Dashboard de Charge (STAPS)
+Application Streamlit - Traitement des Données GPS Catapult One & Suivi des Charges GPS
 Club : Rugby Club Amiénois (RCA)
 Auteur : Expert Python / Streamlit Senior en Data Visualisation Sportive
 Description :
@@ -92,28 +92,28 @@ MOCK_OBJECTIFS: Dict[str, Dict[str, Tuple[float, float]]] = {
 
 # Données simulées (Mock Data) pour le Podium des Tops de la Séance
 MOCK_PODIUM: Dict[str, Dict[str, Any]] = {
-    "Vitesse Max (km/h)": {
+    "Top speed (km/h)": {
         "icon": "⚡",
         "players": [
-            {"rank": 1, "name": "Antoine D.", "stat": "32.4 km/h", "seed": "Antoine+D"},
-            {"rank": 2, "name": "Thomas L.", "stat": "31.8 km/h", "seed": "Thomas+L"},
-            {"rank": 3, "name": "Lucas M.", "stat": "31.1 km/h", "seed": "Lucas+M"},
+            {"rank": 1, "name": "Antoine D.", "stat": "32.4 km/h", "seed": "Antoine"},
+            {"rank": 2, "name": "Thomas L.", "stat": "31.8 km/h", "seed": "Thomas"},
+            {"rank": 3, "name": "Lucas M.", "stat": "31.1 km/h", "seed": "Lucas"},
         ],
     },
     "% de marche": {
         "icon": "🚶",
         "players": [
-            {"rank": 1, "name": "Paul B.", "stat": "58.4 %", "seed": "Paul+B"},
-            {"rank": 2, "name": "Julien R.", "stat": "56.2 %", "seed": "Julien+R"},
-            {"rank": 3, "name": "Maxime G.", "stat": "54.8 %", "seed": "Maxime+G"},
+            {"rank": 1, "name": "Paul B.", "stat": "58.4 %", "seed": "Paul"},
+            {"rank": 2, "name": "Julien R.", "stat": "56.2 %", "seed": "Julien"},
+            {"rank": 3, "name": "Maxime G.", "stat": "54.8 %", "seed": "Maxime"},
         ],
     },
-    "Distance Haute Intensité (m)": {
+    "Haute intensité (m)": {
         "icon": "🔥",
         "players": [
-            {"rank": 1, "name": "Romain C.", "stat": "742 m", "seed": "Romain+C"},
-            {"rank": 2, "name": "Clément V.", "stat": "685 m", "seed": "Clement+V"},
-            {"rank": 3, "name": "Nicolas F.", "stat": "610 m", "seed": "Nicolas+F"},
+            {"rank": 1, "name": "Romain C.", "stat": "742 m", "seed": "Romain"},
+            {"rank": 2, "name": "Clément V.", "stat": "685 m", "seed": "Clement"},
+            {"rank": 3, "name": "Nicolas F.", "stat": "610 m", "seed": "Nicolas"},
         ],
     },
 }
@@ -264,13 +264,7 @@ def render_podium_section(podium_data: Dict[str, Dict[str, Any]]) -> None:
       * Statistiques en gras et mise en valeur en bordeaux RCA (#A30000).
     """
     st.divider()
-    st.markdown('<div class="section-header">🏆 PODIUM : Les Tops de la Séance</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="section-desc">'
-        'Mise à l\'honneur des meilleures performances individuelles de la séance sur les métriques athlétiques clés.'
-        '</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown('<div class="section-header">🏆 PODIUM</div>', unsafe_allow_html=True)
 
     col1, col2, col3 = st.columns(3)
     cols = [col1, col2, col3]
@@ -895,7 +889,7 @@ def create_fallback_excel(df_indiv: pd.DataFrame) -> io.BytesIO:
 
 def main() -> None:
     st.set_page_config(
-        page_title="Dashboard & Suivi STAPS | Rugby Club Amiénois",
+        page_title="Dashboard & Suivi des Charges GPS | Rugby Club Amiénois",
         page_icon="🏉",
         layout="wide",
         initial_sidebar_state="collapsed",
@@ -1135,9 +1129,9 @@ def main() -> None:
     )
 
     # ==========================================================================
-    # SECTION 1 : RETOUR JOURNÉE : COMPARAISON OBJECTIF VS RÉALISÉ (DASHBOARD)
+    # SECTION 1 : RETOUR JOURNÉE (DASHBOARD)
     # ==========================================================================
-    st.markdown('<div class="section-header">📊 RETOUR JOURNÉE : Comparaison Objectif vs Réalisé</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">📊 RETOUR JOURNÉE</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="section-desc">'
         'Rapport visuel par groupe positionnel : '
