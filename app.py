@@ -17,6 +17,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import textwrap
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -275,50 +276,47 @@ def render_podium_section(podium_data: Dict[str, Dict[str, Any]]) -> None:
         players = cat_info["players"]
         p1, p2, p3 = players[0], players[1], players[2]
 
-        card_html = f"""
-        <div class="podium-card-container">
-            <div class="podium-category-header">
-                <span class="podium-cat-icon">{cat_info['icon']}</span>
-                <span class="podium-cat-title">{cat_name}</span>
-            </div>
-
-            <!-- 1er / Vainqueur de la catégorie (Mise en avant au sommet) -->
-            <div class="podium-winner-box">
-                <div class="podium-rank-badge rank-1">🥇 1er</div>
-                <div class="avatar-wrapper">
-                    <img src="https://api.dicebear.com/7.x/initials/svg?seed={p1['seed']}&backgroundColor=2E5A88" 
-                         alt="{p1['name']}" class="podium-avatar img-winner" />
+        raw_html = textwrap.dedent(f"""
+            <div class="podium-card-container">
+                <div class="podium-category-header">
+                    <span class="podium-cat-icon">{cat_info.get('icon', '🏉')}</span>
+                    <span class="podium-cat-title">{cat_name}</span>
                 </div>
-                <div class="podium-player-name name-winner">{p1['name']}</div>
-                <div class="podium-player-stat stat-winner">{p1['stat']}</div>
-            </div>
-
-            <!-- 2ème et 3ème côte à côte juste en dessous -->
-            <div class="podium-runners-row">
-                <!-- 2ème -->
-                <div class="podium-runner-box">
-                    <div class="podium-rank-badge rank-2">🥈 2ème</div>
+                <div class="podium-winner-box">
+                    <div class="podium-rank-badge rank-1">🥇 1er</div>
                     <div class="avatar-wrapper">
-                        <img src="https://api.dicebear.com/7.x/initials/svg?seed={p2['seed']}&backgroundColor=2E5A88" 
-                             alt="{p2['name']}" class="podium-avatar img-runner" />
+                        <img src="https://api.dicebear.com/7.x/initials/svg?seed={p1['seed']}&backgroundColor=2E5A88" 
+                             alt="{p1['name']}" class="podium-avatar img-winner" />
                     </div>
-                    <div class="podium-player-name">{p2['name']}</div>
-                    <div class="podium-player-stat">{p2['stat']}</div>
+                    <div class="podium-player-name name-winner">{p1['name']}</div>
+                    <div class="podium-player-stat stat-winner">{p1['stat']}</div>
                 </div>
-
-                <!-- 3ème -->
-                <div class="podium-runner-box">
-                    <div class="podium-rank-badge rank-3">🥉 3ème</div>
-                    <div class="avatar-wrapper">
-                        <img src="https://api.dicebear.com/7.x/initials/svg?seed={p3['seed']}&backgroundColor=2E5A88" 
-                             alt="{p3['name']}" class="podium-avatar img-runner" />
+                <div class="podium-runners-row">
+                    <div class="podium-runner-box">
+                        <div class="podium-rank-badge rank-2">🥈 2ème</div>
+                        <div class="avatar-wrapper">
+                            <img src="https://api.dicebear.com/7.x/initials/svg?seed={p2['seed']}&backgroundColor=2E5A88" 
+                                 alt="{p2['name']}" class="podium-avatar img-runner" />
+                        </div>
+                        <div class="podium-player-name">{p2['name']}</div>
+                        <div class="podium-player-stat">{p2['stat']}</div>
                     </div>
-                    <div class="podium-player-name">{p3['name']}</div>
-                    <div class="podium-player-stat">{p3['stat']}</div>
+                    <div class="podium-runner-box">
+                        <div class="podium-rank-badge rank-3">🥉 3ème</div>
+                        <div class="avatar-wrapper">
+                            <img src="https://api.dicebear.com/7.x/initials/svg?seed={p3['seed']}&backgroundColor=2E5A88" 
+                                 alt="{p3['name']}" class="podium-avatar img-runner" />
+                        </div>
+                        <div class="podium-player-name">{p3['name']}</div>
+                        <div class="podium-player-stat">{p3['stat']}</div>
+                    </div>
                 </div>
             </div>
-        </div>
-        """
+        """)
+
+        # Suppression absolue de toute indentation résiduelle et lignes vides
+        card_html = "\n".join(line.strip() for line in raw_html.splitlines() if line.strip())
+
         with cols[idx]:
             st.markdown(card_html, unsafe_allow_html=True)
 
