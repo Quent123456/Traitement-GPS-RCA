@@ -1,14 +1,15 @@
 """
-Application Streamlit - Traitement des Données GPS Catapult One (STAPS)
-Auteur : Expert Python en Data Science Sportive (STAPS)
+Application Streamlit - Traitement des Données GPS Catapult One & Dashboard de Charge (STAPS)
+Club : Rugby Club Amiénois (RCA)
+Auteur : Expert Python / Streamlit Senior en Data Visualisation Sportive
 Description :
-    Application web pour importer un export brut CSV Catapult One / PlayerTek / OpenField,
-    détecter dynamiquement le véritable en-tête en éliminant les lignes de métadonnées,
-    convertir rigoureusement les durées en minutes réelles (float),
-    agréger et calculer les métriques athlétiques individuelles, et injecter les résultats
-    directement dans le classeur modèle officiel de la préparatrice physique
-    (Modele_Vierge_STAPS.xlsx) via openpyxl (data_only=False) afin de préserver
-    l'intégralité des formules, des graphiques et des onglets métiers.
+    Application web complète combinant :
+    1. Un Dashboard dynamique (style Canva) de comparaison Objectif vs Réalisé par groupe de joueurs
+       (5 de devant, 3ème Ligne, Trois-quarts) réalisé avec Plotly Graph Objects.
+    2. L'importation et le parsing robuste des exports bruts CSV Catapult One / PlayerTek / OpenField.
+    3. La conversion précise des durées (Timedelta HH:MM:SS, secondes, millisecondes) en minutes réelles.
+    4. L'injection directe dans le classeur modèle officiel (Modele_Vierge_STAPS.xlsx) pour préserver
+       toutes les formules natives de la préparatrice physique, graphiques et onglets.
 """
 
 from __future__ import annotations
@@ -16,21 +17,28 @@ from __future__ import annotations
 import io
 import os
 import re
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 # ==============================================================================
-# 0. CONSTANTES ET MAQUETTE EXACTE DES COLONNES STAPS
+# 0. CONSTANTES, MAQUETTES ET DONNÉES DE SIMULATION (MOCK DATA)
 # ==============================================================================
 
 TEMPLATE_FILENAME = "Modele_Vierge_STAPS.xlsx"
 OUTPUT_DOWNLOAD_FILENAME = "Synthese_Complete_Seance.xlsx"
+
+# Palette de couleurs officielles Rugby Club Amiénois / Style Canva
+COLOR_OBJECTIF = "#2E5A88"  # Bleu roi / marine
+COLOR_REALISE = "#A30000"   # Rouge / Bordeaux RCA
+COLOR_TEXT_MAIN = "#1F4E79"
+COLOR_MUTED = "#555555"
 
 FINAL_COLUMNS: List[str] = [
     'Nom ; Prénom',
@@ -60,6 +68,28 @@ FINAL_COLUMNS: List[str] = [
 
 PCT_COLUMNS_CLEAN: set[str] = {"%marche", "%course", "%hsr", "%vhsr"}
 
+# Données simulées (Mock Data) pour la visualisation immédiate de l'esthétique Canva
+MOCK_OBJECTIFS: Dict[str, Dict[str, Tuple[float, float]]] = {
+    "5 de devant": {
+        "Objectif Distance (m)": (4500, 2475),  # 55% d'accomplissement (explicitement cité)
+        "Obj. HSR": (250, 160),                  # 64%
+        "Obj. VHSR": (50, 32),                   # 64%
+        "Obj. ACC/DEC": (35, 28),                # 80%
+    },
+    "3ème Ligne": {
+        "Objectif Distance (m)": (5500, 4125),  # 75%
+        "Obj. HSR": (450, 380),                  # 84%
+        "Obj. VHSR": (100, 82),                  # 82%
+        "Obj. ACC/DEC": (45, 41),                # 91%
+    },
+    "Trois-quarts": {
+        "Objectif Distance (m)": (6200, 5580),  # 90%
+        "Obj. HSR": (700, 620),                  # 89%
+        "Obj. VHSR": (250, 215),                 # 86%
+        "Obj. ACC/DEC": (50, 47),                # 94%
+    },
+}
+
 
 def get_template_path() -> Optional[str]:
     """
@@ -78,7 +108,119 @@ def get_template_path() -> Optional[str]:
 
 
 # ==============================================================================
-# 1. PARSING ROBUSTE & CONVERSION NUMÉRIQUE / TEMPORELLE
+# 1. DATA VISUALISATION PLOTLY (STYLE CANVA ÉPURÉ)
+# ==============================================================================
+
+def creer_graphique_jauge(titre: str, val_objectif: float, val_realise: float) -> go.Figure:
+    """
+    Génère un graphique à barres (Bar Chart) stylisé inspiré du design Canva :
+    - Deux barres côte à côte : 'Objectif' (Bleu roi/marine) et 'Réalisé' (Rouge/Bordeaux).
+    - Valeur brute affichée au-dessus de chaque barre.
+    - Pourcentage d'accomplissement (ex: '55%') affiché en grand texte blanc et gras à l'intérieur
+      de la barre 'Réalisé'.
+    - Design minimaliste : fond transparent, sans grille, sans axe Y, typographie moderne sans-serif.
+    """
+    val_obj = float(val_objectif)
+    val_real = float(val_realise)
+    pct = (val_real / val_obj * 100) if val_obj > 0 else 0.0
+
+    # Formatage lisible des valeurs brutes au-dessus des barres (séparateur de milliers)
+    fmt_obj = f"{int(round(val_obj)):,d}".replace(",", " ") if abs(val_obj - round(val_obj)) < 0.01 else f"{val_obj:.1f}"
+    fmt_real = f"{int(round(val_real)):,d}".replace(",", " ") if abs(val_real - round(val_real)) < 0.01 else f"{val_real:.1f}"
+
+    max_val = max(val_obj, val_real, 1.0)
+    y_max = max_val * 1.30  # Marge supérieure pour éviter que le texte ne soit tronqué
+
+    fig = go.Figure()
+
+    # Barres Objectif et Réalisé
+    fig.add_trace(go.Bar(
+        x=["Objectif", "Réalisé"],
+        y=[val_obj, val_real],
+        marker=dict(
+            color=[COLOR_OBJECTIF, COLOR_REALISE],
+            line=dict(width=0),
+            cornerradius=8,  # Bords arrondis pour le rendu moderne Canva
+        ),
+        text=[f"<b>{fmt_obj}</b>", f"<b>{fmt_real}</b>"],
+        textposition="outside",
+        textfont=dict(family="Segoe UI, Montserrat, Inter, sans-serif", size=13, color="#1A2B4C"),
+        width=[0.42, 0.42],
+        hovertemplate="<b>%{x}</b> : %{text}<extra></extra>",
+        showlegend=False,
+    ))
+
+    # Pourcentage d'accomplissement centré dans la barre Réalisé
+    if val_real > 0.14 * max_val:
+        y_pct = val_real * 0.50
+        font_color = "#FFFFFF"
+        font_size = 19
+    else:
+        # Si la barre est trop basse, le pourcentage se place juste au-dessus
+        y_pct = val_real + (max_val * 0.08)
+        font_color = COLOR_REALISE
+        font_size = 14
+
+    fig.add_annotation(
+        x="Réalisé",
+        y=y_pct,
+        text=f"<b>{pct:.0f}%</b>",
+        showarrow=False,
+        font=dict(family="Segoe UI, Montserrat, Inter, sans-serif", size=font_size, color=font_color),
+        align="center",
+    )
+
+    # Configuration épurée du layout
+    fig.update_layout(
+        title=dict(
+            text=f"<b>{titre}</b>",
+            font=dict(family="Segoe UI, Montserrat, Inter, sans-serif", size=14, color=COLOR_TEXT_MAIN),
+            x=0.5,
+            xanchor="center",
+            y=0.96,
+        ),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=10, r=10, t=46, b=26),
+        height=275,
+        xaxis=dict(
+            showgrid=False,
+            showline=False,
+            zeroline=False,
+            tickfont=dict(family="Segoe UI, Montserrat, Inter, sans-serif", size=12, color="#4A5568", weight="bold"),
+        ),
+        yaxis=dict(
+            showgrid=False,
+            showline=False,
+            showticklabels=False,
+            zeroline=False,
+            range=[0, y_max],
+        ),
+    )
+    return fig
+
+
+def render_dashboard_objectifs(group_name: str, metrics: Dict[str, Tuple[float, float]]) -> None:
+    """
+    Affiche 4 graphiques stylisés sur une seule ligne (st.columns(4)) pour le groupe sélectionné.
+    """
+    col1, col2, col3, col4 = st.columns(4)
+    metric_keys = list(metrics.keys())
+
+    cols = [col1, col2, col3, col4]
+    for idx, key in enumerate(metric_keys[:4]):
+        val_obj, val_real = metrics[key]
+        fig = creer_graphique_jauge(key, val_obj, val_real)
+        with cols[idx]:
+            st.plotly_chart(
+                fig,
+                use_container_width=True,
+                config={"displayModeBar": False},  # Masque la barre d'outils Plotly pour un effet Canva
+            )
+
+
+# ==============================================================================
+# 2. PARSING ROBUSTE & CONVERSION NUMÉRIQUE / TEMPORELLE
 # ==============================================================================
 
 def parse_duration_to_minutes(val: Any) -> float:
@@ -131,10 +273,7 @@ def parse_duration_to_minutes(val: Any) -> float:
 
 def parse_duration_series(series: pd.Series, col_name: str = "") -> pd.Series:
     """
-    Convertit une série complète de durées Catapult en minutes réelles (float) :
-    1. Détecte si le format texte contient des séparateurs 'HH:MM:SS'.
-    2. Prend en compte l'unité spécifiée dans le nom de colonne (ms, s, min).
-    3. Analyse la distribution numérique pour différencier secondes, millisecondes et minutes.
+    Convertit une série complète de durées Catapult en minutes réelles (float).
     """
     if series.empty:
         return pd.Series(dtype=float)
@@ -170,7 +309,6 @@ def parse_duration_series(series: pd.Series, col_name: str = "") -> pd.Series:
 def clean_numeric_value(val: Any) -> float:
     """
     Convertit une valeur quelconque contenant éventuellement une virgule en float.
-    Remplace les virgules ',' par des points '.' et gère les espaces insécables.
     """
     if pd.isna(val) or val is None or val == "":
         return 0.0
@@ -185,18 +323,15 @@ def clean_numeric_value(val: Any) -> float:
 
 def find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     """
-    Recherche une colonne correspondant à une liste de candidats (insensible à la casse,
-    aux espaces multiples et aux variations d'accents basiques).
+    Recherche une colonne correspondant à une liste de candidats.
     """
     col_map = {re.sub(r"\s+", " ", str(c).strip().lower()): c for c in df.columns}
     
-    # 1re passe : correspondance exacte normalisée
     for candidate in candidates:
         norm_candidate = re.sub(r"\s+", " ", candidate.strip().lower())
         if norm_candidate in col_map:
             return col_map[norm_candidate]
             
-    # 2e passe : recherche par inclusion de sous-chaîne
     for candidate in candidates:
         norm_candidate = re.sub(r"\s+", " ", candidate.strip().lower())
         for norm_col, orig_col in col_map.items():
@@ -209,10 +344,7 @@ def find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
 def find_catapult_header_row(file_bytes: bytes, encoding: str = "utf-8", max_scan: int = 10) -> int:
     """
     Scanne les 10 premières lignes du fichier brut pour repérer dynamiquement
-    la ligne qui correspond au véritable en-tête du tableau (contenant 'Player Name' ou 'Date')
-    afin d'ignorer les métadonnées supérieures ("Catapult-Export...").
-
-    Retourne l'index de ligne (0-based) à fournir au paramètre `header` de pd.read_csv.
+    celle qui correspond au véritable en-tête du tableau (contenant 'Player Name' ou 'Date').
     """
     try:
         text_preview = file_bytes[:16384].decode(encoding, errors="replace")
@@ -220,7 +352,6 @@ def find_catapult_header_row(file_bytes: bytes, encoding: str = "utf-8", max_sca
     except Exception:
         return 0
 
-    # 1. Priorité 1 : Recherche explicite de la colonne "Player Name" (ou variantes directes)
     for idx, raw_line in enumerate(lines):
         line = raw_line.strip().lower()
         if not line:
@@ -228,7 +359,6 @@ def find_catapult_header_row(file_bytes: bytes, encoding: str = "utf-8", max_sca
         if any(term in line for term in ["player name", "athlete name", "nom ; prénom", "nom;prénom"]):
             return idx
 
-    # 2. Priorité 2 : Recherche de "Date" avec délimiteur ou mot-clé
     for idx, raw_line in enumerate(lines):
         line = raw_line.strip().lower()
         if not line:
@@ -237,7 +367,6 @@ def find_catapult_header_row(file_bytes: bytes, encoding: str = "utf-8", max_sca
             if any(sep in line for sep in [";", ",", "\t"]) or re.search(r'\bdate\b', line):
                 return idx
 
-    # 3. Priorité 3 : Marqueurs sportifs généraux avec délimiteurs
     for idx, raw_line in enumerate(lines):
         line = raw_line.strip().lower()
         if not line:
@@ -252,11 +381,7 @@ def find_catapult_header_row(file_bytes: bytes, encoding: str = "utf-8", max_sca
 def load_catapult_csv(file_input: Union[bytes, io.BytesIO, Any]) -> pd.DataFrame:
     """
     Lit un fichier CSV Catapult One en détectant dynamiquement le vrai header
-    parmi les 10 premières lignes (en repérant 'Player Name' ou 'Date') afin
-    d'ignorer automatiquement les lignes de métadonnées ("Catapult-Export...").
-    
-    Teste les différents encodages européens (utf-8-sig, utf-8, latin1, cp1252, iso-8859-1)
-    et séparateurs (';', ',', '\t').
+    parmi les 10 premières lignes.
     """
     if hasattr(file_input, "getvalue"):
         file_bytes = file_input.getvalue()
@@ -319,7 +444,7 @@ def load_catapult_csv(file_input: Union[bytes, io.BytesIO, Any]) -> pd.DataFrame
 
 
 # ==============================================================================
-# 2. CALCULS STAPS & INGÉNIERIE DES CARACTÉRISTIQUES (GROUPBY JOUEUR)
+# 3. CALCULS STAPS & INGÉNIERIE DES CARACTÉRISTIQUES (GROUPBY JOUEUR)
 # ==============================================================================
 
 def process_catapult_data(df_raw: pd.DataFrame) -> pd.DataFrame:
@@ -396,7 +521,7 @@ def process_catapult_data(df_raw: pd.DataFrame) -> pd.DataFrame:
     df_clean = pd.DataFrame()
     df_clean["Nom ; Prénom"] = df_raw[player_col].astype(str).str.strip()
 
-    # Temps de jeu (conversion garantie en minutes réelles float)
+    # Temps de jeu (en minutes réelles float)
     if dur_col:
         df_clean["Duration_min"] = parse_duration_series(df_raw[dur_col], col_name=dur_col)
     else:
@@ -480,7 +605,7 @@ def process_catapult_data(df_raw: pd.DataFrame) -> pd.DataFrame:
         "Dec_gt4": "sum",
     })
 
-    # Double sécurité post-groupby sur Duration_min :
+    # Double sécurité post-groupby sur Duration_min
     grouped["Duration_min"] = grouped["Duration_min"].astype(float)
     positive_durations = grouped["Duration_min"][grouped["Duration_min"] > 0]
     if len(positive_durations) > 0:
@@ -538,12 +663,11 @@ def process_catapult_data(df_raw: pd.DataFrame) -> pd.DataFrame:
     df_indiv['%VHSR'] = pct_vhsr
     df_indiv['HSR m/min'] = hsr_per_min
 
-    # Respect strict de l'ordre des colonnes de la maquette
     return df_indiv[FINAL_COLUMNS]
 
 
 # ==============================================================================
-# 3. INJECTION DANS LE TEMPLATE EXCEL VIA OPENPYXL (data_only=False)
+# 4. INJECTION DANS LE TEMPLATE EXCEL VIA OPENPYXL (data_only=False)
 # ==============================================================================
 
 def populate_template_excel(df_indiv: pd.DataFrame, df_raw: Optional[pd.DataFrame] = None) -> io.BytesIO:
@@ -656,66 +780,162 @@ def create_fallback_excel(df_indiv: pd.DataFrame) -> io.BytesIO:
 
 
 # ==============================================================================
-# 4. APPLICATION STREAMLIT (INTERFACE UTILISATEUR)
+# 5. APPLICATION STREAMLIT (INTERFACE UTILISATEUR COMPLÈTE)
 # ==============================================================================
 
 def main() -> None:
     st.set_page_config(
-        page_title="Suivi de Charge STAPS | Catapult One",
+        page_title="Dashboard & Suivi STAPS | Rugby Club Amiénois",
         page_icon="🏉",
         layout="wide",
         initial_sidebar_state="collapsed",
     )
 
+    # Styles CSS modernes et soignés (Esthétique Canva / Design épuré RCA)
     st.markdown(
         """
         <style>
         .stApp {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: 'Segoe UI', Montserrat, Tahoma, sans-serif;
+            background-color: #F8FAFC;
         }
         .main-title {
             color: #1F4E79;
-            font-size: 2.1rem;
-            font-weight: 700;
-            margin-bottom: 0.2rem;
+            font-size: 2.2rem;
+            font-weight: 800;
+            margin-bottom: 0.1rem;
+            letter-spacing: -0.5px;
         }
         .sub-title {
-            color: #555555;
+            color: #4A5568;
             font-size: 1.05rem;
-            margin-bottom: 1.5rem;
+            margin-bottom: 1.6rem;
+            font-weight: 400;
+        }
+        .section-header {
+            color: #1F4E79;
+            font-size: 1.45rem;
+            font-weight: 700;
+            margin-top: 1.2rem;
+            margin-bottom: 0.3rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .section-desc {
+            color: #64748B;
+            font-size: 0.95rem;
+            margin-bottom: 1.2rem;
+        }
+        .legend-badge-obj {
+            background-color: #2E5A88;
+            color: white;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+            font-size: 0.82rem;
+        }
+        .legend-badge-real {
+            background-color: #A30000;
+            color: white;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+            font-size: 0.82rem;
         }
         div[data-testid="stMetricValue"] {
             font-size: 1.6rem !important;
             color: #1F4E79 !important;
             font-weight: 700 !important;
         }
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 10px;
+            margin-bottom: 1rem;
+        }
+        .stTabs [data-baseweb="tab"] {
+            height: 44px;
+            white-space: pre-wrap;
+            background-color: #FFFFFF;
+            border-radius: 8px 8px 0px 0px;
+            color: #4A5568;
+            font-weight: 600;
+            font-size: 1.02rem;
+            padding: 8px 18px;
+            border: 1px solid #E2E8F0;
+            border-bottom: none;
+            transition: all 0.2s ease;
+        }
+        .stTabs [aria-selected="true"] {
+            background-color: #1F4E79 !important;
+            color: #FFFFFF !important;
+            border-color: #1F4E79 !important;
+        }
         .stDownloadButton button {
             background-color: #1F4E79 !important;
             color: white !important;
             font-weight: 600 !important;
             font-size: 1.05rem !important;
-            padding: 0.6rem 2rem !important;
-            border-radius: 6px !important;
+            padding: 0.65rem 2rem !important;
+            border-radius: 8px !important;
             border: none !important;
             width: 100% !important;
             transition: all 0.3s ease;
+            box-shadow: 0 4px 10px rgba(31, 78, 121, 0.25) !important;
         }
         .stDownloadButton button:hover {
             background-color: #163654 !important;
-            box-shadow: 0 4px 10px rgba(0,0,0,0.15) !important;
+            box-shadow: 0 6px 15px rgba(31, 78, 121, 0.35) !important;
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="main-title">🏉 Suivi Individuel des Charges STAPS</div>', unsafe_allow_html=True)
+    # Entête principal de l'application
+    st.markdown('<div class="main-title">🏉 Rugby Club Amiénois | Suivi des Charges STAPS</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="sub-title">Traitement automatisé des exports GPS bruts Catapult One & Injection dans le classeur modèle officiel</div>',
+        '<div class="sub-title">Dashboard dynamique d\'analyse athlétique GPS & Injection automatisée dans le classeur de la préparatrice physique</div>',
         unsafe_allow_html=True,
     )
 
-    # 1. Vérification de la présence du Template
+    # ==========================================================================
+    # SECTION 1 : RETOUR JOURNÉE : COMPARAISON OBJECTIF VS RÉALISÉ (DASHBOARD)
+    # ==========================================================================
+    st.markdown('<div class="section-header">📊 RETOUR JOURNÉE : Comparaison Objectif vs Réalisé</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-desc">'
+        'Rapport visuel par groupe positionnel : '
+        '<span class="legend-badge-obj">■ Objectif Séance</span> &nbsp;'
+        '<span class="legend-badge-real">■ Réalisé GPS</span> '
+        '&nbsp;(Les pourcentages d\'accomplissement sont intégrés directement dans les barres)'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Filtrage par groupe de joueurs via st.tabs
+    tab_avants, tab_3eme, tab_arrieres = st.tabs([
+        "🏉 5 de devant",
+        "🏉 3ème Ligne",
+        "🏉 Trois-quarts"
+    ])
+
+    with tab_avants:
+        render_dashboard_objectifs("5 de devant", MOCK_OBJECTIFS["5 de devant"])
+
+    with tab_3eme:
+        render_dashboard_objectifs("3ème Ligne", MOCK_OBJECTIFS["3ème Ligne"])
+
+    with tab_arrieres:
+        render_dashboard_objectifs("Trois-quarts", MOCK_OBJECTIFS["Trois-quarts"])
+
+    st.markdown("---")
+
+    # ==========================================================================
+    # SECTION 2 : IMPORTATION & TRAITEMENT DES EXPORTS GPS CATAPULT ONE
+    # ==========================================================================
+    st.markdown('<div class="section-header">📁 Traitement des Données GPS Catapult One</div>', unsafe_allow_html=True)
+
+    # Vérification de la présence du Template officiel
     template_path = get_template_path()
     if not template_path:
         st.warning(
@@ -724,9 +944,9 @@ def main() -> None:
         )
 
     uploaded_file = st.file_uploader(
-        "Importer l'export brut CSV Catapult One :",
+        "Importer l'export brut CSV Catapult One / PlayerTek / OpenField :",
         type=["csv", "txt"],
-        help="Accepte les exports bruts avec ou sans métadonnées supérieures (détection dynamique du header 'Player Name' ou 'Date').",
+        help="Détection dynamique de l'en-tête réel ('Player Name' ou 'Date') et conversion automatique du temps de jeu en minutes.",
     )
 
     if uploaded_file is not None:
@@ -750,7 +970,7 @@ def main() -> None:
             with kpi_cols[3]:
                 st.metric("Total Haute Intensité", f"{df_indiv[' Distance haute intensité (m)'].sum():.0f} m")
 
-            st.markdown("### 📋 Tableau de Synthèse Individuelle STAPS (`df_indiv`)")
+            st.markdown("### 📋 Synthèse Individuelle STAPS (`df_indiv`)")
             
             # Formatage du DataFrame pour l'affichage interactif : arrondi à 2 décimales
             df_indiv['Temps de jeu '] = df_indiv['Temps de jeu '].astype(float)
@@ -759,8 +979,8 @@ def main() -> None:
             
             st.dataframe(df_indiv, use_container_width=True, hide_index=True)
 
-            # 2. Injection dans le Template ou Fallback
-            st.markdown("### 📥 Télécharger le Fichier Excel")
+            # Export Excel : Injection dans le modèle officiel de la préparatrice
+            st.markdown("### 📥 Télécharger le Fichier Excel de Séance")
             if template_path:
                 excel_buffer = populate_template_excel(df_indiv=df_indiv, df_raw=df_raw)
                 st.download_button(
@@ -768,7 +988,7 @@ def main() -> None:
                     data=excel_buffer.getvalue(),
                     file_name=OUTPUT_DOWNLOAD_FILENAME,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    help="Télécharge le classeur officiel complet avec tous les onglets et formules actualisées.",
+                    help="Télécharge le classeur officiel complet avec tous les onglets d'origine et les formules actualisées.",
                 )
             else:
                 fallback_buffer = create_fallback_excel(df_indiv=df_indiv)
@@ -777,7 +997,7 @@ def main() -> None:
                     data=fallback_buffer.getvalue(),
                     file_name=OUTPUT_DOWNLOAD_FILENAME,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    help="Fichier de secours sans les onglets modèles annexes.",
+                    help="Fichier de secours généré sans les onglets modèles annexes.",
                 )
 
         except Exception as e:
@@ -785,7 +1005,7 @@ def main() -> None:
             with st.expander("Détails techniques de l'erreur"):
                 st.exception(e)
     else:
-        st.info("👋 Veuillez téléverser un export brut CSV Catapult One pour générer la synthèse STAPS.")
+        st.info("👋 Veuillez téléverser un export brut CSV Catapult One pour générer la synthèse STAPS et mettre à jour le modèle.")
 
 
 if __name__ == "__main__":

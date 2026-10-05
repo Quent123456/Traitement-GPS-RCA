@@ -1,0 +1,19 @@
+Athlete Name;Period Name;Position;Total Distance (m);Max Velocity (km/h);Player Load;HSR Distance (>5m/s);Accélérations (>3m/s2);Décélérations (<-3m/s2)
+Antoine Dupont;Split_Echauffement;Demi de mêlée;1245,5;26,4;135,2;110,5;7;5
+Romain Ntamack;Split_Echauffement;Demi d'ouverture;1190,0;25,8;128,7;92,0;6;4
+Thomas Ramos;Split_Echauffement;Arrière;1310,2;27,1;142,0;125,4;8;6
+Julien Marchand;Split_Echauffement;Talonneur;1050,4;22,1;115,3;45,0;4;3
+Cyril Baille;Split_Echauffement;Pilier gauche;980,6;21,5;110,8;38,2;3;3
+Charles Ollivon;Split_Echauffement;Troisième ligne aile;1270,0;25,2;138,5;105,0;6;5
+Antoine Dupont;Split_Attaque_Ligne;Demi de mêlée;2450,8;31,4;265,1;345,6;16;12
+Romain Ntamack;Split_Attaque_Ligne;Demi d'ouverture;2380,2;29,8;248,3;315,0;13;10
+Thomas Ramos;Split_Attaque_Ligne;Arrière;2600,5;32,1;278,9;390,2;18;14
+Julien Marchand;Split_Attaque_Ligne;Talonneur;1850,0;24,8;205,4;120,5;9;8
+Cyril Baille;Split_Attaque_Ligne;Pilier gauche;1720,4;23,2;198,0;95,0;8;7
+Charles Ollivon;Split_Attaque_Ligne;Troisième ligne aile;2420,1;28,9;255,6;280,4;14;11
+Antoine Dupont;Split_Opposition_Reelle;Demi de mêlée;1920,4;32,8;215,7;285,4;12;10
+Romain Ntamack;Split_Opposition_Reelle;Demi d'ouverture;1810,6;29,2;198,4;240,0;10;8
+Thomas Ramos;Split_Opposition_Reelle;Arrière;2050,0;33,2;230,1;310,8;14;12
+Julien Marchand;Split_Opposition_Reelle;Talonneur;1540,2;25,1;182,3;110,2;8;7
+Cyril Baille;Split_Opposition_Reelle;Pilier gauche;1480,9;23,9;175,0;85,6;7;6
+Charles Ollivon;Split_Opposition_Reelle;Troisième ligne aile;1980,3;29,8;222,0;260,1;11;9
