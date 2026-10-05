@@ -1128,7 +1128,7 @@ def main() -> None:
     )
 
     # Entête principal de l'application
-    st.markdown('<div class="main-title">🏉 Rugby Club Amiénois | Suivi des Charges STAPS</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-title">🏉 Rugby Club Amiénois | Suivi des Charges GPS</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="sub-title">Dashboard dynamique d\'analyse athlétique GPS & Injection automatisée dans le classeur de la préparatrice physique</div>',
         unsafe_allow_html=True,
