@@ -90,6 +90,34 @@ MOCK_OBJECTIFS: Dict[str, Dict[str, Tuple[float, float]]] = {
     },
 }
 
+# Données simulées (Mock Data) pour le Podium des Tops de la Séance
+MOCK_PODIUM: Dict[str, Dict[str, Any]] = {
+    "Vitesse Max (km/h)": {
+        "icon": "⚡",
+        "players": [
+            {"rank": 1, "name": "Antoine D.", "stat": "32.4 km/h", "seed": "Antoine+D"},
+            {"rank": 2, "name": "Thomas L.", "stat": "31.8 km/h", "seed": "Thomas+L"},
+            {"rank": 3, "name": "Lucas M.", "stat": "31.1 km/h", "seed": "Lucas+M"},
+        ],
+    },
+    "% de marche": {
+        "icon": "🚶",
+        "players": [
+            {"rank": 1, "name": "Paul B.", "stat": "58.4 %", "seed": "Paul+B"},
+            {"rank": 2, "name": "Julien R.", "stat": "56.2 %", "seed": "Julien+R"},
+            {"rank": 3, "name": "Maxime G.", "stat": "54.8 %", "seed": "Maxime+G"},
+        ],
+    },
+    "Distance Haute Intensité (m)": {
+        "icon": "🔥",
+        "players": [
+            {"rank": 1, "name": "Romain C.", "stat": "742 m", "seed": "Romain+C"},
+            {"rank": 2, "name": "Clément V.", "stat": "685 m", "seed": "Clement+V"},
+            {"rank": 3, "name": "Nicolas F.", "stat": "610 m", "seed": "Nicolas+F"},
+        ],
+    },
+}
+
 
 def get_template_path() -> Optional[str]:
     """
@@ -217,6 +245,88 @@ def render_dashboard_objectifs(group_name: str, metrics: Dict[str, Tuple[float, 
                 use_container_width=True,
                 config={"displayModeBar": False},  # Masque la barre d'outils Plotly pour un effet Canva
             )
+
+
+def render_podium_section(podium_data: Dict[str, Dict[str, Any]]) -> None:
+    """
+    Affiche la section Podium (Style Canva) avec les Tops de la séance :
+    - Séparateur visuel st.divider() et sous-titre '🏆 PODIUM : Les Tops de la Séance'.
+    - st.columns(3) pour diviser la largeur en 3 blocs verticaux égaux :
+      * 'Vitesse Max (km/h)'
+      * '% de marche'
+      * 'Distance Haute Intensité (m)'
+    - Pour chaque catégorie :
+      * Le 1er (vainqueur) est mis en valeur au sommet avec un avatar plus grand (78px),
+        un badge doré 🥇 et un fond dégradé doux.
+      * Le 2ème (🥈) et le 3ème (🥉) sont disposés côte à côte juste en dessous avec
+        un avatar compact (52px).
+      * Avatars circulaires dynamiques générés via l'API Dicebear (fond bleu RCA #2E5A88).
+      * Statistiques en gras et mise en valeur en bordeaux RCA (#A30000).
+    """
+    st.divider()
+    st.markdown('<div class="section-header">🏆 PODIUM : Les Tops de la Séance</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-desc">'
+        'Mise à l\'honneur des meilleures performances individuelles de la séance sur les métriques athlétiques clés.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    col1, col2, col3 = st.columns(3)
+    cols = [col1, col2, col3]
+    categories = list(podium_data.keys())
+
+    for idx, cat_name in enumerate(categories):
+        cat_info = podium_data[cat_name]
+        players = cat_info["players"]
+        p1, p2, p3 = players[0], players[1], players[2]
+
+        card_html = f"""
+        <div class="podium-card-container">
+            <div class="podium-category-header">
+                <span class="podium-cat-icon">{cat_info['icon']}</span>
+                <span class="podium-cat-title">{cat_name}</span>
+            </div>
+
+            <!-- 1er / Vainqueur de la catégorie (Mise en avant au sommet) -->
+            <div class="podium-winner-box">
+                <div class="podium-rank-badge rank-1">🥇 1er</div>
+                <div class="avatar-wrapper">
+                    <img src="https://api.dicebear.com/7.x/initials/svg?seed={p1['seed']}&backgroundColor=2E5A88" 
+                         alt="{p1['name']}" class="podium-avatar img-winner" />
+                </div>
+                <div class="podium-player-name name-winner">{p1['name']}</div>
+                <div class="podium-player-stat stat-winner">{p1['stat']}</div>
+            </div>
+
+            <!-- 2ème et 3ème côte à côte juste en dessous -->
+            <div class="podium-runners-row">
+                <!-- 2ème -->
+                <div class="podium-runner-box">
+                    <div class="podium-rank-badge rank-2">🥈 2ème</div>
+                    <div class="avatar-wrapper">
+                        <img src="https://api.dicebear.com/7.x/initials/svg?seed={p2['seed']}&backgroundColor=2E5A88" 
+                             alt="{p2['name']}" class="podium-avatar img-runner" />
+                    </div>
+                    <div class="podium-player-name">{p2['name']}</div>
+                    <div class="podium-player-stat">{p2['stat']}</div>
+                </div>
+
+                <!-- 3ème -->
+                <div class="podium-runner-box">
+                    <div class="podium-rank-badge rank-3">🥉 3ème</div>
+                    <div class="avatar-wrapper">
+                        <img src="https://api.dicebear.com/7.x/initials/svg?seed={p3['seed']}&backgroundColor=2E5A88" 
+                             alt="{p3['name']}" class="podium-avatar img-runner" />
+                    </div>
+                    <div class="podium-player-name">{p3['name']}</div>
+                    <div class="podium-player-stat">{p3['stat']}</div>
+                </div>
+            </div>
+        </div>
+        """
+        with cols[idx]:
+            st.markdown(card_html, unsafe_allow_html=True)
 
 
 # ==============================================================================
@@ -886,6 +996,132 @@ def main() -> None:
             background-color: #163654 !important;
             box-shadow: 0 6px 15px rgba(31, 78, 121, 0.35) !important;
         }
+
+        /* Cartes Podium (Esthétique Canva / RCA) */
+        .podium-card-container {
+            background-color: #FFFFFF;
+            border: 1px solid #E2E8F0;
+            border-radius: 14px;
+            padding: 18px 14px;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.04);
+            margin-bottom: 0.5rem;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        .podium-card-container:hover {
+            box-shadow: 0 6px 20px rgba(46, 90, 136, 0.12);
+        }
+        .podium-category-header {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #F1F5F9;
+            margin-bottom: 14px;
+        }
+        .podium-cat-icon {
+            font-size: 1.3rem;
+        }
+        .podium-cat-title {
+            font-size: 1.08rem;
+            font-weight: 700;
+            color: #1F4E79;
+            letter-spacing: -0.2px;
+        }
+        .podium-winner-box {
+            background: linear-gradient(180deg, #F0F7FF 0%, #FFFFFF 100%);
+            border: 1.5px solid #BFDBFE;
+            border-radius: 12px;
+            padding: 14px 10px;
+            text-align: center;
+            margin-bottom: 12px;
+            box-shadow: 0 3px 10px rgba(46, 90, 136, 0.08);
+            position: relative;
+        }
+        .podium-rank-badge {
+            display: inline-block;
+            font-size: 0.8rem;
+            font-weight: 700;
+            padding: 2px 10px;
+            border-radius: 12px;
+            margin-bottom: 8px;
+        }
+        .rank-1 {
+            background-color: #FEF3C7;
+            color: #92400E;
+            border: 1px solid #FDE68A;
+        }
+        .rank-2 {
+            background-color: #F1F5F9;
+            color: #475569;
+            border: 1px solid #E2E8F0;
+        }
+        .rank-3 {
+            background-color: #FFEDD5;
+            color: #9A3412;
+            border: 1px solid #FED7AA;
+        }
+        .avatar-wrapper {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .podium-avatar {
+            border-radius: 50%;
+            object-fit: cover;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+        }
+        .img-winner {
+            width: 78px;
+            height: 78px;
+            border: 3px solid #2E5A88;
+        }
+        .img-runner {
+            width: 52px;
+            height: 52px;
+            border: 2px solid #CBD5E1;
+        }
+        .podium-player-name {
+            font-weight: 700;
+            color: #1E293B;
+            font-size: 0.95rem;
+            margin-top: 4px;
+            line-height: 1.2;
+        }
+        .name-winner {
+            font-size: 1.05rem;
+            font-weight: 800;
+            color: #1F4E79;
+        }
+        .podium-player-stat {
+            color: #A30000;
+            font-weight: 800;
+            font-size: 1.15rem;
+            margin-top: 3px;
+            letter-spacing: -0.3px;
+        }
+        .stat-winner {
+            font-size: 1.35rem;
+            margin-top: 4px;
+        }
+        .podium-runners-row {
+            display: flex;
+            gap: 10px;
+            justify-content: space-between;
+        }
+        .podium-runner-box {
+            flex: 1;
+            background-color: #F8FAFC;
+            border: 1px solid #E2E8F0;
+            border-radius: 10px;
+            padding: 10px 6px;
+            text-align: center;
+            transition: background-color 0.2s ease;
+        }
+        .podium-runner-box:hover {
+            background-color: #F1F5F9;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -927,6 +1163,11 @@ def main() -> None:
 
     with tab_arrieres:
         render_dashboard_objectifs("Trois-quarts", MOCK_OBJECTIFS["Trois-quarts"])
+
+    # ==========================================================================
+    # SECTION 2 : PODIUM : LES TOPS DE LA SÉANCE
+    # ==========================================================================
+    render_podium_section(MOCK_PODIUM)
 
     st.markdown("---")
 
