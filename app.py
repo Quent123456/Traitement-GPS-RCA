@@ -647,42 +647,63 @@ def load_catapult_file(uploaded_file: Any) -> pd.DataFrame:
 # 4. MAPPING GPS DYNAMIQUE & INTELLIGENT (EFFECTIF DU CLUB)
 # ==============================================================================
 
-def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Dict[str, str]:
+def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Dict[Union[int, str], str]:
     """
-    Interface dynamique d'attribution GPS :
-    - Analyse le DataFrame brut (df_raw) pour détecter automatiquement TOUS les identifiants
-      uniques présents dans la colonne joueur/boîtier (ex: "1", "2", "Bam's", "1Er Mi Temps").
-    - Génère UNIQUEMENT autant de sélecteurs (st.selectbox) qu'il y a de boîtiers réellement utilisés.
-    - Utilise format_func pour afficher "Nom Prénom - Poste" (ex: "SALUA Noam - Pilier")
-      tout en retournant UNIQUEMENT le nom du joueur dans la valeur finale.
-    - Persiste les choix en session_state et affiche la photo du joueur sélectionné.
+    Interface dynamique d'attribution des boîtiers GPS :
+    - Filtre et extrait uniquement les numéros de boîtiers GPS présents dans df_raw.
+    - Convertit les identifiants en entiers (int) et les trie par ordre croissant (1, 2, 3...).
+    - Génère STRICTEMENT autant de sélecteurs (st.selectbox) qu'il y a de boîtiers réellement utilisés.
+    - Utilise format_func pour afficher 'Nom Prénom - Poste' tout en retournant le nom du joueur.
+    - Affiche la photo officielle du joueur sélectionné ou l'avatar RCA.
     """
-    st.markdown('<div class="section-header">📡 Attribution Dynamique des Boîtiers GPS</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">📡 Attribution des Boîtiers GPS aux Joueurs</div>', unsafe_allow_html=True)
 
-    # 1. Détection dynamique des identifiants présents dans le fichier brut
-    identifiants_gps: List[str] = []
+    # 1. Extraction et tri numérique des identifiants GPS
+    boitiers_gps: List[int] = []
     if df_raw is not None and not df_raw.empty:
         col_id = find_column(df_raw, [
             "Player Name", "Athlete Name", "Nom ; Prénom", "Player", "Athlete", "Joueur", "Nom", "Name"
         ])
         if col_id and col_id in df_raw.columns:
-            raw_vals = df_raw[col_id].dropna().astype(str).str.strip()
-            seen = set()
-            for val in raw_vals:
-                if val and val.lower() not in ["nan", "none", ""] and val not in seen:
-                    seen.add(val)
-                    identifiants_gps.append(val)
+            nums_trouves: set[int] = set()
+            for val in df_raw[col_id].dropna():
+                val_str = str(val).strip()
+                # Conversion directe si entier ou flottant entier (ex: 1, 1.0, "1", "1.0")
+                try:
+                    num_float = float(val_str)
+                    if num_float.is_integer() and num_float > 0:
+                        nums_trouves.add(int(num_float))
+                        continue
+                except (ValueError, TypeError):
+                    pass
 
-    # Repli automatique si aucun identifiant n'est extrait
-    if not identifiants_gps:
-        identifiants_gps = [f"GPS {i}" for i in range(1, 23)]
+                # Extraction regex si chaîne du type "GPS 1", "Boîtier 12", etc.
+                match = re.search(r"\b(\d+)\b", val_str)
+                if match:
+                    try:
+                        n = int(match.group(1))
+                        if n > 0:
+                            nums_trouves.add(n)
+                    except (ValueError, TypeError):
+                        pass
+
+            boitiers_gps = sorted(list(nums_trouves))
+
+    # Si aucun boîtier numérique n'a été détecté dans le fichier (ex: données de démo ou déjà nommées)
+    if not boitiers_gps:
+        if df_raw is not None and not df_raw.empty:
+            st.info("ℹ️ Les données contiennent déjà des noms de joueurs ou aucun numéro de boîtier GPS n'a été détecté.")
+            return {}
+        # Mode démo ou affichage initial par défaut : 22 boîtiers
+        boitiers_gps = list(range(1, 23))
 
     st.caption(
-        f"**{len(identifiants_gps)} boîtier(s) identifié(s)** sur cette séance. "
-        "Attribuez chaque identifiant au joueur correspondant dans l'effectif sénior RCA :"
+        f"**{len(boitiers_gps)} boîtier(s) GPS identifié(s)** sur cette séance "
+        f"(du boîtier n°{boitiers_gps[0]} au boîtier n°{boitiers_gps[-1]}). "
+        "Attribuez chaque boîtier à son joueur :"
     )
 
-    # 2. Construction de la liste des joueurs disponibles (triée)
+    # 2. Liste des joueurs RCA disponibles (tri alphabétique)
     placeholder = "— Sélectionner un joueur —"
     noms_joueurs_tries = sorted(list(joueurs_data.keys()))
     options = [placeholder] + noms_joueurs_tries
@@ -699,53 +720,30 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Dict[str, str]:
     if "gps_mapping" not in st.session_state:
         st.session_state["gps_mapping"] = {}
 
-    # Pré-sélection intelligente (surnom, prénom, numéro déjà saisi)
-    def pre_selectionner_joueur(identifiant: str) -> Optional[str]:
-        # 1. Sélection sauvegardée
-        if identifiant in st.session_state["gps_mapping"]:
-            prev = st.session_state["gps_mapping"][identifiant]
-            if prev in options:
-                return prev
-
-        id_lower = identifiant.lower()
-        # 2. Surnoms courants
-        if "bam" in id_lower:
-            return "BAMIERE Clément"
-        if "ope" in id_lower:
-            return "PELESEUMA Ope"
-        if "tij" in id_lower or "jean-étienne" in id_lower:
-            return "LESUEUR Jean-Étienne"
-        if "gabin" in id_lower:
-            return "DENIER Gabin"
-
-        # 3. Correspondance exacte ou partielle avec un nom de la liste
-        for j in noms_joueurs_tries:
-            if j.lower() == id_lower or id_lower in j.lower():
-                return j
-        return None
-
-    mapping: Dict[str, str] = {}
+    mapping: Dict[Union[int, str], str] = {}
     col_gauche, col_droite = st.columns(2)
-    split_index = (len(identifiants_gps) + 1) // 2
+    split_index = (len(boitiers_gps) + 1) // 2
 
-    for idx, identifiant in enumerate(identifiants_gps):
+    # 3. Boucle stricte sur la liste triée des numéros de boîtiers
+    for idx, num_gps in enumerate(boitiers_gps):
         conteneur = col_gauche if idx < split_index else col_droite
 
         with conteneur:
             c_photo, c_select = st.columns([1, 3])
 
-            default_val = pre_selectionner_joueur(identifiant)
-            default_idx = options.index(default_val) if default_val in options else 0
-
-            safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", f"gps_sel_{identifiant}_{idx}")
+            prev = (
+                st.session_state["gps_mapping"].get(num_gps)
+                or st.session_state["gps_mapping"].get(str(num_gps))
+            )
+            default_idx = options.index(prev) if prev in options else 0
 
             with c_select:
                 choix = st.selectbox(
-                    f"Boîtier : {identifiant}",
+                    f"Boîtier GPS n°{num_gps}",
                     options=options,
                     index=default_idx,
                     format_func=format_affichage_joueur,
-                    key=safe_key,
+                    key=f"gps_sel_boitier_{num_gps}",
                 )
 
             with c_photo:
@@ -764,16 +762,19 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Dict[str, str]:
                     )
 
             if choix != placeholder:
-                mapping[identifiant] = choix
+                mapping[num_gps] = choix
+                mapping[str(num_gps)] = choix
+                st.session_state["gps_mapping"][num_gps] = choix
+                st.session_state["gps_mapping"][str(num_gps)] = choix
 
-    st.session_state["gps_mapping"] = mapping
     return mapping
 
 
-def appliquer_mapping(df_catapult: pd.DataFrame, dictionnaire_gps: Dict[str, str]) -> pd.DataFrame:
+def appliquer_mapping(df_catapult: pd.DataFrame, dictionnaire_gps: Dict[Union[int, str], str]) -> pd.DataFrame:
     """
-    Remplace les identifiants bruts (ex: '1', 'Bam's', '1Er Mi Temps') dans la colonne joueur
-    par les noms officiels sélectionnés.
+    Remplace les numéros de boîtiers GPS dans la colonne joueur
+    par les noms officiels sélectionnés de l'effectif.
+    Gère de façon robuste les types int, float (1.0), et str ('1', '1.0').
     """
     if not dictionnaire_gps:
         return df_catapult
@@ -785,12 +786,44 @@ def appliquer_mapping(df_catapult: pd.DataFrame, dictionnaire_gps: Dict[str, str
     if not player_col:
         return df
 
-    # Normalisation du dictionnaire
-    dict_norm = {str(k).strip(): v for k, v in dictionnaire_gps.items()}
+    # Normalisation du dictionnaire avec toutes les variantes de clés
+    dict_map: Dict[Any, str] = {}
+    for k, v in dictionnaire_gps.items():
+        if not v:
+            continue
+        dict_map[k] = v
+        dict_map[str(k).strip()] = v
+        try:
+            k_num = float(str(k).strip())
+            if k_num.is_integer():
+                k_int = int(k_num)
+                dict_map[k_int] = v
+                dict_map[float(k_int)] = v
+                dict_map[str(k_int)] = v
+                dict_map[f"{k_int}.0"] = v
+        except (ValueError, TypeError):
+            pass
 
-    # Remplacement direct sur la série
-    s_player = df[player_col].astype(str).str.strip()
-    df[player_col] = s_player.map(dict_norm).fillna(df[player_col])
+    def _remplacer_id(val: Any) -> Any:
+        if pd.isna(val) or val is None:
+            return val
+        if val in dict_map:
+            return dict_map[val]
+        val_str = str(val).strip()
+        if val_str in dict_map:
+            return dict_map[val_str]
+        val_clean = re.sub(r"\.0$", "", val_str)
+        if val_clean in dict_map:
+            return dict_map[val_clean]
+        try:
+            n = float(val_str)
+            if n.is_integer() and int(n) in dict_map:
+                return dict_map[int(n)]
+        except (ValueError, TypeError):
+            pass
+        return val
+
+    df[player_col] = df[player_col].apply(_remplacer_id)
     return df
 
 
