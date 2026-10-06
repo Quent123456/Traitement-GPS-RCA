@@ -23,6 +23,7 @@ Description :
 from __future__ import annotations
 
 import base64
+import datetime
 import io
 import os
 import re
@@ -30,6 +31,7 @@ import textwrap
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from fpdf import FPDF
 import numpy as np
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -1278,6 +1280,188 @@ def create_fallback_excel(df_indiv: pd.DataFrame) -> io.BytesIO:
 
 
 # ==============================================================================
+# 7b. GÉNÉRATION DU RAPPORT PDF POUR LES COACHS (FPDF)
+# ==============================================================================
+
+def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[str] = None) -> bytes:
+    """
+    Génère un rapport PDF synthétique et élégant destiné aux coachs (staff technique RCA).
+    - Format A4 paysage pour une lisibilité maximale de toutes les colonnes.
+    - En-tête officiel 'Rapport de Séance GPS - RCA' avec date de la séance.
+    - Synthèse des indicateurs globaux d'équipe (KPIs).
+    - Tableau récapitulatif trié par groupe puis distance avec toutes les métriques clés.
+    """
+    class RCACoachPDF(FPDF):
+        def header(self):
+            # Bandeau supérieur bleu RCA
+            self.set_fill_color(31, 78, 121)  # #1F4E79
+            self.rect(0, 0, 297, 16, style="F")
+
+            self.set_xy(12, 3)
+            self.set_font("Helvetica", "B", 13)
+            self.set_text_color(255, 255, 255)
+            self.cell(150, 10, "RUGBY CLUB AMIÉNOIS  |  Rapport de Séance GPS - RCA", align="L")
+
+            today_str = date_seance or datetime.date.today().strftime("%d/%m/%Y")
+            self.set_xy(170, 3)
+            self.set_font("Helvetica", "", 10)
+            self.set_text_color(226, 232, 240)
+            self.cell(115, 10, f"Séance du : {today_str}", align="R")
+
+            self.set_text_color(30, 41, 59)
+            self.set_y(20)
+
+        def footer(self):
+            self.set_y(-12)
+            self.set_font("Helvetica", "I", 8)
+            self.set_text_color(148, 163, 184)
+            self.cell(0, 8, f"Document Staff Technique RCA - Page {self.page_no()}", align="C")
+
+    pdf = RCACoachPDF(orientation="L", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_margins(left=12, top=20, right=12)
+    pdf.add_page()
+
+    if df_indiv.empty:
+        pdf.set_font("Helvetica", "", 12)
+        pdf.cell(0, 10, "Aucune donnée de joueur disponible pour ce rapport.", ln=True)
+        return bytes(pdf.output())
+
+    # 1. Encarts KPIs globaux de Séance
+    nb_joueurs = len(df_indiv)
+    dist_tot = df_indiv["Distance (km)"].sum()
+    dist_moy = df_indiv["Distance (km)"].mean()
+    vmax = df_indiv["Top Speed (km/h)"].max()
+    hsr_tot = df_indiv[" Distance haute intensité (m)"].sum()
+
+    kpis = [
+        ("Joueurs Analysés", f"{nb_joueurs}"),
+        ("Distance Cumulée", f"{dist_tot:.1f} km"),
+        ("Moyenne / Joueur", f"{dist_moy:.2f} km"),
+        ("Vitesse Max Séance", f"{vmax:.1f} km/h"),
+        ("Total Haute Intensité", f"{int(round(hsr_tot)):,d} m".replace(",", " ")),
+    ]
+
+    card_w = 273 / len(kpis)
+    pdf.set_y(22)
+    for title, val in kpis:
+        x_curr = pdf.get_x()
+        y_curr = pdf.get_y()
+        # Fond de la carte KPI
+        pdf.set_fill_color(241, 245, 249)
+        pdf.set_draw_color(203, 213, 225)
+        pdf.rect(x_curr, y_curr, card_w - 2, 13, style="FD")
+
+        pdf.set_xy(x_curr, y_curr + 1)
+        pdf.set_font("Helvetica", "", 7.5)
+        pdf.set_text_color(100, 116, 139)
+        pdf.cell(card_w - 2, 4, title, align="C")
+
+        pdf.set_xy(x_curr, y_curr + 5.5)
+        pdf.set_font("Helvetica", "B", 10.5)
+        pdf.set_text_color(31, 78, 121)
+        pdf.cell(card_w - 2, 6, val, align="C")
+
+        pdf.set_xy(x_curr + card_w, y_curr)
+
+    pdf.set_y(39)
+
+    # 2. Préparation du tableau trié (Par groupe athlétique puis distance décroissante)
+    groupe_ordre = {"5 de devant": 1, "3ème Ligne": 2, "Trois-quarts": 3}
+    df_tri = df_indiv.copy()
+    df_tri["_ordre"] = df_tri["Groupe"].map(groupe_ordre).fillna(4)
+    df_tri = df_tri.sort_values(by=["_ordre", "Distance (km)"], ascending=[True, False]).drop(columns=["_ordre"])
+
+    # Configuration des colonnes (Largeur totale = 273 mm)
+    cols_def = [
+        ("Joueur", 46, "L"),
+        ("Poste", 30, "L"),
+        ("Groupe", 28, "C"),
+        ("Temps", 18, "C"),
+        ("Dist (km)", 24, "R"),
+        ("m/min", 22, "R"),
+        ("Vmax (km/h)", 25, "R"),
+        ("HSR (m)", 26, "R"),
+        ("VHSR (m)", 26, "R"),
+        ("Acc/Dec", 28, "R"),
+    ]
+
+    def render_table_header():
+        pdf.set_fill_color(46, 90, 136)  # Bleu roi RCA (#2E5A88)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_draw_color(186, 204, 224)
+        for label, w, align in cols_def:
+            pdf.cell(w, 7, label, border=1, fill=True, align=align)
+        pdf.ln(7)
+
+    render_table_header()
+
+    # Rendu des lignes de joueurs
+    pdf.set_font("Helvetica", "", 7.5)
+    for i, (_, row) in enumerate(df_tri.iterrows()):
+        if pdf.get_y() > 188:
+            pdf.add_page()
+            render_table_header()
+
+        # Alternance de couleur de ligne
+        if i % 2 == 0:
+            pdf.set_fill_color(255, 255, 255)
+        else:
+            pdf.set_fill_color(248, 250, 252)
+
+        pdf.set_text_color(30, 41, 59)
+        pdf.set_draw_color(226, 232, 240)
+
+        nom = str(row.get("Nom ; Prénom", "")).strip()
+        poste = joueurs_data.get(nom, "")
+        if not poste:
+            for j_nom, j_pos in joueurs_data.items():
+                if j_nom.lower() in nom.lower() or nom.lower() in j_nom.lower():
+                    poste = j_pos
+                    break
+        if not poste:
+            poste = "-"
+
+        grp = str(row.get("Groupe", "-")).strip()
+        tps = f"{row.get('Temps de jeu ', 0.0):.0f} min"
+        dist_km = f"{row.get('Distance (km)', 0.0):.2f}"
+        dist_min = f"{row.get('Distance Per Min (m/min)', 0.0):.0f}"
+        v_max = f"{row.get('Top Speed (km/h)', 0.0):.1f}"
+
+        # HSR en mètres (Zone 4)
+        z4_km = row.get("Distance in Speed Zone 4  (km)", 0.0)
+        hsr_m = int(round(z4_km * 1000.0)) if z4_km > 0 else int(round(row.get(" Distance haute intensité (m)", 0.0) * 0.7))
+
+        # VHSR en mètres (Zone 5)
+        z5_km = row.get("Distance in Speed Zone 5  (km)", 0.0)
+        vhsr_m = int(round(z5_km * 1000.0)) if z5_km > 0 else int(round(row.get(" Distance haute intensité (m)", 0.0) * 0.3))
+
+        acc_dec = f"{int(round(row.get('Accel/Dec', 0.0)))}"
+
+        row_vals = [
+            (nom, cols_def[0][1], cols_def[0][2]),
+            (poste, cols_def[1][1], cols_def[1][2]),
+            (grp, cols_def[2][1], cols_def[2][2]),
+            (tps, cols_def[3][1], cols_def[3][2]),
+            (dist_km, cols_def[4][1], cols_def[4][2]),
+            (dist_min, cols_def[5][1], cols_def[5][2]),
+            (v_max, cols_def[6][1], cols_def[6][2]),
+            (f"{hsr_m} m", cols_def[7][1], cols_def[7][2]),
+            (f"{vhsr_m} m", cols_def[8][1], cols_def[8][2]),
+            (acc_dec, cols_def[9][1], cols_def[9][2]),
+        ]
+
+        for val_txt, w, align in row_vals:
+            if len(val_txt) > 26 and w <= 46:
+                val_txt = val_txt[:24] + ".."
+            pdf.cell(w, 6, val_txt, border=1, fill=True, align=align)
+        pdf.ln(6)
+
+    return bytes(pdf.output())
+
+
+# ==============================================================================
 # 8. APPLICATION STREAMLIT (INTERFACE UTILISATEUR COMPLÈTE)
 # ==============================================================================
 
@@ -1702,24 +1886,54 @@ def main() -> None:
 
     st.dataframe(df_display, use_container_width=True, hide_index=True)
 
-    st.markdown("### 📥 Télécharger le Fichier Excel de Séance")
-    if template_path:
-        excel_buffer = populate_template_excel(df_indiv=df_indiv, df_raw=df_raw)
+    st.markdown("### 📥 Télécharger les Fichiers de Séance")
+    col_excel, col_pdf = st.columns(2)
+
+    with col_excel:
+        st.markdown("#### 📊 Classeur Excel Complet")
+        if template_path:
+            excel_buffer = populate_template_excel(df_indiv=df_indiv, df_raw=df_raw)
+            st.download_button(
+                label=f"📥 Télécharger {OUTPUT_DOWNLOAD_FILENAME}",
+                data=excel_buffer.getvalue(),
+                file_name=OUTPUT_DOWNLOAD_FILENAME,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Télécharge le classeur officiel complet avec tous les onglets d'origine et les formules actualisées.",
+                key="btn_download_excel",
+            )
+        else:
+            fallback_buffer = create_fallback_excel(df_indiv=df_indiv)
+            st.download_button(
+                label=f"📥 Télécharger {OUTPUT_DOWNLOAD_FILENAME} (Format de secours)",
+                data=fallback_buffer.getvalue(),
+                file_name=OUTPUT_DOWNLOAD_FILENAME,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Fichier de secours généré sans les onglets modèles annexes.",
+                key="btn_download_excel",
+            )
+
+    with col_pdf:
+        st.markdown("#### 🏉 Rapport PDF pour les Coachs")
+        # Récupération de la date de séance si disponible
+        session_date_val = None
+        if df_raw is not None:
+            c_date = find_column(df_raw, ["Date", "Session Date", "Date de séance", "Date de seance"])
+            if c_date and c_date in df_raw.columns:
+                s_d = df_raw[c_date].dropna().astype(str).str.strip()
+                if not s_d.empty:
+                    session_date_val = s_d.iloc[0]
+
+        pdf_bytes = generer_rapport_pdf_coachs(df_indiv=df_indiv, date_seance=session_date_val)
+        clean_date_tag = re.sub(r"[^0-9a-zA-Z]", "_", str(session_date_val or datetime.date.today().strftime("%d_%m_%Y")))
+        pdf_filename = f"Rapport_Seance_GPS_RCA_{clean_date_tag}.pdf"
+
         st.download_button(
-            label=f"Télécharger {OUTPUT_DOWNLOAD_FILENAME}",
-            data=excel_buffer.getvalue(),
-            file_name=OUTPUT_DOWNLOAD_FILENAME,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            help="Télécharge le classeur officiel complet avec tous les onglets d'origine et les formules actualisées.",
-        )
-    else:
-        fallback_buffer = create_fallback_excel(df_indiv=df_indiv)
-        st.download_button(
-            label=f"Télécharger {OUTPUT_DOWNLOAD_FILENAME} (Format de secours)",
-            data=fallback_buffer.getvalue(),
-            file_name=OUTPUT_DOWNLOAD_FILENAME,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            help="Fichier de secours généré sans les onglets modèles annexes.",
+            label="📄 Télécharger le Rapport PDF Coachs",
+            data=pdf_bytes,
+            file_name=pdf_filename,
+            mime="application/pdf",
+            help="Télécharge le rapport récapitulatif PDF imprimable format paysage (A4) pour le staff technique RCA.",
+            key="btn_download_pdf",
         )
 
 
