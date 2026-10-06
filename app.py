@@ -4,11 +4,12 @@ Club : Rugby Club Amiénois (RCA)
 Auteur : Expert Python / Streamlit Senior en Data Visualisation Sportive
 Description :
     Application web complète combinant :
-    1. Un Dashboard dynamique (style Canva) de comparaison Objectif vs Réalisé par groupe de joueurs
-       (5 de devant, 3ème Ligne, Trois-quarts) réalisé avec Plotly Graph Objects.
-    2. L'importation et le parsing robuste des exports bruts CSV Catapult One / PlayerTek / OpenField.
-    3. La conversion précise des durées (Timedelta HH:MM:SS, secondes, millisecondes) en minutes réelles.
-    4. L'injection directe dans le classeur modèle officiel (Modele_Vierge_STAPS.xlsx) pour préserver
+    1. Un Uploader universel (.csv et .xlsx) en haut de page avec détection dynamique du vrai header.
+    2. Un Dashboard dynamique (style Canva) de comparaison Objectif vs Réalisé connecté aux vraies données GPS
+       avec filtrage par groupe de joueurs ("5 de devant", "3ème Ligne", "Trois-quarts").
+    3. Un Podium dynamique des Tops de la séance (Top speed, % marche, Haute intensité) calculé en temps réel.
+    4. La conversion précise des durées en minutes réelles et l'agrégation par joueur (groupby).
+    5. L'injection directe dans le classeur modèle officiel (Modele_Vierge_STAPS.xlsx) pour préserver
        toutes les formules natives de la préparatrice physique, graphiques et onglets.
 """
 
@@ -18,6 +19,7 @@ import io
 import os
 import re
 import textwrap
+import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -29,17 +31,45 @@ import plotly.graph_objects as go
 import streamlit as st
 
 # ==============================================================================
-# 0. CONSTANTES, MAQUETTES ET DONNÉES DE SIMULATION (MOCK DATA)
+# 0. CONSTANTES, OBJECTIFS ATHLÉTIQUES & CONFIGURATION
 # ==============================================================================
 
 TEMPLATE_FILENAME = "Modele_Vierge_STAPS.xlsx"
 OUTPUT_DOWNLOAD_FILENAME = "Synthese_Complete_Seance.xlsx"
 
 # Palette de couleurs officielles Rugby Club Amiénois / Style Canva
-COLOR_OBJECTIF = "#2E5A88"  # Bleu roi / marine
+COLOR_OBJECTIF = "#2E5A88"  # Bleu roi / marine RCA
 COLOR_REALISE = "#A30000"   # Rouge / Bordeaux RCA
 COLOR_TEXT_MAIN = "#1F4E79"
 COLOR_MUTED = "#555555"
+
+# Objectifs athlétiques de référence par poste (Moyenne individuelle cible par séance)
+OBJECTIFS_CONFIG: Dict[str, Dict[str, float]] = {
+    "5 de devant": {
+        "Objectif Distance (m)": 4500.0,
+        "Obj. HSR": 250.0,
+        "Obj. VHSR": 50.0,
+        "Obj. ACC/DEC": 35.0,
+    },
+    "3ème Ligne": {
+        "Objectif Distance (m)": 5500.0,
+        "Obj. HSR": 450.0,
+        "Obj. VHSR": 100.0,
+        "Obj. ACC/DEC": 45.0,
+    },
+    "Trois-quarts": {
+        "Objectif Distance (m)": 6200.0,
+        "Obj. HSR": 700.0,
+        "Obj. VHSR": 250.0,
+        "Obj. ACC/DEC": 50.0,
+    },
+    "Tous les groupes": {
+        "Objectif Distance (m)": 5400.0,
+        "Obj. HSR": 460.0,
+        "Obj. VHSR": 130.0,
+        "Obj. ACC/DEC": 43.0,
+    },
+}
 
 FINAL_COLUMNS: List[str] = [
     'Nom ; Prénom',
@@ -67,64 +97,22 @@ FINAL_COLUMNS: List[str] = [
     'HSR m/min',
 ]
 
-PCT_COLUMNS_CLEAN: set[str] = {"%marche", "%course", "%hsr", "%vhsr"}
-
-# Données simulées (Mock Data) pour la visualisation immédiate de l'esthétique Canva
-MOCK_OBJECTIFS: Dict[str, Dict[str, Tuple[float, float]]] = {
-    "5 de devant": {
-        "Objectif Distance (m)": (4500, 2475),  # 55% d'accomplissement (explicitement cité)
-        "Obj. HSR": (250, 160),                  # 64%
-        "Obj. VHSR": (50, 32),                   # 64%
-        "Obj. ACC/DEC": (35, 28),                # 80%
-    },
-    "3ème Ligne": {
-        "Objectif Distance (m)": (5500, 4125),  # 75%
-        "Obj. HSR": (450, 380),                  # 84%
-        "Obj. VHSR": (100, 82),                  # 82%
-        "Obj. ACC/DEC": (45, 41),                # 91%
-    },
-    "Trois-quarts": {
-        "Objectif Distance (m)": (6200, 5580),  # 90%
-        "Obj. HSR": (700, 620),                  # 89%
-        "Obj. VHSR": (250, 215),                 # 86%
-        "Obj. ACC/DEC": (50, 47),                # 94%
-    },
-}
-
-# Données simulées (Mock Data) pour le Podium des Tops de la Séance
-MOCK_PODIUM: Dict[str, Dict[str, Any]] = {
-    "Top speed (km/h)": {
-        "icon": "⚡",
-        "players": [
-            {"rank": 1, "name": "Antoine D.", "stat": "32.4 km/h", "seed": "Antoine"},
-            {"rank": 2, "name": "Thomas L.", "stat": "31.8 km/h", "seed": "Thomas"},
-            {"rank": 3, "name": "Lucas M.", "stat": "31.1 km/h", "seed": "Lucas"},
-        ],
-    },
-    "% de marche": {
-        "icon": "🚶",
-        "players": [
-            {"rank": 1, "name": "Paul B.", "stat": "58.4 %", "seed": "Paul"},
-            {"rank": 2, "name": "Julien R.", "stat": "56.2 %", "seed": "Julien"},
-            {"rank": 3, "name": "Maxime G.", "stat": "54.8 %", "seed": "Maxime"},
-        ],
-    },
-    "Haute intensité (m)": {
-        "icon": "🔥",
-        "players": [
-            {"rank": 1, "name": "Romain C.", "stat": "742 m", "seed": "Romain"},
-            {"rank": 2, "name": "Clément V.", "stat": "685 m", "seed": "Clement"},
-            {"rank": 3, "name": "Nicolas F.", "stat": "610 m", "seed": "Nicolas"},
-        ],
-    },
-}
+# Données de simulation de secours (au cas où l'utilisateur souhaite tester sans fichier)
+MOCK_DEMO_DATA: List[Dict[str, Any]] = [
+    {"Player Name": "Antoine Dupont", "Position": "Demi de mêlée", "Distance (km)": 6.3, "Zone 4 (km)": 0.48, "Zone 5 (km)": 0.24, "Top Speed": 32.4, "Duration": "01:22:00", "Z1 (km)": 2.5, "Z2 (km)": 2.2, "Z3 (km)": 0.88, "Acc34": 18, "Acc4": 8, "Dec34": 14, "Dec4": 6},
+    {"Player Name": "Thomas Ramos", "Position": "Arrière", "Distance (km)": 6.6, "Zone 4 (km)": 0.52, "Zone 5 (km)": 0.28, "Top Speed": 31.8, "Duration": "01:22:00", "Z1 (km)": 2.6, "Z2 (km)": 2.3, "Z3 (km)": 0.90, "Acc34": 20, "Acc4": 7, "Dec34": 15, "Dec4": 5},
+    {"Player Name": "Romain Ntamack", "Position": "Demi d'ouverture", "Distance (km)": 6.0, "Zone 4 (km)": 0.44, "Zone 5 (km)": 0.20, "Top Speed": 31.1, "Duration": "01:22:00", "Z1 (km)": 2.4, "Z2 (km)": 2.1, "Z3 (km)": 0.86, "Acc34": 16, "Acc4": 6, "Dec34": 13, "Dec4": 4},
+    {"Player Name": "Charles Ollivon", "Position": "Troisième ligne", "Distance (km)": 5.6, "Zone 4 (km)": 0.41, "Zone 5 (km)": 0.11, "Top Speed": 29.5, "Duration": "01:22:00", "Z1 (km)": 2.6, "Z2 (km)": 1.8, "Z3 (km)": 0.68, "Acc34": 16, "Acc4": 6, "Dec34": 13, "Dec4": 5},
+    {"Player Name": "Paul Boudehent", "Position": "Troisième ligne", "Distance (km)": 5.4, "Zone 4 (km)": 0.38, "Zone 5 (km)": 0.09, "Top Speed": 28.8, "Duration": "01:22:00", "Z1 (km)": 2.7, "Z2 (km)": 1.7, "Z3 (km)": 0.63, "Acc34": 15, "Acc4": 5, "Dec34": 12, "Dec4": 4},
+    {"Player Name": "Grégory Alldritt", "Position": "N°8", "Distance (km)": 5.5, "Zone 4 (km)": 0.39, "Zone 5 (km)": 0.10, "Top Speed": 29.0, "Duration": "01:22:00", "Z1 (km)": 2.7, "Z2 (km)": 1.7, "Z3 (km)": 0.61, "Acc34": 15, "Acc4": 5, "Dec34": 12, "Dec4": 4},
+    {"Player Name": "Julien Marchand", "Position": "Talonneur", "Distance (km)": 4.6, "Zone 4 (km)": 0.17, "Zone 5 (km)": 0.04, "Top Speed": 26.1, "Duration": "01:18:00", "Z1 (km)": 2.9, "Z2 (km)": 1.3, "Z3 (km)": 0.23, "Acc34": 14, "Acc4": 4, "Dec34": 11, "Dec4": 3},
+    {"Player Name": "Cyril Baille", "Position": "Pilier", "Distance (km)": 4.4, "Zone 4 (km)": 0.15, "Zone 5 (km)": 0.03, "Top Speed": 25.2, "Duration": "01:15:00", "Z1 (km)": 2.8, "Z2 (km)": 1.2, "Z3 (km)": 0.22, "Acc34": 12, "Acc4": 3, "Dec34": 10, "Dec4": 2},
+    {"Player Name": "Uini Atonio", "Position": "Pilier", "Distance (km)": 4.2, "Zone 4 (km)": 0.12, "Zone 5 (km)": 0.02, "Top Speed": 24.5, "Duration": "01:15:00", "Z1 (km)": 2.8, "Z2 (km)": 1.1, "Z3 (km)": 0.18, "Acc34": 11, "Acc4": 2, "Dec34": 9, "Dec4": 2},
+]
 
 
 def get_template_path() -> Optional[str]:
-    """
-    Recherche le fichier modèle Modele_Vierge_STAPS.xlsx dans le répertoire du script
-    ou dans le répertoire de travail courant.
-    """
+    """Recherche le fichier modèle Modele_Vierge_STAPS.xlsx."""
     possible_paths = [
         os.path.join(os.path.dirname(os.path.abspath(__file__)), TEMPLATE_FILENAME),
         os.path.join(os.getcwd(), TEMPLATE_FILENAME),
@@ -137,7 +125,7 @@ def get_template_path() -> Optional[str]:
 
 
 # ==============================================================================
-# 1. DATA VISUALISATION PLOTLY (STYLE CANVA ÉPURÉ)
+# 1. DATA VISUALISATION PLOTLY & PODIUM (STYLE CANVA ÉPURÉ)
 # ==============================================================================
 
 def creer_graphique_jauge(titre: str, val_objectif: float, val_realise: float) -> go.Figure:
@@ -153,23 +141,21 @@ def creer_graphique_jauge(titre: str, val_objectif: float, val_realise: float) -
     val_real = float(val_realise)
     pct = (val_real / val_obj * 100) if val_obj > 0 else 0.0
 
-    # Formatage lisible des valeurs brutes au-dessus des barres (séparateur de milliers)
     fmt_obj = f"{int(round(val_obj)):,d}".replace(",", " ") if abs(val_obj - round(val_obj)) < 0.01 else f"{val_obj:.1f}"
     fmt_real = f"{int(round(val_real)):,d}".replace(",", " ") if abs(val_real - round(val_real)) < 0.01 else f"{val_real:.1f}"
 
     max_val = max(val_obj, val_real, 1.0)
-    y_max = max_val * 1.30  # Marge supérieure pour éviter que le texte ne soit tronqué
+    y_max = max_val * 1.30
 
     fig = go.Figure()
 
-    # Barres Objectif et Réalisé
     fig.add_trace(go.Bar(
         x=["Objectif", "Réalisé"],
         y=[val_obj, val_real],
         marker=dict(
             color=[COLOR_OBJECTIF, COLOR_REALISE],
             line=dict(width=0),
-            cornerradius=8,  # Bords arrondis pour le rendu moderne Canva
+            cornerradius=8,
         ),
         text=[f"<b>{fmt_obj}</b>", f"<b>{fmt_real}</b>"],
         textposition="outside",
@@ -179,13 +165,11 @@ def creer_graphique_jauge(titre: str, val_objectif: float, val_realise: float) -
         showlegend=False,
     ))
 
-    # Pourcentage d'accomplissement centré dans la barre Réalisé
     if val_real > 0.14 * max_val:
         y_pct = val_real * 0.50
         font_color = "#FFFFFF"
         font_size = 19
     else:
-        # Si la barre est trop basse, le pourcentage se place juste au-dessus
         y_pct = val_real + (max_val * 0.08)
         font_color = COLOR_REALISE
         font_size = 14
@@ -199,7 +183,6 @@ def creer_graphique_jauge(titre: str, val_objectif: float, val_realise: float) -
         align="center",
     )
 
-    # Configuration épurée du layout
     fig.update_layout(
         title=dict(
             text=f"<b>{titre}</b>",
@@ -230,12 +213,9 @@ def creer_graphique_jauge(titre: str, val_objectif: float, val_realise: float) -
 
 
 def render_dashboard_objectifs(group_name: str, metrics: Dict[str, Tuple[float, float]]) -> None:
-    """
-    Affiche 4 graphiques stylisés sur une seule ligne (st.columns(4)) pour le groupe sélectionné.
-    """
+    """Affiche 4 graphiques stylisés sur une seule ligne (st.columns(4))."""
     col1, col2, col3, col4 = st.columns(4)
     metric_keys = list(metrics.keys())
-
     cols = [col1, col2, col3, col4]
     for idx, key in enumerate(metric_keys[:4]):
         val_obj, val_real = metrics[key]
@@ -244,25 +224,18 @@ def render_dashboard_objectifs(group_name: str, metrics: Dict[str, Tuple[float, 
             st.plotly_chart(
                 fig,
                 use_container_width=True,
-                config={"displayModeBar": False},  # Masque la barre d'outils Plotly pour un effet Canva
+                config={"displayModeBar": False},
             )
 
 
 def render_podium_section(podium_data: Dict[str, Dict[str, Any]]) -> None:
     """
     Affiche la section Podium (Style Canva) avec les Tops de la séance :
-    - Séparateur visuel st.divider() et sous-titre '🏆 PODIUM : Les Tops de la Séance'.
-    - st.columns(3) pour diviser la largeur en 3 blocs verticaux égaux :
-      * 'Vitesse Max (km/h)'
-      * '% de marche'
-      * 'Distance Haute Intensité (m)'
-    - Pour chaque catégorie :
-      * Le 1er (vainqueur) est mis en valeur au sommet avec un avatar plus grand (78px),
-        un badge doré 🥇 et un fond dégradé doux.
-      * Le 2ème (🥈) et le 3ème (🥉) sont disposés côte à côte juste en dessous avec
-        un avatar compact (52px).
-      * Avatars circulaires dynamiques générés via l'API Dicebear (fond bleu RCA #2E5A88).
-      * Statistiques en gras et mise en valeur en bordeaux RCA (#A30000).
+    - 3 colonnes ('Top speed (km/h)', '% de marche', 'Haute intensité (m)').
+    - Le 1er est mis en valeur au sommet avec un avatar plus grand et fond dégradé.
+    - Le 2ème et le 3ème sont disposés côte à côte juste en dessous.
+    - Avatars ronds dynamiques via https://api.dicebear.com/7.x/initials/svg.
+    - Nettoyage rigoureux de l'indentation via textwrap pour éviter tout rendu de bloc de code.
     """
     st.divider()
     st.markdown('<div class="section-header">🏆 PODIUM</div>', unsafe_allow_html=True)
@@ -314,9 +287,7 @@ def render_podium_section(podium_data: Dict[str, Dict[str, Any]]) -> None:
             </div>
         """)
 
-        # Suppression absolue de toute indentation résiduelle et lignes vides
         card_html = "\n".join(line.strip() for line in raw_html.splitlines() if line.strip())
-
         with cols[idx]:
             st.markdown(card_html, unsafe_allow_html=True)
 
@@ -326,15 +297,7 @@ def render_podium_section(podium_data: Dict[str, Dict[str, Any]]) -> None:
 # ==============================================================================
 
 def parse_duration_to_minutes(val: Any) -> float:
-    """
-    Convertit une valeur de durée individuelle en minutes réelles (float).
-    Prend en charge :
-    - Format chaîne texte 'HH:MM:SS' ou 'H:MM:SS' via Timedelta
-    - Format chaîne texte 'MM:SS'
-    - Nombres en millisecondes (> 100 000)
-    - Nombres en secondes (> 240, ex: 8508 s -> 141.8 min)
-    - Nombres déjà en minutes (ex: 60.5, 80.0, 120.0)
-    """
+    """Convertit une valeur de durée individuelle en minutes réelles (float)."""
     if pd.isna(val) or val is None or val == "":
         return 0.0
 
@@ -374,9 +337,7 @@ def parse_duration_to_minutes(val: Any) -> float:
 
 
 def parse_duration_series(series: pd.Series, col_name: str = "") -> pd.Series:
-    """
-    Convertit une série complète de durées Catapult en minutes réelles (float).
-    """
+    """Convertit une série complète de durées Catapult en minutes réelles (float)."""
     if series.empty:
         return pd.Series(dtype=float)
 
@@ -409,9 +370,7 @@ def parse_duration_series(series: pd.Series, col_name: str = "") -> pd.Series:
 
 
 def clean_numeric_value(val: Any) -> float:
-    """
-    Convertit une valeur quelconque contenant éventuellement une virgule en float.
-    """
+    """Convertit une valeur quelconque avec virgule ou espace en float."""
     if pd.isna(val) or val is None or val == "":
         return 0.0
     if isinstance(val, (int, float)):
@@ -424,9 +383,7 @@ def clean_numeric_value(val: Any) -> float:
 
 
 def find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    """
-    Recherche une colonne correspondant à une liste de candidats.
-    """
+    """Recherche une colonne correspondant à une liste de candidats."""
     col_map = {re.sub(r"\s+", " ", str(c).strip().lower()): c for c in df.columns}
     
     for candidate in candidates:
@@ -443,11 +400,8 @@ def find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     return None
 
 
-def find_catapult_header_row(file_bytes: bytes, encoding: str = "utf-8", max_scan: int = 10) -> int:
-    """
-    Scanne les 10 premières lignes du fichier brut pour repérer dynamiquement
-    celle qui correspond au véritable en-tête du tableau (contenant 'Player Name' ou 'Date').
-    """
+def find_catapult_header_row(file_bytes: bytes, encoding: str = "utf-8", max_scan: int = 15) -> int:
+    """Scanne les 15 premières lignes pour repérer dynamiquement l'en-tête réel."""
     try:
         text_preview = file_bytes[:16384].decode(encoding, errors="replace")
         lines = text_preview.splitlines()[:max_scan]
@@ -458,52 +412,27 @@ def find_catapult_header_row(file_bytes: bytes, encoding: str = "utf-8", max_sca
         line = raw_line.strip().lower()
         if not line:
             continue
-        if any(term in line for term in ["player name", "athlete name", "nom ; prénom", "nom;prénom"]):
+        if any(term in line for term in ["player name", "athlete name", "nom ; prénom", "nom;prénom", "player", "athlete"]):
             return idx
 
     for idx, raw_line in enumerate(lines):
         line = raw_line.strip().lower()
         if not line:
             continue
-        if "date" in line:
-            if any(sep in line for sep in [";", ",", "\t"]) or re.search(r'\bdate\b', line):
-                return idx
-
-    for idx, raw_line in enumerate(lines):
-        line = raw_line.strip().lower()
-        if not line:
-            continue
-        if any(term in line for term in ["player", "athlete", "joueur", "split", "period", "distance"]):
-            if any(sep in line for sep in [";", ",", "\t"]):
-                return idx
+        if "date" in line and any(term in line for term in ["session", "split", "distance", "duration", "speed"]):
+            return idx
 
     return 0
 
 
-def load_catapult_csv(file_input: Union[bytes, io.BytesIO, Any]) -> pd.DataFrame:
-    """
-    Lit un fichier CSV Catapult One en détectant dynamiquement le vrai header
-    parmi les 10 premières lignes.
-    """
-    if hasattr(file_input, "getvalue"):
-        file_bytes = file_input.getvalue()
-    elif hasattr(file_input, "read"):
-        if hasattr(file_input, "seek"):
-            file_input.seek(0)
-        file_bytes = file_input.read()
-    elif isinstance(file_input, bytes):
-        file_bytes = file_input
-    else:
-        file_bytes = bytes(file_input)
-
+def load_catapult_csv(file_bytes: bytes) -> pd.DataFrame:
+    """Lit un fichier CSV Catapult One avec détection automatique d'encodage et délimiteur."""
     encodings_to_try: List[str] = ["utf-8-sig", "utf-8", "latin1", "cp1252", "iso-8859-1"]
     separators_to_try: List[str] = [";", ",", "\t"]
-
     last_error: Optional[Exception] = None
 
     for enc in encodings_to_try:
-        header_idx = find_catapult_header_row(file_bytes, encoding=enc, max_scan=10)
-
+        header_idx = find_catapult_header_row(file_bytes, encoding=enc, max_scan=15)
         for sep in separators_to_try:
             try:
                 df = pd.read_csv(
@@ -517,25 +446,7 @@ def load_catapult_csv(file_input: Union[bytes, io.BytesIO, Any]) -> pd.DataFrame
                     df.columns = [str(c).strip() for c in df.columns]
                     lower_cols = [c.lower() for c in df.columns]
                     if any("player" in c or "athlete" in c or "nom" in c or "date" in c for c in lower_cols):
-                        return df
-            except Exception as exc:
-                last_error = exc
-                continue
-
-    for enc in encodings_to_try:
-        header_idx = find_catapult_header_row(file_bytes, encoding=enc, max_scan=10)
-        for sep in separators_to_try:
-            try:
-                df = pd.read_csv(
-                    io.BytesIO(file_bytes),
-                    sep=sep,
-                    encoding=enc,
-                    header=header_idx,
-                    low_memory=False,
-                )
-                if len(df.columns) >= 3:
-                    df.columns = [str(c).strip() for c in df.columns]
-                    return df
+                        return df.dropna(how="all")
             except Exception as exc:
                 last_error = exc
                 continue
@@ -545,91 +456,179 @@ def load_catapult_csv(file_input: Union[bytes, io.BytesIO, Any]) -> pd.DataFrame
     raise ValueError("Impossible de décoder le fichier CSV avec les encodages et délimiteurs standards.")
 
 
+def load_catapult_file(uploaded_file: Any) -> pd.DataFrame:
+    """
+    Lit un fichier export Catapult One (.csv, .xlsx, .xls) :
+    - Détecte dynamiquement la vraie ligne d'en-tête (en sautant les lignes de métadonnées).
+    - Gère les encodages et formats tabulaires.
+    """
+    file_name = uploaded_file.name.lower()
+    file_bytes = uploaded_file.getvalue()
+
+    if file_name.endswith((".xlsx", ".xls")):
+        # Lecture préliminaire des 15 premières lignes pour repérer le header
+        preview_df = pd.read_excel(io.BytesIO(file_bytes), header=None, nrows=15)
+        header_idx = 0
+        for idx, row in preview_df.iterrows():
+            row_str = " ".join([str(v).lower() for v in row if pd.notna(v)])
+            if any(term in row_str for term in ["player name", "athlete name", "nom ; prénom", "nom;prénom", "athlete", "player"]):
+                header_idx = idx
+                break
+            elif "date" in row_str and any(term in row_str for term in ["session", "split", "distance", "duration"]):
+                header_idx = idx
+                break
+
+        df = pd.read_excel(io.BytesIO(file_bytes), header=header_idx)
+        df.columns = [str(c).strip() for c in df.columns]
+        return df.dropna(how="all")
+    else:
+        return load_catapult_csv(file_bytes)
+
+
 # ==============================================================================
 # 3. CALCULS STAPS & INGÉNIERIE DES CARACTÉRISTIQUES (GROUPBY JOUEUR)
 # ==============================================================================
+
+def load_template_positions() -> Dict[str, str]:
+    """
+    Extrait la cartographie des postes réels des joueurs RCA depuis l'onglet 'Liste joueurs'
+    du fichier modèle Modele_Vierge_STAPS.xlsx s'il existe.
+    """
+    pos_map: Dict[str, str] = {}
+    template_path = get_template_path()
+    if not template_path:
+        return pos_map
+
+    try:
+        wb = openpyxl.load_workbook(template_path, data_only=True)
+        if 'Liste joueurs' in wb.sheetnames:
+            ws = wb['Liste joueurs']
+            cur_grp: Optional[str] = None
+            for row in ws.iter_rows(min_row=2, max_row=120):
+                c0 = str(row[0].value or '').strip().lower()
+                c1 = str(row[1].value or '').strip()
+                if c0 and c0 != 'moyenne':
+                    if any(k in c0 for k in ['pilier', 'talon', '2']):
+                        cur_grp = '5 de devant'
+                    elif '3' in c0:
+                        cur_grp = '3ème Ligne'
+                    elif any(k in c0 for k in ['demi', 'centre', 'ailier', 'arri']):
+                        cur_grp = 'Trois-quarts'
+                if c1 and c1.lower() != '1er mi temps ' and cur_grp:
+                    pos_map[c1.lower()] = cur_grp
+    except Exception:
+        pass
+    return pos_map
+
+
+def assign_player_groups(df: pd.DataFrame, df_raw: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """
+    Assigne un groupe positionnel ('5 de devant', '3ème Ligne', 'Trois-quarts') à chaque joueur.
+    - Utilise la colonne Position/Groupe/Poste si elle existe dans le fichier brut.
+    - Utilise le mapping officiel du club depuis Modele_Vierge_STAPS.xlsx s'il est présent.
+    - Sinon, attribue les joueurs de manière déterministe et équilibrée (round-robin).
+    """
+    df = df.copy()
+    player_col = "Nom ; Prénom"
+    position_map: Dict[str, str] = {}
+
+    # 1. Détection via les métadonnées de l'export brut (colonne Position, Tags, etc.)
+    if df_raw is not None:
+        pos_col = find_column(df_raw, ["Groupe", "Group", "Position", "Poste", "Tags"])
+        raw_player_col = find_column(df_raw, ["Player Name", "Athlete Name", "Nom ; Prénom", "Nom", "Player"])
+        if pos_col and raw_player_col:
+            for _, r in df_raw[[raw_player_col, pos_col]].dropna().drop_duplicates().iterrows():
+                p_name = str(r[raw_player_col]).strip()
+                p_pos = str(r[pos_col]).strip().lower()
+                
+                if any(k in p_pos for k in ["pilier", "prop", "talonneur", "hooker", "deuxième", "2ème", "2eme", "lock", "devant"]):
+                    position_map[p_name] = "5 de devant"
+                elif any(k in p_pos for k in ["troisième", "3ème", "3eme", "flanker", "n°8", "no 8", "number 8"]):
+                    position_map[p_name] = "3ème Ligne"
+                elif any(k in p_pos for k in ["demi", "mêlée", "ouverture", "scrum", "fly", "centre", "ailier", "wing", "arrière", "fullback", "trois-quart", "back"]):
+                    position_map[p_name] = "Trois-quarts"
+
+    # 2. Complément avec la liste officielle du modèle RCA
+    template_positions = load_template_positions()
+    GROUPS = ["5 de devant", "3ème Ligne", "Trois-quarts"]
+    unique_players = sorted(df[player_col].dropna().unique().tolist())
+    
+    group_list = []
+    for idx, p in enumerate(df[player_col]):
+        p_clean = str(p).strip().lower()
+        if p in position_map:
+            group_list.append(position_map[p])
+        elif p_clean in template_positions:
+            group_list.append(template_positions[p_clean])
+        else:
+            # Recherche partielle de nom (ex: "COZIC Adrien" vs "Cozic")
+            matched_group = None
+            for t_name, t_grp in template_positions.items():
+                if t_name in p_clean or p_clean in t_name:
+                    matched_group = t_grp
+                    break
+            if matched_group:
+                group_list.append(matched_group)
+            else:
+                p_idx = unique_players.index(p) if p in unique_players else idx
+                group_list.append(GROUPS[p_idx % 3])
+
+    df["Groupe"] = group_list
+    return df
+
 
 def process_catapult_data(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
     Traite le DataFrame brut Catapult One :
     - Regroupe les données par joueur (session globale).
-    - Convertit rigoureusement le Temps de jeu en minutes réelles (float).
-    - Calcule et agrège toutes les métriques requises.
-    - Applique les formules de feature engineering STAPS (Distance/min, HSR/min).
-    - Construit et ordonne rigoureusement df_indiv selon la maquette.
+    - Convertit le Temps de jeu en minutes réelles.
+    - Extrait et agrège toutes les métriques requises (Distance, Zones 1 à 5, Accel, Decel).
+    - Construit le DataFrame df_indiv conforme aux colonnes métier STAPS.
     """
-    # 1. Identification de la colonne Joueur
     player_col = find_column(df_raw, [
         "Nom ; Prénom", "Player Name", "Athlete Name", "Player", "Athlete", "Joueur", "Nom", "Name"
     ])
     if not player_col:
-        raise ValueError(
-            "Colonne Joueur introuvable dans le CSV. Colonnes attendues : 'Player Name', 'Athlete Name', etc."
-        )
+        raise ValueError("Colonne Joueur introuvable dans le fichier. Colonnes attendues : 'Player Name', 'Athlete Name', etc.")
 
-    # 2. Détection des colonnes sources
     dur_col = find_column(df_raw, [
-        "Duration", "Temps de jeu", "Duration (mins)", "Duration (s)", "Duration (sec)",
-        "Durée", "Time", "Session Duration"
+        "Duration", "Temps de jeu", "Duration (mins)", "Duration (s)", "Duration (sec)", "Durée", "Time", "Session Duration"
     ])
     dist_col = find_column(df_raw, ["Distance (km)", "Total Distance (km)", "Distance"])
     dist_m_col = find_column(df_raw, ["Distance (m)", "Total Distance (m)"])
 
     hsr_col = find_column(df_raw, [
-        "Distance haute intensité (m)", "Distance haute intensite (m)", "High Speed Running (m)", 
-        "HSR Distance (m)", "HSR (m)", "HSR Distance (>5m/s)"
+        "Distance in Speed Zone 4 (km)", "Distance in Speed Zone 4  (km)",
+        "Distance haute intensité (m)", "High Speed Running (m)", "HSR Distance (m)", "HSR Distance (>5m/s)"
     ])
     vhsr_col = find_column(df_raw, [
-        "Sprint Distance (m)", "VHSR Distance (m)", "VHSR (m)", "Very High Speed Running (m)"
+        "Distance in Speed Zone 5 (km)", "Distance in Speed Zone 5  (km)",
+        "Sprint Distance (m)", "VHSR Distance (m)", "Very High Speed Running (m)"
     ])
 
-    top_speed_col = find_column(df_raw, [
-        "Top Speed (km/h)", "Max Velocity (km/h)", "Top Speed", "Max Velocity", "Vmax"
-    ])
+    top_speed_col = find_column(df_raw, ["Top Speed (km/h)", "Max Velocity (km/h)", "Top Speed", "Max Velocity", "Vmax"])
+    max_accel_col = find_column(df_raw, ["Max Acceleration (m/s/s)", "Max Acceleration (m/s2)", "Max Acceleration", "Max Accel"])
+    max_decel_col = find_column(df_raw, ["Max Deceleration (m/s/s)", "Max Deceleration (m/s2)", "Max Deceleration", "Max Decel"])
 
-    max_accel_col = find_column(df_raw, [
-        "Max Acceleration (m/s/s)", "Max Acceleration (m/s2)", "Max Acceleration", "Max Accel"
-    ])
-    max_decel_col = find_column(df_raw, [
-        "Max Deceleration (m/s/s)", "Max Deceleration (m/s2)", "Max Deceleration", "Max Decel"
-    ])
+    z1_col = find_column(df_raw, ["Distance in Speed Zone 1 (km)", "Distance in Speed Zone 1  (km)", "Speed Zone 1", "Zone 1"])
+    z2_col = find_column(df_raw, ["Distance in Speed Zone 2 (km)", "Distance in Speed Zone 2  (km)", "Speed Zone 2", "Zone 2"])
+    z3_col = find_column(df_raw, ["Distance in Speed Zone 3 (km)", "Distance in Speed Zone 3  (km)", "Speed Zone 3", "Zone 3"])
+    z4_col = find_column(df_raw, ["Distance in Speed Zone 4 (km)", "Distance in Speed Zone 4  (km)", "Speed Zone 4", "Zone 4"])
+    z5_col = find_column(df_raw, ["Distance in Speed Zone 5 (km)", "Distance in Speed Zone 5  (km)", "Speed Zone 5", "Zone 5"])
 
-    # Speed Zones
-    z1_col = find_column(df_raw, ["Distance in Speed Zone 1", "Speed Zone 1", "Zone 1"])
-    z2_col = find_column(df_raw, ["Distance in Speed Zone 2", "Speed Zone 2", "Zone 2"])
-    z3_col = find_column(df_raw, ["Distance in Speed Zone 3", "Speed Zone 3", "Zone 3"])
-    z4_col = find_column(df_raw, ["Distance in Speed Zone 4", "Speed Zone 4", "Zone 4"])
-    z5_col = find_column(df_raw, ["Distance in Speed Zone 5", "Speed Zone 5", "Zone 5"])
+    acc_34_col = find_column(df_raw, ["Accelerations Zone Count: 3 - 4 m/s/s", "Accelerations Zone Count: 3-4 m/s/s", "Accel 3-4", "Accelerations (>3m/s2)"])
+    acc_gt4_col = find_column(df_raw, ["Accelerations Zone Count: > 4 m/s/s", "Accelerations Zone Count: >4 m/s/s", "Accel >4"])
+    dec_34_col = find_column(df_raw, ["Deceleration Zone Count: 3 - 4 m/s/s", "Deceleration Zone Count: 3-4 m/s/s", "Decel 3-4", "Décélérations (<-3m/s2)"])
+    dec_gt4_col = find_column(df_raw, ["Deceleration Zone Count: > 4 m/s/s", "Deceleration Zone Count: >4 m/s/s", "Decel >4"])
 
-    # Accel / Decel Zone Counts
-    acc_34_col = find_column(df_raw, [
-        "Accelerations Zone Count: 3 - 4 m/s/s", "Accelerations Zone Count: 3-4 m/s/s",
-        "Accel 3-4", "Accelerations (3-4 m/s2)", "Accelerations 3 - 4", "Accélérations (>3m/s2)", "Accelerations (>3m/s2)"
-    ])
-    acc_gt4_col = find_column(df_raw, [
-        "Accelerations Zone Count: > 4 m/s/s", "Accelerations Zone Count: >4 m/s/s",
-        "Accel >4", "Accelerations (>4 m/s2)", "Accelerations > 4"
-    ])
-    dec_34_col = find_column(df_raw, [
-        "Deceleration Zone Count: 3 - 4 m/s/s", "Deceleration Zone Count: 3-4 m/s/s",
-        "Decel 3-4", "Decelerations (3-4 m/s2)", "Decelerations 3 - 4", "Décélérations (<-3m/s2)", "Decelerations (<-3m/s2)"
-    ])
-    dec_gt4_col = find_column(df_raw, [
-        "Deceleration Zone Count: > 4 m/s/s", "Deceleration Zone Count: >4 m/s/s",
-        "Decel >4", "Decelerations (>4 m/s2)", "Decelerations > 4"
-    ])
-
-    # 3. Création du DataFrame intermédiaire nettoyé
     df_clean = pd.DataFrame()
     df_clean["Nom ; Prénom"] = df_raw[player_col].astype(str).str.strip()
 
-    # Temps de jeu (en minutes réelles float)
     if dur_col:
         df_clean["Duration_min"] = parse_duration_series(df_raw[dur_col], col_name=dur_col)
     else:
         df_clean["Duration_min"] = 0.0
 
-    # Distance totale (en km)
     if dist_col:
         vals = df_raw[dist_col].apply(clean_numeric_value)
         if "(m)" in dist_col.lower() or vals.median() > 100.0:
@@ -641,31 +640,11 @@ def process_catapult_data(df_raw: pd.DataFrame) -> pd.DataFrame:
     else:
         df_clean["Distance_km"] = 0.0
 
-    # Top Speed (km/h)
-    if top_speed_col:
-        df_clean["Top_Speed"] = df_raw[top_speed_col].apply(clean_numeric_value)
-    else:
-        df_clean["Top_Speed"] = 0.0
+    df_clean["Top_Speed"] = df_raw[top_speed_col].apply(clean_numeric_value) if top_speed_col else 0.0
+    df_clean["Max_Accel"] = df_raw[max_accel_col].apply(clean_numeric_value) if max_accel_col else 0.0
+    df_clean["Max_Decel"] = df_raw[max_decel_col].apply(lambda x: abs(clean_numeric_value(x))) if max_decel_col else 0.0
 
-    # Max Acceleration & Max Deceleration
-    if max_accel_col:
-        df_clean["Max_Accel"] = df_raw[max_accel_col].apply(clean_numeric_value)
-    else:
-        df_clean["Max_Accel"] = 0.0
-
-    if max_decel_col:
-        df_clean["Max_Decel"] = df_raw[max_decel_col].apply(lambda x: abs(clean_numeric_value(x)))
-    else:
-        df_clean["Max_Decel"] = 0.0
-
-    # Zones de vitesse 1 à 5 (forcées en kilomètres)
-    for z_idx, z_name, c_source in [
-        (1, "Z1_km", z1_col),
-        (2, "Z2_km", z2_col),
-        (3, "Z3_km", z3_col),
-        (4, "Z4_km", z4_col),
-        (5, "Z5_km", z5_col),
-    ]:
+    for z_name, c_source in [("Z1_km", z1_col), ("Z2_km", z2_col), ("Z3_km", z3_col), ("Z4_km", z4_col), ("Z5_km", z5_col)]:
         if c_source:
             vals = df_raw[c_source].apply(clean_numeric_value)
             if "(m)" in c_source.lower() or vals.median() > 20.0:
@@ -674,25 +653,34 @@ def process_catapult_data(df_raw: pd.DataFrame) -> pd.DataFrame:
         else:
             df_clean[z_name] = 0.0
 
-    # Distance haute intensité (m) = Somme HSR + VHSR (ou Sprint)
-    if hsr_col and vhsr_col:
-        df_clean["HSR_m"] = df_raw[hsr_col].apply(clean_numeric_value) + df_raw[vhsr_col].apply(clean_numeric_value)
-    elif hsr_col:
-        df_clean["HSR_m"] = df_raw[hsr_col].apply(clean_numeric_value)
+    # HSR (Zone 4) et VHSR (Zone 5) en mètres
+    if z4_col and z5_col:
+        df_clean["Z4_m"] = df_clean["Z4_km"] * 1000.0
+        df_clean["Z5_m"] = df_clean["Z5_km"] * 1000.0
+        df_clean["HSR_m"] = df_clean["Z4_m"] + df_clean["Z5_m"]
+    elif hsr_col and vhsr_col:
+        v_hsr = df_raw[hsr_col].apply(clean_numeric_value)
+        v_vhsr = df_raw[vhsr_col].apply(clean_numeric_value)
+        df_clean["Z4_m"] = v_hsr if "(m)" in hsr_col.lower() or v_hsr.median() > 10.0 else v_hsr * 1000.0
+        df_clean["Z5_m"] = v_vhsr if "(m)" in vhsr_col.lower() or v_vhsr.median() > 5.0 else v_vhsr * 1000.0
+        df_clean["HSR_m"] = df_clean["Z4_m"] + df_clean["Z5_m"]
     else:
+        df_clean["Z4_m"] = df_clean["Z4_km"] * 1000.0
+        df_clean["Z5_m"] = df_clean["Z5_km"] * 1000.0
         df_clean["HSR_m"] = (df_clean["Z3_km"] + df_clean["Z4_km"] + df_clean["Z5_km"]) * 1000.0
 
-    # Comptages Accélérations & Décélérations
     df_clean["Acc_34"] = df_raw[acc_34_col].apply(clean_numeric_value) if acc_34_col else 0.0
     df_clean["Acc_gt4"] = df_raw[acc_gt4_col].apply(clean_numeric_value) if acc_gt4_col else 0.0
     df_clean["Dec_34"] = df_raw[dec_34_col].apply(clean_numeric_value) if dec_34_col else 0.0
     df_clean["Dec_gt4"] = df_raw[dec_gt4_col].apply(clean_numeric_value) if dec_gt4_col else 0.0
 
-    # 4. Groupby Joueur sur la session globale
+    # Groupby par Joueur pour agréger la séance
     grouped = df_clean.groupby("Nom ; Prénom", as_index=False).agg({
         "Duration_min": "sum",
         "Distance_km": "sum",
         "HSR_m": "sum",
+        "Z4_m": "sum",
+        "Z5_m": "sum",
         "Top_Speed": "max",
         "Z1_km": "sum",
         "Z2_km": "sum",
@@ -707,39 +695,28 @@ def process_catapult_data(df_raw: pd.DataFrame) -> pd.DataFrame:
         "Dec_gt4": "sum",
     })
 
-    # Double sécurité post-groupby sur Duration_min
     grouped["Duration_min"] = grouped["Duration_min"].astype(float)
-    positive_durations = grouped["Duration_min"][grouped["Duration_min"] > 0]
-    if len(positive_durations) > 0:
-        med_dur = positive_durations.median()
+    pos_dur = grouped["Duration_min"][grouped["Duration_min"] > 0]
+    if len(pos_dur) > 0:
+        med_dur = pos_dur.median()
         if med_dur > 100000:
             grouped["Duration_min"] = grouped["Duration_min"] / 60000.0
         elif med_dur > 240:
             grouped["Duration_min"] = grouped["Duration_min"] / 60.0
 
-    # 5. Formules spécifiques & Feature Engineering STAPS
     temps_jeu = grouped["Duration_min"].astype(float)
     d_total_m = grouped["Distance_km"] * 1000.0
     dist_tot_km = grouped["Distance_km"]
 
-    # Distance Per Min (m/min) : Distance totale (m) / Temps de jeu réel (min)
     dist_per_min = np.where(temps_jeu > 0, d_total_m / temps_jeu, 0.0)
-
-    # HSR m/min = Distance haute intensité (m) / Temps de jeu réel (min)
     hsr_per_min = np.where(temps_jeu > 0, grouped["HSR_m"] / temps_jeu, 0.0)
+    accel_decel_total = grouped["Acc_34"] + grouped["Acc_gt4"] + grouped["Dec_34"] + grouped["Dec_gt4"]
 
-    # Accel/Dec = (Accel 3-4) + (Accel >4) + (Decel 3-4) + (Decel >4)
-    accel_decel_total = (
-        grouped["Acc_34"] + grouped["Acc_gt4"] + grouped["Dec_34"] + grouped["Dec_gt4"]
-    )
-
-    # Pourcentages par zone de vitesse relatifs à la distance totale
     pct_marche = np.where(dist_tot_km > 0, grouped["Z1_km"] / dist_tot_km, 0.0)
     pct_course = np.where(dist_tot_km > 0, grouped["Z2_km"] / dist_tot_km, 0.0)
     pct_hsr = np.where(dist_tot_km > 0, grouped["Z3_km"] / dist_tot_km, 0.0)
     pct_vhsr = np.where(dist_tot_km > 0, (grouped["Z4_km"] + grouped["Z5_km"]) / dist_tot_km, 0.0)
 
-    # 6. Assemblage du DataFrame final df_indiv
     df_indiv = pd.DataFrame()
     df_indiv['Nom ; Prénom'] = grouped['Nom ; Prénom']
     df_indiv['Temps de jeu '] = temps_jeu.astype(float)
@@ -765,90 +742,200 @@ def process_catapult_data(df_raw: pd.DataFrame) -> pd.DataFrame:
     df_indiv['%VHSR'] = pct_vhsr
     df_indiv['HSR m/min'] = hsr_per_min
 
-    return df_indiv[FINAL_COLUMNS]
+    # Attribution du Groupe
+    df_indiv = assign_player_groups(df_indiv, df_raw=df_raw)
+    return df_indiv
 
 
 # ==============================================================================
-# 4. INJECTION DANS LE TEMPLATE EXCEL VIA OPENPYXL (data_only=False)
+# 4. MOTEUR DE CALCULS DYNAMIQUES (JAUGES ET PODIUM)
+# ==============================================================================
+
+def calculer_metriques_jauges(df_subset: pd.DataFrame, group_name: str, mode_calc: str = "Moyenne / joueur") -> Dict[str, Tuple[float, float]]:
+    """
+    Calcule dynamiquement les 4 métriques des jauges pour le groupe sélectionné :
+    - Distance (m) : Somme ou moyenne de Distance (km) * 1000
+    - HSR (m) : Somme ou moyenne de Distance in Speed Zone 4 (km) * 1000
+    - VHSR (m) : Somme ou moyenne de Distance in Speed Zone 5 (km) * 1000
+    - ACC/DEC : Somme ou moyenne des Accel/Dec totales
+    """
+    targets = OBJECTIFS_CONFIG.get(group_name, OBJECTIFS_CONFIG["Tous les groupes"])
+
+    if len(df_subset) == 0:
+        return {k: (v, 0.0) for k, v in targets.items()}
+
+    use_mean = (mode_calc == "Moyenne / joueur")
+
+    # 1. Distance en mètres
+    d_m = df_subset["Distance (km)"] * 1000.0
+    val_dist = d_m.mean() if use_mean else d_m.sum()
+
+    # 2. HSR (Zone 4 en mètres)
+    z4_col = "Distance in Speed Zone 4  (km)"
+    if z4_col in df_subset.columns:
+        hsr_m = df_subset[z4_col] * 1000.0
+    else:
+        hsr_m = df_subset[" Distance haute intensité (m)"] * 0.70
+    val_hsr = hsr_m.mean() if use_mean else hsr_m.sum()
+
+    # 3. VHSR (Zone 5 en mètres)
+    z5_col = "Distance in Speed Zone 5  (km)"
+    if z5_col in df_subset.columns:
+        vhsr_m = df_subset[z5_col] * 1000.0
+    else:
+        vhsr_m = df_subset[" Distance haute intensité (m)"] * 0.30
+    val_vhsr = vhsr_m.mean() if use_mean else vhsr_m.sum()
+
+    # 4. ACC/DEC total
+    acc_dec = df_subset["Accel/Dec"] if "Accel/Dec" in df_subset.columns else pd.Series([0.0] * len(df_subset))
+    val_acc_dec = acc_dec.mean() if use_mean else acc_dec.sum()
+
+    # Ajustement proportionnel de l'objectif si affichage en somme cumulée
+    nb_joueurs = len(df_subset)
+    multiplier = 1.0 if use_mean else max(float(nb_joueurs), 1.0)
+
+    return {
+        "Objectif Distance (m)": (targets["Objectif Distance (m)"] * multiplier, val_dist),
+        "Obj. HSR": (targets["Obj. HSR"] * multiplier, val_hsr),
+        "Obj. VHSR": (targets["Obj. VHSR"] * multiplier, val_vhsr),
+        "Obj. ACC/DEC": (targets["Obj. ACC/DEC"] * multiplier, val_acc_dec),
+    }
+
+
+def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
+    """
+    Génère le Podium des 3 tops à partir des données réelles :
+    - Top speed (km/h) : tri sur Top Speed (km/h) décroissant.
+    - % de marche : tri sur %Marche décroissant.
+    - Haute intensité (m) : tri sur Zone 4 + Zone 5 (mètres) décroissant.
+    """
+    if len(df_subset) == 0:
+        return {}
+
+    podium_result: Dict[str, Dict[str, Any]] = {}
+
+    # 1. TOP SPEED
+    ts_col = "Top Speed (km/h)"
+    df_sorted_ts = df_subset.sort_values(by=ts_col, ascending=False).dropna(subset=[ts_col])
+    players_ts = []
+    for rank, (_, row) in enumerate(df_sorted_ts.head(3).iterrows(), start=1):
+        name = str(row["Nom ; Prénom"]).strip()
+        val = float(row[ts_col])
+        players_ts.append({
+            "rank": rank,
+            "name": name,
+            "stat": f"{val:.1f} km/h",
+            "seed": urllib.parse.quote(name),
+        })
+    while len(players_ts) < 3:
+        players_ts.append({"rank": len(players_ts) + 1, "name": "-", "stat": "-", "seed": "RCA"})
+
+    podium_result["Top speed (km/h)"] = {
+        "icon": "⚡",
+        "players": players_ts,
+    }
+
+    # 2. % DE MARCHE
+    walk_col = "%Marche "
+    if walk_col in df_subset.columns:
+        df_sorted_walk = df_subset.sort_values(by=walk_col, ascending=False)
+    else:
+        df_sorted_walk = df_subset
+    players_walk = []
+    for rank, (_, row) in enumerate(df_sorted_walk.head(3).iterrows(), start=1):
+        name = str(row["Nom ; Prénom"]).strip()
+        val_raw = float(row.get(walk_col, 0.0))
+        val_pct = val_raw * 100.0 if val_raw <= 1.0 else val_raw
+        players_walk.append({
+            "rank": rank,
+            "name": name,
+            "stat": f"{val_pct:.1f} %",
+            "seed": urllib.parse.quote(name),
+        })
+    while len(players_walk) < 3:
+        players_walk.append({"rank": len(players_walk) + 1, "name": "-", "stat": "-", "seed": "RCA"})
+
+    podium_result["% de marche"] = {
+        "icon": "🚶",
+        "players": players_walk,
+    }
+
+    # 3. HAUTE INTENSITÉ (m) -> Somme Zone 4 + Zone 5
+    hi_col = " Distance haute intensité (m)"
+    if hi_col in df_subset.columns:
+        df_sorted_hi = df_subset.sort_values(by=hi_col, ascending=False)
+    else:
+        df_sorted_hi = df_subset
+    players_hi = []
+    for rank, (_, row) in enumerate(df_sorted_hi.head(3).iterrows(), start=1):
+        name = str(row["Nom ; Prénom"]).strip()
+        val_m = float(row.get(hi_col, 0.0))
+        players_hi.append({
+            "rank": rank,
+            "name": name,
+            "stat": f"{int(round(val_m)):,d} m".replace(",", " "),
+            "seed": urllib.parse.quote(name),
+        })
+    while len(players_hi) < 3:
+        players_hi.append({"rank": len(players_hi) + 1, "name": "-", "stat": "-", "seed": "RCA"})
+
+    podium_result["Haute intensité (m)"] = {
+        "icon": "🔥",
+        "players": players_hi,
+    }
+
+    return podium_result
+
+
+# ==============================================================================
+# 5. INJECTION DANS LE TEMPLATE EXCEL VIA OPENPYXL (data_only=False)
 # ==============================================================================
 
 def populate_template_excel(df_indiv: pd.DataFrame, df_raw: Optional[pd.DataFrame] = None) -> io.BytesIO:
-    """
-    Charge le classeur modèle officiel (Modele_Vierge_STAPS.xlsx) avec openpyxl (data_only=False) :
-    - Préserve l'intégralité des onglets, formules natives et graphiques de la préparatrice physique.
-    - Injecte df_indiv dans 'données indiv. joueurs' à partir de la ligne 3.
-    - Met à jour les formules de synthèse de ligne si présentes.
-    - Injecte df_raw dans 'données brutes' (en-têtes en ligne 3, données en ligne 4+).
-    - Sauvegarde et renvoie le classeur complet sous forme de flux io.BytesIO.
-    """
+    """Charge le classeur officiel (Modele_Vierge_STAPS.xlsx) et injecte les données."""
     template_path = get_template_path()
     if not template_path:
-        raise FileNotFoundError(
-            f"Le fichier modèle '{TEMPLATE_FILENAME}' est introuvable. "
-            "Veuillez vous assurer qu'il se trouve dans le même dossier que l'application."
-        )
+        raise FileNotFoundError(f"Le fichier modèle '{TEMPLATE_FILENAME}' est introuvable.")
 
-    # Chargement avec préservation absolue de toutes les formules natives
     wb = openpyxl.load_workbook(template_path, data_only=False)
 
-    # --------------------------------------------------------------------------
-    # A. Injection dans 'données indiv. joueurs'
-    # --------------------------------------------------------------------------
     if 'données indiv. joueurs' in wb.sheetnames:
         ws_indiv = wb['données indiv. joueurs']
         num_players = len(df_indiv)
 
-        # Écriture des joueurs à partir de la ligne 3
         for i, row in df_indiv.iterrows():
             r = 3 + i
-            # Colonnes 1 à 22
             for col_idx, col_name in enumerate(FINAL_COLUMNS[:22], start=1):
                 val = row[col_name]
                 ws_indiv.cell(row=r, column=col_idx, value=val)
 
-            # Colonne 23 (somme des 4 zones de % = 100%)
             ws_indiv.cell(row=r, column=23, value=f"=SUM(S{r}:V{r})")
-
-            # Colonne 24 ('m/min' -> HSR m/min)
             ws_indiv.cell(row=r, column=24, value=row['HSR m/min'])
-
-            # Colonnes d'extension du modèle de la préparatrice
             ws_indiv.cell(row=r, column=26, value=f"=I{r}*1000")
             ws_indiv.cell(row=r, column=27, value=f"=(SUM(J{r}:K{r}))*1000")
 
-        # Nettoyage des lignes excédentaires si le modèle contenait plus de lignes
         last_injected_row = 3 + num_players - 1
         if ws_indiv.max_row > last_injected_row:
             for extra_r in range(last_injected_row + 1, ws_indiv.max_row + 1):
                 for c in range(1, 35):
                     ws_indiv.cell(row=extra_r, column=c).value = None
 
-    # --------------------------------------------------------------------------
-    # B. Injection dans 'données brutes' (archivage brut de la session)
-    # --------------------------------------------------------------------------
     if df_raw is not None and 'données brutes' in wb.sheetnames:
         ws_brutes = wb['données brutes']
-
-        # En-têtes bruts en ligne 3
         for col_idx, col_name in enumerate(df_raw.columns, start=1):
             ws_brutes.cell(row=3, column=col_idx, value=col_name)
 
-        # Lignes brutes à partir de la ligne 4
         for row_idx, row_vals in enumerate(df_raw.itertuples(index=False), start=4):
             for col_idx, cell_val in enumerate(row_vals, start=1):
                 val_to_write = cell_val if not pd.isna(cell_val) else None
                 ws_brutes.cell(row=row_idx, column=col_idx, value=val_to_write)
 
-        # Nettoyage des éventuelles lignes antérieures dépassées
         last_brute_row = 4 + len(df_raw) - 1
         if ws_brutes.max_row > last_brute_row:
             for extra_r in range(last_brute_row + 1, ws_brutes.max_row + 1):
                 for c in range(1, len(df_raw.columns) + 1):
                     ws_brutes.cell(row=extra_r, column=c).value = None
 
-    # --------------------------------------------------------------------------
-    # C. Sauvegarde en mémoire virtuelle
-    # --------------------------------------------------------------------------
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
@@ -856,9 +943,7 @@ def populate_template_excel(df_indiv: pd.DataFrame, df_raw: Optional[pd.DataFram
 
 
 def create_fallback_excel(df_indiv: pd.DataFrame) -> io.BytesIO:
-    """
-    Génération Excel de secours autonome si le fichier modèle Modele_Vierge_STAPS.xlsx est absent.
-    """
+    """Génération Excel de secours autonome si le modèle est absent."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df_indiv.to_excel(writer, sheet_name="données indiv. joueurs", index=False)
@@ -882,7 +967,7 @@ def create_fallback_excel(df_indiv: pd.DataFrame) -> io.BytesIO:
 
 
 # ==============================================================================
-# 5. APPLICATION STREAMLIT (INTERFACE UTILISATEUR COMPLÈTE)
+# 6. APPLICATION STREAMLIT (INTERFACE UTILISATEUR COMPLÈTE)
 # ==============================================================================
 
 def main() -> None:
@@ -911,7 +996,7 @@ def main() -> None:
         .sub-title {
             color: #4A5568;
             font-size: 1.05rem;
-            margin-bottom: 1.6rem;
+            margin-bottom: 1.4rem;
             font-weight: 400;
         }
         .section-header {
@@ -927,7 +1012,7 @@ def main() -> None:
         .section-desc {
             color: #64748B;
             font-size: 0.95rem;
-            margin-bottom: 1.2rem;
+            margin-bottom: 1.1rem;
         }
         .legend-badge-obj {
             background-color: #2E5A88;
@@ -1127,118 +1212,201 @@ def main() -> None:
     )
 
     # ==========================================================================
-    # SECTION 1 : RETOUR JOURNÉE (DASHBOARD)
+    # ÉTAPE 1 : UPLOAD DU FICHIER EN HAUT DE PAGE (.CSV OU .XLSX)
+    # ==========================================================================
+    uploaded_file = st.file_uploader(
+        "📥 Déposer l'export brut Catapult One (.csv ou .xlsx) :",
+        type=["csv", "xlsx", "xls"],
+        help="Prend en charge les exports Catapult One, PlayerTek et OpenField au format CSV ou Excel avec détection automatique du vrai tableau.",
+    )
+
+    df_raw: Optional[pd.DataFrame] = None
+    df_indiv: Optional[pd.DataFrame] = None
+
+    if uploaded_file is None:
+        # Message invitant l'utilisateur à charger son export
+        col_msg, col_demo = st.columns([4, 1])
+        with col_msg:
+            st.info(
+                "👋 **Bienvenue sur le portail d'analyse GPS du RCA.**\n\n"
+                "Veuillez glisser-déposer votre export brut Catapult (`.csv` ou `.xlsx`) ci-dessus "
+                "pour générer instantanément le rapport **Retour Journée**, le **Podium** et la synthèse de séance."
+            )
+        with col_demo:
+            use_demo = st.checkbox("🧪 Mode Démo", value=False, help="Active des données de démonstration pour tester l'interface.")
+
+        if use_demo:
+            # Construction d'un DataFrame brut de démonstration
+            demo_rows = []
+            for d in MOCK_DEMO_DATA:
+                demo_rows.append({
+                    "Date": "08/09/2026",
+                    "Player Name": d["Player Name"],
+                    "Position": d["Position"],
+                    "Distance (km)": d["Distance (km)"],
+                    "Distance in Speed Zone 4 (km)": d["Zone 4 (km)"],
+                    "Distance in Speed Zone 5 (km)": d["Zone 5 (km)"],
+                    "Top Speed (km/h)": d["Top Speed"],
+                    "Duration": d["Duration"],
+                    "Distance in Speed Zone 1 (km)": d["Z1 (km)"],
+                    "Distance in Speed Zone 2 (km)": d["Z2 (km)"],
+                    "Distance in Speed Zone 3 (km)": d["Z3 (km)"],
+                    "Accelerations Zone Count: 3 - 4 m/s/s": d["Acc34"],
+                    "Accelerations Zone Count: > 4 m/s/s": d["Acc4"],
+                    "Deceleration Zone Count: 3 - 4 m/s/s": d["Dec34"],
+                    "Deceleration Zone Count: > 4 m/s/s": d["Dec4"],
+                })
+            df_raw = pd.DataFrame(demo_rows)
+            df_indiv = process_catapult_data(df_raw)
+            st.toast("Mode démonstration actif avec les données de simulation RCA.")
+        else:
+            return  # Arrêt propre en attente du fichier utilisateur
+
+    else:
+        try:
+            with st.spinner("Lecture et analyse de l'export Catapult One..."):
+                df_raw = load_catapult_file(uploaded_file)
+                df_indiv = process_catapult_data(df_raw)
+            st.success(f"✅ Fichier chargé avec succès ! {len(df_indiv)} joueurs identifiés sur la séance.")
+        except Exception as e:
+            st.error(f"❌ Erreur lors du chargement du fichier Catapult : {str(e)}")
+            with st.expander("Détails techniques de l'erreur"):
+                st.exception(e)
+            return
+
+    # ==========================================================================
+    # ÉTAPE 2 : FILTRE GLOBAL PAR GROUPE POSITIONNEL
+    # ==========================================================================
+    st.markdown("---")
+    col_filter1, col_filter2 = st.columns([3, 2])
+    with col_filter1:
+        groupe_selectionne = st.selectbox(
+            "🏉 Filtrer le tableau de bord par groupe de joueurs :",
+            options=["Tous les groupes", "5 de devant", "3ème Ligne", "Trois-quarts"],
+            index=0,
+            help="Ce filtre adapte l'ensemble des graphiques de charge, du podium et de la synthèse au groupe choisi.",
+        )
+    with col_filter2:
+        mode_calcul = st.radio(
+            "Mode de calcul des jauges :",
+            options=["Moyenne / joueur", "Somme cumulée"],
+            horizontal=True,
+            help="'Moyenne / joueur' permet de comparer la performance moyenne du groupe à son objectif athlétique individuel.",
+        )
+
+    # Filtrage du DataFrame selon le groupe
+    if groupe_selectionne == "Tous les groupes":
+        df_groupe_actif = df_indiv
+    else:
+        df_groupe_actif = df_indiv[df_indiv["Groupe"] == groupe_selectionne]
+
+    # ==========================================================================
+    # ÉTAPE 3 : SECTION 1 : RETOUR JOURNÉE (JAUGES CONNECTÉES AUX VRAIES DONNÉES)
     # ==========================================================================
     st.markdown('<div class="section-header">📊 RETOUR JOURNÉE</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="section-desc">'
-        'Rapport visuel par groupe positionnel : '
+        'Rapport athlétique calculé en temps réel à partir des métriques GPS : '
         '<span class="legend-badge-obj">■ Objectif Séance</span> &nbsp;'
         '<span class="legend-badge-real">■ Réalisé GPS</span> '
-        '&nbsp;(Les pourcentages d\'accomplissement sont intégrés directement dans les barres)'
+        '&nbsp;(Les pourcentages d\'accomplissement sont intégrés dans les barres)'
         '</div>',
         unsafe_allow_html=True,
     )
 
-    # Filtrage par groupe de joueurs via st.tabs
-    tab_avants, tab_3eme, tab_arrieres = st.tabs([
-        "🏉 5 de devant",
-        "🏉 3ème Ligne",
-        "🏉 Trois-quarts"
-    ])
+    if groupe_selectionne == "Tous les groupes":
+        tab_avants, tab_3eme, tab_arrieres = st.tabs([
+            "🏉 5 de devant",
+            "🏉 3ème Ligne",
+            "🏉 Trois-quarts"
+        ])
+        with tab_avants:
+            sub = df_indiv[df_indiv["Groupe"] == "5 de devant"]
+            metrics = calculer_metriques_jauges(sub, "5 de devant", mode_calc=mode_calcul)
+            render_dashboard_objectifs("5 de devant", metrics)
+            st.caption(f"Effectif analysé : {len(sub)} joueurs dans les 5 de devant.")
 
-    with tab_avants:
-        render_dashboard_objectifs("5 de devant", MOCK_OBJECTIFS["5 de devant"])
+        with tab_3eme:
+            sub = df_indiv[df_indiv["Groupe"] == "3ème Ligne"]
+            metrics = calculer_metriques_jauges(sub, "3ème Ligne", mode_calc=mode_calcul)
+            render_dashboard_objectifs("3ème Ligne", metrics)
+            st.caption(f"Effectif analysé : {len(sub)} joueurs en 3ème Ligne.")
 
-    with tab_3eme:
-        render_dashboard_objectifs("3ème Ligne", MOCK_OBJECTIFS["3ème Ligne"])
-
-    with tab_arrieres:
-        render_dashboard_objectifs("Trois-quarts", MOCK_OBJECTIFS["Trois-quarts"])
+        with tab_arrieres:
+            sub = df_indiv[df_indiv["Groupe"] == "Trois-quarts"]
+            metrics = calculer_metriques_jauges(sub, "Trois-quarts", mode_calc=mode_calcul)
+            render_dashboard_objectifs("Trois-quarts", metrics)
+            st.caption(f"Effectif analysé : {len(sub)} joueurs chez les Trois-quarts.")
+    else:
+        metrics = calculer_metriques_jauges(df_groupe_actif, groupe_selectionne, mode_calc=mode_calcul)
+        render_dashboard_objectifs(groupe_selectionne, metrics)
+        st.caption(f"Effectif analysé : {len(df_groupe_actif)} joueur(s) dans le groupe '{groupe_selectionne}'.")
 
     # ==========================================================================
-    # SECTION 2 : PODIUM : LES TOPS DE LA SÉANCE
+    # ÉTAPE 4 : SECTION 2 : PODIUM (CLASSEMENT BASÉ SUR LES VRAIES DONNÉES)
     # ==========================================================================
-    render_podium_section(MOCK_PODIUM)
+    # Le podium met en valeur les tops (Vitesse Max, % de marche, Haute intensité = Zone 4 + Zone 5)
+    podium_dynamique = generer_podium_dynamique(df_groupe_actif)
+    render_podium_section(podium_dynamique)
 
     st.markdown("---")
 
     # ==========================================================================
-    # SECTION 2 : IMPORTATION & TRAITEMENT DES EXPORTS GPS CATAPULT ONE
+    # ÉTAPE 5 : SECTION 3 : SYNTHÈSE INDIVIDUELLE & EXPORT EXCEL OFFICIEL
     # ==========================================================================
-    st.markdown('<div class="section-header">📁 Traitement des Données GPS Catapult One</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">📁 Synthèse Complète de Séance & Export Excel</div>', unsafe_allow_html=True)
 
-    # Vérification de la présence du Template officiel
     template_path = get_template_path()
     if not template_path:
         st.warning(
-            f"⚠️ **Fichier modèle manquant :** Le fichier `{TEMPLATE_FILENAME}` est introuvable dans le même dossier que `app.py`. "
-            "Veuillez déposer ce fichier modèle dans le répertoire pour permettre l'export avec tous les onglets et formules de la préparatrice physique."
+            f"⚠️ **Fichier modèle absent :** `{TEMPLATE_FILENAME}` est introuvable dans le dossier. "
+            "L'export s'effectuera en mode de secours sans les formules et onglets annexes du club."
         )
 
-    uploaded_file = st.file_uploader(
-        "Importer l'export brut CSV Catapult One / PlayerTek / OpenField :",
-        type=["csv", "txt"],
-        help="Détection dynamique de l'en-tête réel ('Player Name' ou 'Date') et conversion automatique du temps de jeu en minutes.",
-    )
+    # Indicateurs clés globaux (KPIs)
+    kpi_cols = st.columns(4)
+    with kpi_cols[0]:
+        st.metric("Joueurs Analysés", len(df_groupe_actif))
+    with kpi_cols[1]:
+        st.metric("Distance Cumulée", f"{df_groupe_actif['Distance (km)'].sum():.2f} km")
+    with kpi_cols[2]:
+        st.metric("Vitesse Max Séance", f"{df_groupe_actif['Top Speed (km/h)'].max():.1f} km/h")
+    with kpi_cols[3]:
+        st.metric("Total Haute Intensité", f"{df_groupe_actif[' Distance haute intensité (m)'].sum():.0f} m")
 
-    if uploaded_file is not None:
-        try:
-            file_bytes = uploaded_file.getvalue()
-            df_raw = load_catapult_csv(file_bytes)
-            
-            with st.spinner("Traitement des métriques GPS et calcul des indicateurs STAPS..."):
-                df_indiv = process_catapult_data(df_raw)
+    st.markdown("### 📋 Tableau de Bord Joueurs (`df_indiv`)")
 
-            st.success(f"Traitement réussi ! {len(df_indiv)} joueurs identifiés et agrégés sur la session.")
+    # Préparation du DataFrame pour affichage (arrondi à 2 décimales et colonne Groupe mise en avant)
+    df_display = df_groupe_actif.copy()
+    numeric_cols = df_display.select_dtypes(include=[np.number]).columns
+    df_display[numeric_cols] = df_display[numeric_cols].round(2)
 
-            # Métriques clés globales
-            kpi_cols = st.columns(4)
-            with kpi_cols[0]:
-                st.metric("Joueurs Analysés", len(df_indiv))
-            with kpi_cols[1]:
-                st.metric("Distance Cumulée", f"{df_indiv['Distance (km)'].sum():.2f} km")
-            with kpi_cols[2]:
-                st.metric("Vitesse Max Séance", f"{df_indiv['Top Speed (km/h)'].max():.1f} km/h")
-            with kpi_cols[3]:
-                st.metric("Total Haute Intensité", f"{df_indiv[' Distance haute intensité (m)'].sum():.0f} m")
+    # Réorganisation des colonnes d'affichage : placer 'Groupe' juste après le Nom
+    cols_order = ["Nom ; Prénom", "Groupe"] + [c for c in FINAL_COLUMNS if c != "Nom ; Prénom" and c in df_display.columns]
+    df_display = df_display[[c for c in cols_order if c in df_display.columns]]
 
-            st.markdown("### 📋 Synthèse Individuelle STAPS (`df_indiv`)")
-            
-            # Formatage du DataFrame pour l'affichage interactif : arrondi à 2 décimales
-            df_indiv['Temps de jeu '] = df_indiv['Temps de jeu '].astype(float)
-            numeric_cols = df_indiv.select_dtypes(include=[np.number]).columns
-            df_indiv[numeric_cols] = df_indiv[numeric_cols].round(2)
-            
-            st.dataframe(df_indiv, use_container_width=True, hide_index=True)
+    st.dataframe(df_display, use_container_width=True, hide_index=True)
 
-            # Export Excel : Injection dans le modèle officiel de la préparatrice
-            st.markdown("### 📥 Télécharger le Fichier Excel de Séance")
-            if template_path:
-                excel_buffer = populate_template_excel(df_indiv=df_indiv, df_raw=df_raw)
-                st.download_button(
-                    label=f"Télécharger {OUTPUT_DOWNLOAD_FILENAME}",
-                    data=excel_buffer.getvalue(),
-                    file_name=OUTPUT_DOWNLOAD_FILENAME,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    help="Télécharge le classeur officiel complet avec tous les onglets d'origine et les formules actualisées.",
-                )
-            else:
-                fallback_buffer = create_fallback_excel(df_indiv=df_indiv)
-                st.download_button(
-                    label=f"Télécharger {OUTPUT_DOWNLOAD_FILENAME} (Format de secours)",
-                    data=fallback_buffer.getvalue(),
-                    file_name=OUTPUT_DOWNLOAD_FILENAME,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    help="Fichier de secours généré sans les onglets modèles annexes.",
-                )
-
-        except Exception as e:
-            st.error(f"Erreur lors du traitement du fichier Catapult One : {str(e)}")
-            with st.expander("Détails techniques de l'erreur"):
-                st.exception(e)
+    # Téléchargement du classeur Excel complet
+    st.markdown("### 📥 Télécharger le Fichier Excel de Séance")
+    if template_path:
+        excel_buffer = populate_template_excel(df_indiv=df_indiv, df_raw=df_raw)
+        st.download_button(
+            label=f"Télécharger {OUTPUT_DOWNLOAD_FILENAME}",
+            data=excel_buffer.getvalue(),
+            file_name=OUTPUT_DOWNLOAD_FILENAME,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Télécharge le classeur officiel complet avec tous les onglets d'origine et les formules actualisées.",
+        )
     else:
-        st.info("👋 Veuillez téléverser un export brut CSV Catapult One pour générer la synthèse STAPS et mettre à jour le modèle.")
+        fallback_buffer = create_fallback_excel(df_indiv=df_indiv)
+        st.download_button(
+            label=f"Télécharger {OUTPUT_DOWNLOAD_FILENAME} (Format de secours)",
+            data=fallback_buffer.getvalue(),
+            file_name=OUTPUT_DOWNLOAD_FILENAME,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Fichier de secours généré sans les onglets modèles annexes.",
+        )
 
 
 if __name__ == "__main__":
