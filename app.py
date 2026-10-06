@@ -5,16 +5,19 @@ Auteur : Expert Python / Streamlit Senior en Data Visualisation Sportive
 Description :
     Application web complète combinant :
     1. Un Uploader universel (.csv et .xlsx) en haut de page avec détection dynamique du vrai header.
-    2. Un Dashboard dynamique (style Canva) de comparaison Objectif vs Réalisé connecté aux vraies données GPS
+    2. Un module de Mapping GPS (attribution de 22 boîtiers aux joueurs avec photos).
+    3. Un Dashboard dynamique (style Canva) de comparaison Objectif vs Réalisé connecté aux vraies données GPS
        avec filtrage par groupe de joueurs ("5 de devant", "3ème Ligne", "Trois-quarts").
-    3. Un Podium dynamique des Tops de la séance (Top speed, % marche, Haute intensité) calculé en temps réel.
-    4. La conversion précise des durées en minutes réelles et l'agrégation par joueur (groupby).
-    5. L'injection directe dans le classeur modèle officiel (Modele_Vierge_STAPS.xlsx) pour préserver
+    4. Un Podium dynamique des Tops de la séance (Top speed, % marche, Haute intensité) calculé en temps réel,
+       avec photos réelles des joueurs encodées en Base64.
+    5. La conversion précise des durées en minutes réelles et l'agrégation par joueur (groupby).
+    6. L'injection directe dans le classeur modèle officiel (Modele_Vierge_STAPS.xlsx) pour préserver
        toutes les formules natives de la préparatrice physique, graphiques et onglets.
 """
 
 from __future__ import annotations
 
+import base64
 import io
 import os
 import re
@@ -36,6 +39,10 @@ import streamlit as st
 
 TEMPLATE_FILENAME = "Modele_Vierge_STAPS.xlsx"
 OUTPUT_DOWNLOAD_FILENAME = "Synthese_Complete_Seance.xlsx"
+
+# Dossier contenant les photos des joueurs (ex: DUPONT_Antoine.jpg)
+PHOTOS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "photos_joueurs")
+DEFAULT_AVATAR = os.path.join(PHOTOS_DIR, "avatar_par_defaut.jpg")
 
 # Palette de couleurs officielles Rugby Club Amiénois / Style Canva
 COLOR_OBJECTIF = "#2E5A88"  # Bleu roi / marine RCA
@@ -125,7 +132,72 @@ def get_template_path() -> Optional[str]:
 
 
 # ==============================================================================
-# 1. DATA VISUALISATION PLOTLY & PODIUM (STYLE CANVA ÉPURÉ)
+# 1. GESTION DES PHOTOS JOUEURS & ENCODAGE BASE64
+# ==============================================================================
+
+def obtenir_chemin_photo(nom_joueur: str) -> Optional[str]:
+    """
+    Retourne le chemin de la photo du joueur dans photos_joueurs/.
+    Teste plusieurs variantes de nommage (underscores, casse, tirets).
+    Retourne DEFAULT_AVATAR si aucune correspondance n'est trouvée,
+    ou None si l'avatar par défaut n'existe pas non plus.
+    """
+    if not nom_joueur or nom_joueur.strip() == "":
+        return DEFAULT_AVATAR if os.path.isfile(DEFAULT_AVATAR) else None
+
+    nom = nom_joueur.strip()
+    # Variantes de nommage à tester (ex: "DUPONT Antoine" → plusieurs formats)
+    variantes = [
+        nom.replace(" ", "_"),            # DUPONT_Antoine
+        nom.replace(" ", "_").lower(),    # dupont_antoine
+        nom.replace(" ", "_").title(),    # Dupont_Antoine
+        nom.replace(" ", "-"),            # DUPONT-Antoine
+        nom,                              # DUPONT Antoine (tel quel)
+    ]
+
+    extensions = [".jpg", ".jpeg", ".png", ".webp"]
+
+    for v in variantes:
+        for ext in extensions:
+            chemin = os.path.join(PHOTOS_DIR, f"{v}{ext}")
+            if os.path.isfile(chemin):
+                return chemin
+
+    # Recherche approximative : fichier dont le nom contient le nom de famille
+    nom_famille = nom.split()[0].lower() if " " in nom else nom.lower()
+    try:
+        for f in os.listdir(PHOTOS_DIR):
+            if nom_famille in f.lower() and os.path.splitext(f)[1].lower() in extensions:
+                return os.path.join(PHOTOS_DIR, f)
+    except FileNotFoundError:
+        pass
+
+    return DEFAULT_AVATAR if os.path.isfile(DEFAULT_AVATAR) else None
+
+
+def photo_to_base64_data_uri(nom_joueur: str) -> str:
+    """
+    Convertit la photo du joueur en Data URI Base64 pour l'intégrer directement dans le HTML.
+    Si aucune photo n'est trouvée, retourne l'URL Dicebear SVG par défaut (initiales).
+    """
+    chemin = obtenir_chemin_photo(nom_joueur)
+    if chemin and os.path.isfile(chemin):
+        ext = os.path.splitext(chemin)[1].lower()
+        mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+        mime_type = mime_map.get(ext, "image/jpeg")
+        try:
+            with open(chemin, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("utf-8")
+            return f"data:{mime_type};base64,{b64}"
+        except Exception:
+            pass
+    # Fallback : avatar Dicebear SVG avec les initiales du joueur
+    seed = urllib.parse.quote(nom_joueur.strip()) if nom_joueur else "RCA"
+    return f"https://api.dicebear.com/7.x/initials/svg?seed={seed}&backgroundColor=2E5A88"
+
+
+# ==============================================================================
+# 2. DATA VISUALISATION PLOTLY & PODIUM (STYLE CANVA ÉPURÉ)
 # ==============================================================================
 
 def creer_graphique_jauge(titre: str, val_objectif: float, val_realise: float) -> go.Figure:
@@ -234,7 +306,7 @@ def render_podium_section(podium_data: Dict[str, Dict[str, Any]]) -> None:
     - 3 colonnes ('Top speed (km/h)', '% de marche', 'Haute intensité (m)').
     - Le 1er est mis en valeur au sommet avec un avatar plus grand et fond dégradé.
     - Le 2ème et le 3ème sont disposés côte à côte juste en dessous.
-    - Avatars ronds dynamiques via https://api.dicebear.com/7.x/initials/svg.
+    - Avatars ronds : photo Base64 réelle si elle existe, sinon Dicebear SVG.
     - Nettoyage rigoureux de l'indentation via textwrap pour éviter tout rendu de bloc de code.
     """
     st.divider()
@@ -258,7 +330,7 @@ def render_podium_section(podium_data: Dict[str, Dict[str, Any]]) -> None:
                 <div class="podium-winner-box">
                     <div class="podium-rank-badge rank-1">🥇 1er</div>
                     <div class="avatar-wrapper">
-                        <img src="https://api.dicebear.com/7.x/initials/svg?seed={p1['seed']}&backgroundColor=2E5A88" 
+                        <img src="{p1['avatar_src']}"
                              alt="{p1['name']}" class="podium-avatar img-winner" />
                     </div>
                     <div class="podium-player-name name-winner">{p1['name']}</div>
@@ -268,7 +340,7 @@ def render_podium_section(podium_data: Dict[str, Dict[str, Any]]) -> None:
                     <div class="podium-runner-box">
                         <div class="podium-rank-badge rank-2">🥈 2ème</div>
                         <div class="avatar-wrapper">
-                            <img src="https://api.dicebear.com/7.x/initials/svg?seed={p2['seed']}&backgroundColor=2E5A88" 
+                            <img src="{p2['avatar_src']}"
                                  alt="{p2['name']}" class="podium-avatar img-runner" />
                         </div>
                         <div class="podium-player-name">{p2['name']}</div>
@@ -277,7 +349,7 @@ def render_podium_section(podium_data: Dict[str, Dict[str, Any]]) -> None:
                     <div class="podium-runner-box">
                         <div class="podium-rank-badge rank-3">🥉 3ème</div>
                         <div class="avatar-wrapper">
-                            <img src="https://api.dicebear.com/7.x/initials/svg?seed={p3['seed']}&backgroundColor=2E5A88" 
+                            <img src="{p3['avatar_src']}"
                                  alt="{p3['name']}" class="podium-avatar img-runner" />
                         </div>
                         <div class="podium-player-name">{p3['name']}</div>
@@ -293,7 +365,7 @@ def render_podium_section(podium_data: Dict[str, Dict[str, Any]]) -> None:
 
 
 # ==============================================================================
-# 2. PARSING ROBUSTE & CONVERSION NUMÉRIQUE / TEMPORELLE
+# 3. PARSING ROBUSTE & CONVERSION NUMÉRIQUE / TEMPORELLE
 # ==============================================================================
 
 def parse_duration_to_minutes(val: Any) -> float:
@@ -383,20 +455,20 @@ def clean_numeric_value(val: Any) -> float:
 
 
 def find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    """Recherche une colonne correspondant à une liste de candidats."""
+    """Recherche flexible d'une colonne insensible aux espaces et à la casse."""
     col_map = {re.sub(r"\s+", " ", str(c).strip().lower()): c for c in df.columns}
-    
+
     for candidate in candidates:
         norm_candidate = re.sub(r"\s+", " ", candidate.strip().lower())
         if norm_candidate in col_map:
             return col_map[norm_candidate]
-            
+
     for candidate in candidates:
         norm_candidate = re.sub(r"\s+", " ", candidate.strip().lower())
         for norm_col, orig_col in col_map.items():
             if norm_candidate in norm_col:
                 return orig_col
-                
+
     return None
 
 
@@ -486,7 +558,118 @@ def load_catapult_file(uploaded_file: Any) -> pd.DataFrame:
 
 
 # ==============================================================================
-# 3. CALCULS STAPS & INGÉNIERIE DES CARACTÉRISTIQUES (GROUPBY JOUEUR)
+# 4. MAPPING GPS : Attribution des 22 boîtiers GPS aux joueurs
+# ==============================================================================
+
+def ui_attribution_gps(liste_noms_joueurs: List[str]) -> Dict[int, str]:
+    """
+    Affiche 22 lignes (une par boîtier GPS) avec photo + selectbox.
+    Retourne {1: "DUPONT Antoine", 2: "RAMOS Thomas", ...}.
+    Les GPS non attribués ne figurent pas dans le dictionnaire retourné.
+    Persiste le mapping dans st.session_state pour survivre aux reruns Streamlit.
+    """
+    st.markdown('<div class="section-header">📡 Attribution des Boîtiers GPS</div>', unsafe_allow_html=True)
+    st.caption("Associez chaque boîtier GPS (1→22) au joueur qui le porte pendant la séance.")
+
+    options = ["— Sélectionner un joueur —"] + sorted(liste_noms_joueurs)
+    mapping: Dict[int, str] = {}
+
+    # Récupération du mapping persistant en session_state
+    if "gps_mapping" not in st.session_state:
+        st.session_state["gps_mapping"] = {}
+
+    # Affichage en 2 colonnes de 11 GPS pour éviter une page trop longue
+    col_gauche, col_droite = st.columns(2)
+
+    for num_gps in range(1, 23):
+        conteneur = col_gauche if num_gps <= 11 else col_droite
+
+        with conteneur:
+            c_photo, c_select = st.columns([1, 3])
+
+            # Index par défaut : restaure la sélection précédente si elle existe
+            default_idx = 0
+            prev = st.session_state["gps_mapping"].get(num_gps, "")
+            if prev in options:
+                default_idx = options.index(prev)
+
+            with c_select:
+                choix = st.selectbox(
+                    f"GPS n°{num_gps}",
+                    options=options,
+                    index=default_idx,
+                    key=f"gps_select_{num_gps}",
+                )
+
+            with c_photo:
+                if choix != options[0]:
+                    photo = obtenir_chemin_photo(choix)
+                    if photo and os.path.isfile(photo):
+                        st.image(photo, width=48)
+                    else:
+                        st.markdown("👤", help=choix)
+                else:
+                    st.markdown(
+                        "<div style='width:48px;height:48px;border-radius:50%;"
+                        "background:#E2E8F0;display:flex;align-items:center;"
+                        "justify-content:center;color:#94A3B8;font-size:1.4rem;'>?</div>",
+                        unsafe_allow_html=True,
+                    )
+
+            if choix != options[0]:
+                mapping[num_gps] = choix
+
+    # Persistance en session_state
+    st.session_state["gps_mapping"] = mapping
+    return mapping
+
+
+def appliquer_mapping(df_catapult: pd.DataFrame, dictionnaire_gps: Dict[int, str]) -> pd.DataFrame:
+    """
+    Remplace les identifiants numériques GPS dans la colonne 'Player Name'
+    par les vrais noms de joueurs à partir du dictionnaire {num_gps: "Nom"}.
+
+    Logique de détection :
+    1. Si 'Player Name' contient des entiers (1, 2, ... 22) → mapping direct.
+    2. Sinon, tente de récupérer le numéro depuis 'Tags' ou 'Split Name'.
+    """
+    if not dictionnaire_gps:
+        return df_catapult
+
+    df = df_catapult.copy()
+
+    # Identification de la colonne contenant le numéro GPS
+    player_col = find_column(df, ["Player Name", "Athlete Name", "Nom ; Prénom", "Player"])
+    if not player_col:
+        return df
+
+    # Tentative de conversion directe : Player Name = numéro de GPS
+    nums = pd.to_numeric(df[player_col], errors="coerce")
+    if nums.notna().sum() > len(df) * 0.5:
+        # La majorité des valeurs sont des entiers → c'est l'identifiant GPS
+        df["_gps_num"] = nums.astype("Int64")
+        df[player_col] = df["_gps_num"].map(dictionnaire_gps).fillna(df[player_col])
+        df.drop(columns=["_gps_num"], inplace=True)
+        return df
+
+    # Fallback : chercher le numéro GPS dans 'Tags' ou 'Split Name'
+    tag_col = find_column(df, ["Tags", "Split Name", "N°de GPS", "GPS Number"])
+    if tag_col:
+        tag_nums = pd.to_numeric(df[tag_col], errors="coerce")
+        if tag_nums.notna().sum() > 0:
+            df["_gps_num"] = tag_nums.astype("Int64")
+            mapped = df["_gps_num"].map(dictionnaire_gps)
+            mask = mapped.notna()
+            df.loc[mask, player_col] = mapped[mask]
+            df.drop(columns=["_gps_num"], inplace=True)
+            return df
+
+    # Aucun numéro GPS détecté → retour sans modification
+    return df
+
+
+# ==============================================================================
+# 5. CALCULS STAPS & INGÉNIERIE DES CARACTÉRISTIQUES (GROUPBY JOUEUR)
 # ==============================================================================
 
 def load_template_positions() -> Dict[str, str]:
@@ -540,7 +723,7 @@ def assign_player_groups(df: pd.DataFrame, df_raw: Optional[pd.DataFrame] = None
             for _, r in df_raw[[raw_player_col, pos_col]].dropna().drop_duplicates().iterrows():
                 p_name = str(r[raw_player_col]).strip()
                 p_pos = str(r[pos_col]).strip().lower()
-                
+
                 if any(k in p_pos for k in ["pilier", "prop", "talonneur", "hooker", "deuxième", "2ème", "2eme", "lock", "devant"]):
                     position_map[p_name] = "5 de devant"
                 elif any(k in p_pos for k in ["troisième", "3ème", "3eme", "flanker", "n°8", "no 8", "number 8"]):
@@ -552,7 +735,7 @@ def assign_player_groups(df: pd.DataFrame, df_raw: Optional[pd.DataFrame] = None
     template_positions = load_template_positions()
     GROUPS = ["5 de devant", "3ème Ligne", "Trois-quarts"]
     unique_players = sorted(df[player_col].dropna().unique().tolist())
-    
+
     group_list = []
     for idx, p in enumerate(df[player_col]):
         p_clean = str(p).strip().lower()
@@ -748,7 +931,7 @@ def process_catapult_data(df_raw: pd.DataFrame) -> pd.DataFrame:
 
 
 # ==============================================================================
-# 4. MOTEUR DE CALCULS DYNAMIQUES (JAUGES ET PODIUM)
+# 6. MOTEUR DE CALCULS DYNAMIQUES (JAUGES ET PODIUM)
 # ==============================================================================
 
 def calculer_metriques_jauges(df_subset: pd.DataFrame, group_name: str, mode_calc: str = "Moyenne / joueur") -> Dict[str, Tuple[float, float]]:
@@ -808,11 +991,23 @@ def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any
     - Top speed (km/h) : tri sur Top Speed (km/h) décroissant.
     - % de marche : tri sur %Marche décroissant.
     - Haute intensité (m) : tri sur Zone 4 + Zone 5 (mètres) décroissant.
+    - Pour chaque joueur, génère avatar_src = photo Base64 locale ou Dicebear SVG.
     """
     if len(df_subset) == 0:
         return {}
 
     podium_result: Dict[str, Dict[str, Any]] = {}
+
+    def _make_player_entry(rank: int, name: str, stat_str: str) -> Dict[str, Any]:
+        return {
+            "rank": rank,
+            "name": name,
+            "stat": stat_str,
+            "avatar_src": photo_to_base64_data_uri(name),
+        }
+
+    def _placeholder(rank: int) -> Dict[str, Any]:
+        return {"rank": rank, "name": "-", "stat": "-", "avatar_src": photo_to_base64_data_uri("")}
 
     # 1. TOP SPEED
     ts_col = "Top Speed (km/h)"
@@ -821,14 +1016,9 @@ def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any
     for rank, (_, row) in enumerate(df_sorted_ts.head(3).iterrows(), start=1):
         name = str(row["Nom ; Prénom"]).strip()
         val = float(row[ts_col])
-        players_ts.append({
-            "rank": rank,
-            "name": name,
-            "stat": f"{val:.1f} km/h",
-            "seed": urllib.parse.quote(name),
-        })
+        players_ts.append(_make_player_entry(rank, name, f"{val:.1f} km/h"))
     while len(players_ts) < 3:
-        players_ts.append({"rank": len(players_ts) + 1, "name": "-", "stat": "-", "seed": "RCA"})
+        players_ts.append(_placeholder(len(players_ts) + 1))
 
     podium_result["Top speed (km/h)"] = {
         "icon": "⚡",
@@ -846,14 +1036,9 @@ def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any
         name = str(row["Nom ; Prénom"]).strip()
         val_raw = float(row.get(walk_col, 0.0))
         val_pct = val_raw * 100.0 if val_raw <= 1.0 else val_raw
-        players_walk.append({
-            "rank": rank,
-            "name": name,
-            "stat": f"{val_pct:.1f} %",
-            "seed": urllib.parse.quote(name),
-        })
+        players_walk.append(_make_player_entry(rank, name, f"{val_pct:.1f} %"))
     while len(players_walk) < 3:
-        players_walk.append({"rank": len(players_walk) + 1, "name": "-", "stat": "-", "seed": "RCA"})
+        players_walk.append(_placeholder(len(players_walk) + 1))
 
     podium_result["% de marche"] = {
         "icon": "🚶",
@@ -870,14 +1055,9 @@ def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any
     for rank, (_, row) in enumerate(df_sorted_hi.head(3).iterrows(), start=1):
         name = str(row["Nom ; Prénom"]).strip()
         val_m = float(row.get(hi_col, 0.0))
-        players_hi.append({
-            "rank": rank,
-            "name": name,
-            "stat": f"{int(round(val_m)):,d} m".replace(",", " "),
-            "seed": urllib.parse.quote(name),
-        })
+        players_hi.append(_make_player_entry(rank, name, f"{int(round(val_m)):,d} m".replace(",", " ")))
     while len(players_hi) < 3:
-        players_hi.append({"rank": len(players_hi) + 1, "name": "-", "stat": "-", "seed": "RCA"})
+        players_hi.append(_placeholder(len(players_hi) + 1))
 
     podium_result["Haute intensité (m)"] = {
         "icon": "🔥",
@@ -888,7 +1068,7 @@ def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any
 
 
 # ==============================================================================
-# 5. INJECTION DANS LE TEMPLATE EXCEL VIA OPENPYXL (data_only=False)
+# 7. INJECTION DANS LE TEMPLATE EXCEL VIA OPENPYXL (data_only=False)
 # ==============================================================================
 
 def populate_template_excel(df_indiv: pd.DataFrame, df_raw: Optional[pd.DataFrame] = None) -> io.BytesIO:
@@ -967,7 +1147,7 @@ def create_fallback_excel(df_indiv: pd.DataFrame) -> io.BytesIO:
 
 
 # ==============================================================================
-# 6. APPLICATION STREAMLIT (INTERFACE UTILISATEUR COMPLÈTE)
+# 8. APPLICATION STREAMLIT (INTERFACE UTILISATEUR COMPLÈTE)
 # ==============================================================================
 
 def main() -> None:
@@ -1266,6 +1446,40 @@ def main() -> None:
         try:
             with st.spinner("Lecture et analyse de l'export Catapult One..."):
                 df_raw = load_catapult_file(uploaded_file)
+
+            # ==================================================================
+            # ÉTAPE 1b : MAPPING GPS (si Player Name contient des numéros)
+            # ==================================================================
+            # Détecte si la colonne Player Name contient des numéros de boîtier GPS
+            player_col = find_column(df_raw, ["Player Name", "Athlete Name", "Nom ; Prénom", "Player"])
+            needs_mapping = False
+            if player_col:
+                nums = pd.to_numeric(df_raw[player_col], errors="coerce")
+                needs_mapping = nums.notna().sum() > len(df_raw) * 0.5
+
+            if needs_mapping:
+                st.warning(
+                    "⚠️ **Numéros GPS détectés** dans la colonne joueur. "
+                    "Utilisez le panneau ci-dessous pour attribuer chaque boîtier à un joueur."
+                )
+                with st.expander("📡 Attribution des Boîtiers GPS (cliquez pour ouvrir)", expanded=True):
+                    # Charger la liste des joueurs du modèle si disponible
+                    template_positions = load_template_positions()
+                    liste_joueurs_modele = sorted(set(
+                        name.title() for name in template_positions.keys()
+                    ))
+                    if not liste_joueurs_modele:
+                        liste_joueurs_modele = [d["Player Name"] for d in MOCK_DEMO_DATA]
+
+                    mapping_gps = ui_attribution_gps(liste_joueurs_modele)
+
+                    if mapping_gps:
+                        df_raw = appliquer_mapping(df_raw, mapping_gps)
+                        st.success(f"✅ Mapping appliqué : {len(mapping_gps)} boîtiers GPS attribués.")
+                    else:
+                        st.info("ℹ️ Aucun boîtier n'a encore été attribué. Sélectionnez les joueurs ci-dessus.")
+
+            with st.spinner("Traitement des données GPS..."):
                 df_indiv = process_catapult_data(df_raw)
             st.success(f"✅ Fichier chargé avec succès ! {len(df_indiv)} joueurs identifiés sur la séance.")
         except Exception as e:
@@ -1345,7 +1559,7 @@ def main() -> None:
     # ==========================================================================
     # ÉTAPE 4 : SECTION 2 : PODIUM (CLASSEMENT BASÉ SUR LES VRAIES DONNÉES)
     # ==========================================================================
-    # Le podium met en valeur les tops (Vitesse Max, % de marche, Haute intensité = Zone 4 + Zone 5)
+    # Le podium utilise photo_to_base64_data_uri() pour les avatars des joueurs
     podium_dynamique = generer_podium_dynamique(df_groupe_actif)
     render_podium_section(podium_dynamique)
 
