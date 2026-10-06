@@ -32,6 +32,9 @@ import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from fpdf import FPDF
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -1280,33 +1283,194 @@ def create_fallback_excel(df_indiv: pd.DataFrame) -> io.BytesIO:
 
 
 # ==============================================================================
-# 7b. GÉNÉRATION DU RAPPORT PDF POUR LES COACHS (FPDF)
+# 7b. GÉNÉRATION DU RAPPORT PDF POUR LES COACHS (FPDF & MATPLOTLIB)
 # ==============================================================================
 
-def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[str] = None) -> bytes:
+JOURS_FR = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+MOIS_FR = [
+    "", "Janvier", "Février", "Mars", "Avril", "Mai", "Juin",
+    "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"
+]
+
+
+def formater_date_seance_fr(val_date: Any) -> str:
     """
-    Génère un rapport PDF synthétique et élégant destiné aux coachs (staff technique RCA).
-    - Format A4 paysage pour une lisibilité maximale de toutes les colonnes.
-    - En-tête officiel 'Rapport de Séance GPS - RCA' avec date de la séance.
-    - Synthèse des indicateurs globaux d'équipe (KPIs).
-    - Tableau récapitulatif trié par groupe puis distance avec toutes les métriques clés.
+    Convertit n'importe quel format de date (numéro de série Excel ex: 46273, string, timestamp)
+    en date lisible en français avec numéro de semaine :
+    ex: 'Mardi 8 Septembre 2026 - Semaine 37'
     """
+    dt: Optional[datetime.datetime] = None
+    if val_date is not None and not pd.isna(val_date) and str(val_date).strip() != "":
+        # 1. Numéro de série Excel (ex: 46273 ou "46273")
+        try:
+            num_val = float(str(val_date).strip().replace(",", "."))
+            if 30000 < num_val < 60000:
+                dt = datetime.datetime(1899, 12, 30) + datetime.timedelta(days=num_val)
+        except (ValueError, TypeError):
+            pass
+
+        # 2. Parsing standard via pandas
+        if dt is None:
+            try:
+                ts = pd.to_datetime(val_date, errors="coerce", dayfirst=True)
+                if pd.notna(ts):
+                    dt = ts.to_pydatetime()
+            except Exception:
+                pass
+
+    if dt is None:
+        dt = datetime.datetime.now()
+
+    nom_jour = JOURS_FR[dt.weekday()]
+    jour = dt.day
+    nom_mois = MOIS_FR[dt.month]
+    annee = dt.year
+    semaine = dt.isocalendar()[1]
+    return f"{nom_jour} {jour} {nom_mois} {annee} - Semaine {semaine}"
+
+
+def generer_graphique_groupes_matplotlib(df_indiv: pd.DataFrame) -> io.BytesIO:
+    """
+    Génère un diagramme en barres comparant la Distance Moyenne (m)
+    et le HSR Moyen (m) par Groupe de joueurs (5 de devant, 3ème Ligne, Trois-quarts).
+    """
+    fig, ax1 = plt.subplots(figsize=(6.0, 4.5), dpi=160)
+    groupes = ["5 de devant", "3ème Ligne", "Trois-quarts"]
+
+    dist_vals: List[float] = []
+    hsr_vals: List[float] = []
+    for g in groupes:
+        sub = df_indiv[df_indiv["Groupe"] == g]
+        if not sub.empty:
+            dist_vals.append(float(sub["Distance (km)"].mean() * 1000.0))
+            hsr_vals.append(float(sub[" Distance haute intensité (m)"].mean()))
+        else:
+            dist_vals.append(0.0)
+            hsr_vals.append(0.0)
+
+    x = np.arange(len(groupes))
+    width = 0.35
+    ax2 = ax1.twinx()
+
+    rects1 = ax1.bar(x - width/2, dist_vals, width, label="Distance (m)", color="#1F4E79", edgecolor="none")
+    rects2 = ax2.bar(x + width/2, hsr_vals, width, label="HSR (m)", color="#A30000", edgecolor="none")
+
+    ax1.set_ylabel("Distance Moyenne (m)", color="#1F4E79", fontweight="bold", fontsize=8.5)
+    ax2.set_ylabel("HSR Moyen (m)", color="#A30000", fontweight="bold", fontsize=8.5)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(groupes, fontweight="bold", fontsize=8.5)
+    ax1.set_title("Distance Moyenne & HSR Moyen par Groupe", fontweight="bold", color="#1F4E79", fontsize=10.5, pad=12)
+
+    # Valeurs écrites directement sur chaque barre
+    for rect in rects1:
+        h = rect.get_height()
+        if h > 0:
+            ax1.annotate(f"{int(round(h))} m",
+                         xy=(rect.get_x() + rect.get_width() / 2, h),
+                         xytext=(0, 3), textcoords="offset points",
+                         ha="center", va="bottom", fontsize=8, fontweight="bold", color="#1F4E79")
+
+    for rect in rects2:
+        h = rect.get_height()
+        if h > 0:
+            ax2.annotate(f"{int(round(h))} m",
+                         xy=(rect.get_x() + rect.get_width() / 2, h),
+                         xytext=(0, 3), textcoords="offset points",
+                         ha="center", va="bottom", fontsize=8, fontweight="bold", color="#A30000")
+
+    max_dist = max(dist_vals) if dist_vals and max(dist_vals) > 0 else 1000.0
+    max_hsr = max(hsr_vals) if hsr_vals and max(hsr_vals) > 0 else 100.0
+    ax1.set_ylim(0, max_dist * 1.25)
+    ax2.set_ylim(0, max_hsr * 1.25)
+    ax1.grid(axis="y", linestyle="--", alpha=0.3)
+    ax1.tick_params(axis="y", labelcolor="#1F4E79")
+    ax2.tick_params(axis="y", labelcolor="#A30000")
+
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def generer_graphique_postes_matplotlib(df_indiv: pd.DataFrame) -> io.BytesIO:
+    """
+    Génère un diagramme en barres affichant la Vitesse Max (Vmax) Moyenne par Poste.
+    """
+    df_temp = df_indiv.copy()
+    postes_list = []
+    for _, row in df_temp.iterrows():
+        nom = str(row.get("Nom ; Prénom", "")).strip()
+        poste = joueurs_data.get(nom, "")
+        if not poste:
+            for j_nom, j_pos in joueurs_data.items():
+                if j_nom.lower() in nom.lower() or nom.lower() in j_nom.lower():
+                    poste = j_pos
+                    break
+        if not poste:
+            poste = str(row.get("Groupe", "Non défini"))
+        postes_list.append(poste)
+    df_temp["_Poste"] = postes_list
+
+    grp_vmax = df_temp.groupby("_Poste")["Top Speed (km/h)"].mean().sort_values(ascending=True)
+
+    fig, ax = plt.subplots(figsize=(6.0, 4.5), dpi=160)
+    y_pos = np.arange(len(grp_vmax))
+    rects = ax.barh(y_pos, grp_vmax.values, color="#2E5A88", height=0.55, edgecolor="none")
+
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(grp_vmax.index, fontweight="bold", fontsize=8, color="#334155")
+    ax.set_xlabel("Vitesse Max (km/h)", fontweight="bold", fontsize=8.5, color="#1F4E79")
+    ax.set_title("Vitesse Max Moyenne par Poste (km/h)", fontweight="bold", color="#1F4E79", fontsize=10.5, pad=12)
+
+    # Valeurs écrites directement sur les barres
+    for rect in rects:
+        w = rect.get_width()
+        if w > 0:
+            ax.annotate(f"{w:.1f} km/h",
+                        xy=(w, rect.get_y() + rect.get_height() / 2),
+                        xytext=(4, 0), textcoords="offset points",
+                        ha="left", va="center", fontsize=8, fontweight="bold", color="#1F4E79")
+
+    max_v = grp_vmax.max() if not grp_vmax.empty and grp_vmax.max() > 0 else 30.0
+    ax.set_xlim(0, max_v * 1.25)
+    ax.grid(axis="x", linestyle="--", alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[Any] = None) -> bytes:
+    """
+    Génère un rapport PDF optimisé pour les coachs du RCA :
+    - Page 1 : En-tête officiel, date claire & semaine, KPIs globaux, et 2 graphiques Matplotlib :
+               1) Distance Moyenne & HSR Moyen par Groupe
+               2) Vitesse Max Moyenne par Poste
+    - Page 2 : Tableau récapitulatif détaillé des performances par joueur et unité de jeu.
+    """
+    date_texte = formater_date_seance_fr(date_seance)
+
     class RCACoachPDF(FPDF):
         def header(self):
-            # Bandeau supérieur bleu RCA
-            self.set_fill_color(31, 78, 121)  # #1F4E79
+            self.set_fill_color(31, 78, 121)  # Bleu RCA (#1F4E79)
             self.rect(0, 0, 297, 16, style="F")
 
             self.set_xy(12, 3)
             self.set_font("Helvetica", "B", 13)
             self.set_text_color(255, 255, 255)
-            self.cell(150, 10, "RUGBY CLUB AMIÉNOIS  |  Rapport de Séance GPS - RCA", align="L")
+            self.cell(140, 10, "RUGBY CLUB AMIÉNOIS  |  Rapport de Séance GPS - RCA", align="L")
 
-            today_str = date_seance or datetime.date.today().strftime("%d/%m/%Y")
-            self.set_xy(170, 3)
-            self.set_font("Helvetica", "", 10)
+            self.set_xy(155, 3)
+            self.set_font("Helvetica", "", 9.5)
             self.set_text_color(226, 232, 240)
-            self.cell(115, 10, f"Séance du : {today_str}", align="R")
+            self.cell(130, 10, date_texte, align="R")
 
             self.set_text_color(30, 41, 59)
             self.set_y(20)
@@ -1320,11 +1484,15 @@ def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[str
     pdf = RCACoachPDF(orientation="L", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.set_margins(left=12, top=20, right=12)
+
+    # =========================================================================
+    # PAGE 1 : EN-TÊTE, BLOCS KPIS GLOBAUX & LES 2 GRAPHIQUES MATPLOTLIB
+    # =========================================================================
     pdf.add_page()
 
     if df_indiv.empty:
         pdf.set_font("Helvetica", "", 12)
-        pdf.cell(0, 10, "Aucune donnée de joueur disponible pour ce rapport.", ln=True)
+        pdf.cell(0, 10, "Aucune donnée de joueur disponible pour ce rapport.", align="L")
         return bytes(pdf.output())
 
     # 1. Encarts KPIs globaux de Séance
@@ -1343,11 +1511,10 @@ def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[str
     ]
 
     card_w = 273 / len(kpis)
-    pdf.set_y(22)
+    pdf.set_y(21)
     for title, val in kpis:
         x_curr = pdf.get_x()
         y_curr = pdf.get_y()
-        # Fond de la carte KPI
         pdf.set_fill_color(241, 245, 249)
         pdf.set_draw_color(203, 213, 225)
         pdf.rect(x_curr, y_curr, card_w - 2, 13, style="FD")
@@ -1364,15 +1531,34 @@ def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[str
 
         pdf.set_xy(x_curr + card_w, y_curr)
 
-    pdf.set_y(39)
+    # 2. Génération et intégration des deux graphiques Matplotlib côte à côte
+    buf1 = generer_graphique_groupes_matplotlib(df_indiv)
+    buf2 = generer_graphique_postes_matplotlib(df_indiv)
 
-    # 2. Préparation du tableau trié (Par groupe athlétique puis distance décroissante)
+    chart_y = 38
+    chart_w = 133
+    chart_h = 152
+
+    pdf.image(buf1, x=12, y=chart_y, w=chart_w, h=chart_h)
+    pdf.image(buf2, x=151, y=chart_y, w=chart_w, h=chart_h)
+
+    # =========================================================================
+    # PAGE 2 : TABLEAU RÉCAPITULATIF DÉTAILLÉ DES PERFORMANCES JOUEURS
+    # =========================================================================
+    pdf.add_page()
+
+    pdf.set_xy(12, 21)
+    pdf.set_font("Helvetica", "B", 10.5)
+    pdf.set_text_color(31, 78, 121)
+    pdf.cell(0, 6, "TABLEAU RÉCAPITULATIF DÉTAILLÉ DES PERFORMANCES JOUEURS", align="L")
+    pdf.ln(8)
+
+    # Préparation du tableau trié (Par groupe athlétique puis distance décroissante)
     groupe_ordre = {"5 de devant": 1, "3ème Ligne": 2, "Trois-quarts": 3}
     df_tri = df_indiv.copy()
     df_tri["_ordre"] = df_tri["Groupe"].map(groupe_ordre).fillna(4)
     df_tri = df_tri.sort_values(by=["_ordre", "Distance (km)"], ascending=[True, False]).drop(columns=["_ordre"])
 
-    # Configuration des colonnes (Largeur totale = 273 mm)
     cols_def = [
         ("Joueur", 46, "L"),
         ("Poste", 30, "L"),
