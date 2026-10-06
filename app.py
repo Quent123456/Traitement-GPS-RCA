@@ -5,7 +5,12 @@ Auteur : Expert Python / Streamlit Senior en Data Visualisation Sportive
 Description :
     Application web complète combinant :
     1. Un Uploader universel (.csv et .xlsx) en haut de page avec détection dynamique du vrai header.
-    2. Un module de Mapping GPS (attribution de 22 boîtiers aux joueurs avec photos).
+    2. Un module de Mapping GPS dynamique et intelligent :
+       - Scanne le DataFrame brut pour identifier les boîtiers réellement utilisés (ex: "1", "2", "Bam's", "1Er Mi Temps").
+       - Affiche autant de sélecteurs qu'il y a d'identifiants uniques dans l'export.
+       - Base de données officielle de l'effectif sénior RCA extraite du PDF (avec postes associés).
+       - Barre de recherche intégrée avec format_func affichant "Nom Prénom - Poste" tout en retournant le Nom.
+       - Prévisualisation instantanée de la photo du joueur.
     3. Un Dashboard dynamique (style Canva) de comparaison Objectif vs Réalisé connecté aux vraies données GPS
        avec filtrage par groupe de joueurs ("5 de devant", "3ème Ligne", "Trois-quarts").
     4. Un Podium dynamique des Tops de la séance (Top speed, % marche, Haute intensité) calculé en temps réel,
@@ -34,7 +39,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 # ==============================================================================
-# 0. CONSTANTES, OBJECTIFS ATHLÉTIQUES & CONFIGURATION
+# 0. EFFECTIF SÉNIORS RCA & CONFIGURATION ATHLÉTIQUE
 # ==============================================================================
 
 TEMPLATE_FILENAME = "Modele_Vierge_STAPS.xlsx"
@@ -50,7 +55,102 @@ COLOR_REALISE = "#A30000"   # Rouge / Bordeaux RCA
 COLOR_TEXT_MAIN = "#1F4E79"
 COLOR_MUTED = "#555555"
 
-# Objectifs athlétiques de référence par poste (Moyenne individuelle cible par séance)
+# ------------------------------------------------------------------------------
+# 1. BASE DE DONNÉES EFFECTIF SÉNIORS DU RUGBY CLUB AMIÉNOIS (EXTRACTION PDF)
+# ------------------------------------------------------------------------------
+joueurs_data: Dict[str, str] = {
+    # Piliers
+    "SALUA Landry": "Pilier",
+    "SALUA Noam": "Pilier",
+    "FRION Quentin": "Pilier",
+    "COZIC Adrien": "Pilier",
+    "PECQUERY Thomas": "Pilier",
+    "TRAMON Noam": "Pilier",
+    "FOURNET Giovanni": "Pilier",
+    "MAZE Nolan": "Pilier",
+    "BICHARI Jérémy": "Pilier",
+    "LEFEVER Thibault": "Pilier",
+    "ROGIER Arnaud": "Pilier",
+    "VASELLI Sébastien": "Pilier",
+    "TANTER Edouard": "Pilier",
+    "DAULT Bastien": "Pilier",
+    # Talonneurs
+    "LESUEUR Jean-Étienne": "Talonneur",
+    "SAINTOMER Lucas": "Talonneur",
+    "GENERMONT Roméo": "Talonneur",
+    "GUIBERT Samuel": "Talonneur",
+    # 2èmes lignes
+    "WAEYAERT Thomas": "2ème ligne",
+    "GRENET Paul": "2ème ligne",
+    "SOTILLO Alejo": "2ème ligne",
+    "BOIDIN Donovan": "2ème ligne",
+    "VDH Simon": "2ème ligne",
+    "DENIER Gabin": "2ème ligne",
+    "ROY Etienne": "2ème ligne",
+    "FOUQUET Victorien": "2ème ligne",
+    # 3èmes lignes
+    "VASELLI Enzo": "3ème ligne",
+    "LAFEUILLE Emilien": "3ème ligne",
+    "MARTIN Benjamin": "3ème ligne",
+    "MONTI Ciro": "3ème ligne",
+    "WIOTTE Louis": "3ème ligne",
+    "GENTIEN Tim": "3ème ligne",
+    "ORION Lucas": "3ème ligne",
+    "CARPENTIER Simon": "3ème ligne",
+    "CARLIER Louis": "3ème ligne",
+    "COSSARD Léandre": "3ème ligne",
+    "SAINTOMER Louis": "3ème ligne",
+    "AUDIERE Adrien": "3ème ligne",
+    "BINNINGER Alban": "3ème ligne",
+    "BLANC Jules": "3ème ligne",
+    "KAZUMBA Camille": "3ème ligne",
+    # Demis de mêlée
+    "TESSON Gabriel": "Demi de mêlée",
+    "BAMIERE Clément": "Demi de mêlée",
+    "SANTONI Stephan": "Demi de mêlée",
+    "BOEUF Elliot": "Demi de mêlée",
+    # Demis d'ouverture
+    "HARRY Max": "Demi d'ouverture",
+    "CARPENTIER Maël": "Demi d'ouverture",
+    "ULMUCK Victor": "Demi d'ouverture",
+    "GOMES Louis": "Demi d'ouverture",
+    "SUEUR Xavier": "Demi d'ouverture",
+    # Centres
+    "PRÉVOTÉ Oliver": "Centre",
+    "PELESEUMA Ope": "Centre",
+    "TREMBLAY Brieuc": "Centre",
+    "DE BRYUN Octave": "Centre",
+    "VENIN Benoît": "Centre",
+    "HURTEL Oscar": "Centre",
+    # Ailiers
+    "CARPENTIER Joseph": "Ailier",
+    "SALUA Maka": "Ailier",
+    "SELTZER Antoine": "Ailier",
+    "BATON Léonard": "Ailier",
+    "MARZIANO Nathan": "Ailier",
+    "SRIDI Youness": "Ailier",
+    "LEROUX Mathis": "Ailier",
+    # Arrières
+    "LESPINASSE Lucien": "Arrière",
+    "PRÉVOST Thomas": "Arrière",
+    "MOINE Arthur": "Arrière",
+    "VILAIN Beryl": "Arrière",
+}
+
+# Cartographie Poste -> Groupe athlétique officiel
+POSTE_VERS_GROUPE: Dict[str, str] = {
+    "Pilier": "5 de devant",
+    "Talonneur": "5 de devant",
+    "2ème ligne": "5 de devant",
+    "3ème ligne": "3ème Ligne",
+    "Demi de mêlée": "Trois-quarts",
+    "Demi d'ouverture": "Trois-quarts",
+    "Centre": "Trois-quarts",
+    "Ailier": "Trois-quarts",
+    "Arrière": "Trois-quarts",
+}
+
+# Objectifs athlétiques de référence par groupe (Moyenne individuelle cible par séance)
 OBJECTIFS_CONFIG: Dict[str, Dict[str, float]] = {
     "5 de devant": {
         "Objectif Distance (m)": 4500.0,
@@ -104,17 +204,17 @@ FINAL_COLUMNS: List[str] = [
     'HSR m/min',
 ]
 
-# Données de simulation de secours (au cas où l'utilisateur souhaite tester sans fichier)
+# Données de simulation avec joueurs réels du RCA
 MOCK_DEMO_DATA: List[Dict[str, Any]] = [
-    {"Player Name": "Antoine Dupont", "Position": "Demi de mêlée", "Distance (km)": 6.3, "Zone 4 (km)": 0.48, "Zone 5 (km)": 0.24, "Top Speed": 32.4, "Duration": "01:22:00", "Z1 (km)": 2.5, "Z2 (km)": 2.2, "Z3 (km)": 0.88, "Acc34": 18, "Acc4": 8, "Dec34": 14, "Dec4": 6},
-    {"Player Name": "Thomas Ramos", "Position": "Arrière", "Distance (km)": 6.6, "Zone 4 (km)": 0.52, "Zone 5 (km)": 0.28, "Top Speed": 31.8, "Duration": "01:22:00", "Z1 (km)": 2.6, "Z2 (km)": 2.3, "Z3 (km)": 0.90, "Acc34": 20, "Acc4": 7, "Dec34": 15, "Dec4": 5},
-    {"Player Name": "Romain Ntamack", "Position": "Demi d'ouverture", "Distance (km)": 6.0, "Zone 4 (km)": 0.44, "Zone 5 (km)": 0.20, "Top Speed": 31.1, "Duration": "01:22:00", "Z1 (km)": 2.4, "Z2 (km)": 2.1, "Z3 (km)": 0.86, "Acc34": 16, "Acc4": 6, "Dec34": 13, "Dec4": 4},
-    {"Player Name": "Charles Ollivon", "Position": "Troisième ligne", "Distance (km)": 5.6, "Zone 4 (km)": 0.41, "Zone 5 (km)": 0.11, "Top Speed": 29.5, "Duration": "01:22:00", "Z1 (km)": 2.6, "Z2 (km)": 1.8, "Z3 (km)": 0.68, "Acc34": 16, "Acc4": 6, "Dec34": 13, "Dec4": 5},
-    {"Player Name": "Paul Boudehent", "Position": "Troisième ligne", "Distance (km)": 5.4, "Zone 4 (km)": 0.38, "Zone 5 (km)": 0.09, "Top Speed": 28.8, "Duration": "01:22:00", "Z1 (km)": 2.7, "Z2 (km)": 1.7, "Z3 (km)": 0.63, "Acc34": 15, "Acc4": 5, "Dec34": 12, "Dec4": 4},
-    {"Player Name": "Grégory Alldritt", "Position": "N°8", "Distance (km)": 5.5, "Zone 4 (km)": 0.39, "Zone 5 (km)": 0.10, "Top Speed": 29.0, "Duration": "01:22:00", "Z1 (km)": 2.7, "Z2 (km)": 1.7, "Z3 (km)": 0.61, "Acc34": 15, "Acc4": 5, "Dec34": 12, "Dec4": 4},
-    {"Player Name": "Julien Marchand", "Position": "Talonneur", "Distance (km)": 4.6, "Zone 4 (km)": 0.17, "Zone 5 (km)": 0.04, "Top Speed": 26.1, "Duration": "01:18:00", "Z1 (km)": 2.9, "Z2 (km)": 1.3, "Z3 (km)": 0.23, "Acc34": 14, "Acc4": 4, "Dec34": 11, "Dec4": 3},
-    {"Player Name": "Cyril Baille", "Position": "Pilier", "Distance (km)": 4.4, "Zone 4 (km)": 0.15, "Zone 5 (km)": 0.03, "Top Speed": 25.2, "Duration": "01:15:00", "Z1 (km)": 2.8, "Z2 (km)": 1.2, "Z3 (km)": 0.22, "Acc34": 12, "Acc4": 3, "Dec34": 10, "Dec4": 2},
-    {"Player Name": "Uini Atonio", "Position": "Pilier", "Distance (km)": 4.2, "Zone 4 (km)": 0.12, "Zone 5 (km)": 0.02, "Top Speed": 24.5, "Duration": "01:15:00", "Z1 (km)": 2.8, "Z2 (km)": 1.1, "Z3 (km)": 0.18, "Acc34": 11, "Acc4": 2, "Dec34": 9, "Dec4": 2},
+    {"Player Name": "BAMIERE Clément", "Position": "Demi de mêlée", "Distance (km)": 6.3, "Zone 4 (km)": 0.48, "Zone 5 (km)": 0.24, "Top Speed": 32.4, "Duration": "01:22:00", "Z1 (km)": 2.5, "Z2 (km)": 2.2, "Z3 (km)": 0.88, "Acc34": 18, "Acc4": 8, "Dec34": 14, "Dec4": 6},
+    {"Player Name": "PRÉVOST Thomas", "Position": "Arrière", "Distance (km)": 6.6, "Zone 4 (km)": 0.52, "Zone 5 (km)": 0.28, "Top Speed": 31.8, "Duration": "01:22:00", "Z1 (km)": 2.6, "Z2 (km)": 2.3, "Z3 (km)": 0.90, "Acc34": 20, "Acc4": 7, "Dec34": 15, "Dec4": 5},
+    {"Player Name": "HARRY Max", "Position": "Demi d'ouverture", "Distance (km)": 6.0, "Zone 4 (km)": 0.44, "Zone 5 (km)": 0.20, "Top Speed": 31.1, "Duration": "01:22:00", "Z1 (km)": 2.4, "Z2 (km)": 2.1, "Z3 (km)": 0.86, "Acc34": 16, "Acc4": 6, "Dec34": 13, "Dec4": 4},
+    {"Player Name": "VASELLI Enzo", "Position": "3ème ligne", "Distance (km)": 5.6, "Zone 4 (km)": 0.41, "Zone 5 (km)": 0.11, "Top Speed": 29.5, "Duration": "01:22:00", "Z1 (km)": 2.6, "Z2 (km)": 1.8, "Z3 (km)": 0.68, "Acc34": 16, "Acc4": 6, "Dec34": 13, "Dec4": 5},
+    {"Player Name": "MARTIN Benjamin", "Position": "3ème ligne", "Distance (km)": 5.4, "Zone 4 (km)": 0.38, "Zone 5 (km)": 0.09, "Top Speed": 28.8, "Duration": "01:22:00", "Z1 (km)": 2.7, "Z2 (km)": 1.7, "Z3 (km)": 0.63, "Acc34": 15, "Acc4": 5, "Dec34": 12, "Dec4": 4},
+    {"Player Name": "MONTI Ciro", "Position": "3ème ligne", "Distance (km)": 5.5, "Zone 4 (km)": 0.39, "Zone 5 (km)": 0.10, "Top Speed": 29.0, "Duration": "01:22:00", "Z1 (km)": 2.7, "Z2 (km)": 1.7, "Z3 (km)": 0.61, "Acc34": 15, "Acc4": 5, "Dec34": 12, "Dec4": 4},
+    {"Player Name": "LESUEUR Jean-Étienne", "Position": "Talonneur", "Distance (km)": 4.6, "Zone 4 (km)": 0.17, "Zone 5 (km)": 0.04, "Top Speed": 26.1, "Duration": "01:18:00", "Z1 (km)": 2.9, "Z2 (km)": 1.3, "Z3 (km)": 0.23, "Acc34": 14, "Acc4": 4, "Dec34": 11, "Dec4": 3},
+    {"Player Name": "COZIC Adrien", "Position": "Pilier", "Distance (km)": 4.4, "Zone 4 (km)": 0.15, "Zone 5 (km)": 0.03, "Top Speed": 25.2, "Duration": "01:15:00", "Z1 (km)": 2.8, "Z2 (km)": 1.2, "Z3 (km)": 0.22, "Acc34": 12, "Acc4": 3, "Dec34": 10, "Dec4": 2},
+    {"Player Name": "SALUA Landry", "Position": "Pilier", "Distance (km)": 4.2, "Zone 4 (km)": 0.12, "Zone 5 (km)": 0.02, "Top Speed": 24.5, "Duration": "01:15:00", "Z1 (km)": 2.8, "Z2 (km)": 1.1, "Z3 (km)": 0.18, "Acc34": 11, "Acc4": 2, "Dec34": 9, "Dec4": 2},
 ]
 
 
@@ -138,21 +238,18 @@ def get_template_path() -> Optional[str]:
 def obtenir_chemin_photo(nom_joueur: str) -> Optional[str]:
     """
     Retourne le chemin de la photo du joueur dans photos_joueurs/.
-    Teste plusieurs variantes de nommage (underscores, casse, tirets).
-    Retourne DEFAULT_AVATAR si aucune correspondance n'est trouvée,
-    ou None si l'avatar par défaut n'existe pas non plus.
+    Gère les variantes de nommage (underscores, casse, tirets).
     """
     if not nom_joueur or nom_joueur.strip() == "":
         return DEFAULT_AVATAR if os.path.isfile(DEFAULT_AVATAR) else None
 
     nom = nom_joueur.strip()
-    # Variantes de nommage à tester (ex: "DUPONT Antoine" → plusieurs formats)
     variantes = [
         nom.replace(" ", "_"),            # DUPONT_Antoine
         nom.replace(" ", "_").lower(),    # dupont_antoine
         nom.replace(" ", "_").title(),    # Dupont_Antoine
         nom.replace(" ", "-"),            # DUPONT-Antoine
-        nom,                              # DUPONT Antoine (tel quel)
+        nom,                              # DUPONT Antoine
     ]
 
     extensions = [".jpg", ".jpeg", ".png", ".webp"]
@@ -163,7 +260,7 @@ def obtenir_chemin_photo(nom_joueur: str) -> Optional[str]:
             if os.path.isfile(chemin):
                 return chemin
 
-    # Recherche approximative : fichier dont le nom contient le nom de famille
+    # Recherche par nom de famille si le fichier contient le premier mot
     nom_famille = nom.split()[0].lower() if " " in nom else nom.lower()
     try:
         for f in os.listdir(PHOTOS_DIR):
@@ -177,8 +274,8 @@ def obtenir_chemin_photo(nom_joueur: str) -> Optional[str]:
 
 def photo_to_base64_data_uri(nom_joueur: str) -> str:
     """
-    Convertit la photo du joueur en Data URI Base64 pour l'intégrer directement dans le HTML.
-    Si aucune photo n'est trouvée, retourne l'URL Dicebear SVG par défaut (initiales).
+    Convertit la photo du joueur en Data URI Base64 pour le HTML.
+    Si absente, retourne un avatar SVG Dicebear dynamique.
     """
     chemin = obtenir_chemin_photo(nom_joueur)
     if chemin and os.path.isfile(chemin):
@@ -191,7 +288,7 @@ def photo_to_base64_data_uri(nom_joueur: str) -> str:
             return f"data:{mime_type};base64,{b64}"
         except Exception:
             pass
-    # Fallback : avatar Dicebear SVG avec les initiales du joueur
+
     seed = urllib.parse.quote(nom_joueur.strip()) if nom_joueur else "RCA"
     return f"https://api.dicebear.com/7.x/initials/svg?seed={seed}&backgroundColor=2E5A88"
 
@@ -202,12 +299,9 @@ def photo_to_base64_data_uri(nom_joueur: str) -> str:
 
 def creer_graphique_jauge(titre: str, val_objectif: float, val_realise: float) -> go.Figure:
     """
-    Génère un graphique à barres (Bar Chart) stylisé inspiré du design Canva :
-    - Deux barres côte à côte : 'Objectif' (Bleu roi/marine) et 'Réalisé' (Rouge/Bordeaux).
-    - Valeur brute affichée au-dessus de chaque barre.
-    - Pourcentage d'accomplissement (ex: '55%') affiché en grand texte blanc et gras à l'intérieur
-      de la barre 'Réalisé'.
-    - Design minimaliste : fond transparent, sans grille, sans axe Y, typographie moderne sans-serif.
+    Génère un graphique à barres stylisé inspiré du design Canva RCA :
+    - Deux barres côte à côte : 'Objectif' (Bleu roi) et 'Réalisé' (Rouge RCA).
+    - Valeurs et pourcentages d'accomplissement intégrés.
     """
     val_obj = float(val_objectif)
     val_real = float(val_realise)
@@ -302,12 +396,9 @@ def render_dashboard_objectifs(group_name: str, metrics: Dict[str, Tuple[float, 
 
 def render_podium_section(podium_data: Dict[str, Dict[str, Any]]) -> None:
     """
-    Affiche la section Podium (Style Canva) avec les Tops de la séance :
-    - 3 colonnes ('Top speed (km/h)', '% de marche', 'Haute intensité (m)').
-    - Le 1er est mis en valeur au sommet avec un avatar plus grand et fond dégradé.
-    - Le 2ème et le 3ème sont disposés côte à côte juste en dessous.
-    - Avatars ronds : photo Base64 réelle si elle existe, sinon Dicebear SVG.
-    - Nettoyage rigoureux de l'indentation via textwrap pour éviter tout rendu de bloc de code.
+    Affiche la section Podium avec les Tops de la séance :
+    - 3 catégories : Top speed, % marche, Haute intensité.
+    - Avatars réels des joueurs encodés en Base64.
     """
     st.divider()
     st.markdown('<div class="section-header">🏆 PODIUM</div>', unsafe_allow_html=True)
@@ -529,16 +620,11 @@ def load_catapult_csv(file_bytes: bytes) -> pd.DataFrame:
 
 
 def load_catapult_file(uploaded_file: Any) -> pd.DataFrame:
-    """
-    Lit un fichier export Catapult One (.csv, .xlsx, .xls) :
-    - Détecte dynamiquement la vraie ligne d'en-tête (en sautant les lignes de métadonnées).
-    - Gère les encodages et formats tabulaires.
-    """
+    """Lit un export Catapult One (.csv, .xlsx, .xls) en sautant les métadonnées."""
     file_name = uploaded_file.name.lower()
     file_bytes = uploaded_file.getvalue()
 
     if file_name.endswith((".xlsx", ".xls")):
-        # Lecture préliminaire des 15 premières lignes pour repérer le header
         preview_df = pd.read_excel(io.BytesIO(file_bytes), header=None, nrows=15)
         header_idx = 0
         for idx, row in preview_df.iterrows():
@@ -558,51 +644,112 @@ def load_catapult_file(uploaded_file: Any) -> pd.DataFrame:
 
 
 # ==============================================================================
-# 4. MAPPING GPS : Attribution des 22 boîtiers GPS aux joueurs
+# 4. MAPPING GPS DYNAMIQUE & INTELLIGENT (EFFECTIF DU CLUB)
 # ==============================================================================
 
-def ui_attribution_gps(liste_noms_joueurs: List[str]) -> Dict[int, str]:
+def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Dict[str, str]:
     """
-    Affiche 22 lignes (une par boîtier GPS) avec photo + selectbox.
-    Retourne {1: "DUPONT Antoine", 2: "RAMOS Thomas", ...}.
-    Les GPS non attribués ne figurent pas dans le dictionnaire retourné.
-    Persiste le mapping dans st.session_state pour survivre aux reruns Streamlit.
+    Interface dynamique d'attribution GPS :
+    - Analyse le DataFrame brut (df_raw) pour détecter automatiquement TOUS les identifiants
+      uniques présents dans la colonne joueur/boîtier (ex: "1", "2", "Bam's", "1Er Mi Temps").
+    - Génère UNIQUEMENT autant de sélecteurs (st.selectbox) qu'il y a de boîtiers réellement utilisés.
+    - Utilise format_func pour afficher "Nom Prénom - Poste" (ex: "SALUA Noam - Pilier")
+      tout en retournant UNIQUEMENT le nom du joueur dans la valeur finale.
+    - Persiste les choix en session_state et affiche la photo du joueur sélectionné.
     """
-    st.markdown('<div class="section-header">📡 Attribution des Boîtiers GPS</div>', unsafe_allow_html=True)
-    st.caption("Associez chaque boîtier GPS (1→22) au joueur qui le porte pendant la séance.")
+    st.markdown('<div class="section-header">📡 Attribution Dynamique des Boîtiers GPS</div>', unsafe_allow_html=True)
 
-    options = ["— Sélectionner un joueur —"] + sorted(liste_noms_joueurs)
-    mapping: Dict[int, str] = {}
+    # 1. Détection dynamique des identifiants présents dans le fichier brut
+    identifiants_gps: List[str] = []
+    if df_raw is not None and not df_raw.empty:
+        col_id = find_column(df_raw, [
+            "Player Name", "Athlete Name", "Nom ; Prénom", "Player", "Athlete", "Joueur", "Nom", "Name"
+        ])
+        if col_id and col_id in df_raw.columns:
+            raw_vals = df_raw[col_id].dropna().astype(str).str.strip()
+            seen = set()
+            for val in raw_vals:
+                if val and val.lower() not in ["nan", "none", ""] and val not in seen:
+                    seen.add(val)
+                    identifiants_gps.append(val)
 
-    # Récupération du mapping persistant en session_state
+    # Repli automatique si aucun identifiant n'est extrait
+    if not identifiants_gps:
+        identifiants_gps = [f"GPS {i}" for i in range(1, 23)]
+
+    st.caption(
+        f"**{len(identifiants_gps)} boîtier(s) identifié(s)** sur cette séance. "
+        "Attribuez chaque identifiant au joueur correspondant dans l'effectif sénior RCA :"
+    )
+
+    # 2. Construction de la liste des joueurs disponibles (triée)
+    placeholder = "— Sélectionner un joueur —"
+    noms_joueurs_tries = sorted(list(joueurs_data.keys()))
+    options = [placeholder] + noms_joueurs_tries
+
+    def format_affichage_joueur(nom: str) -> str:
+        """Affiche 'Nom Prénom - Poste' dans la liste déroulante et la barre de recherche."""
+        if nom == placeholder:
+            return placeholder
+        poste = joueurs_data.get(nom, "")
+        if poste:
+            return f"{nom} - {poste}"
+        return nom
+
     if "gps_mapping" not in st.session_state:
         st.session_state["gps_mapping"] = {}
 
-    # Affichage en 2 colonnes de 11 GPS pour éviter une page trop longue
-    col_gauche, col_droite = st.columns(2)
+    # Pré-sélection intelligente (surnom, prénom, numéro déjà saisi)
+    def pre_selectionner_joueur(identifiant: str) -> Optional[str]:
+        # 1. Sélection sauvegardée
+        if identifiant in st.session_state["gps_mapping"]:
+            prev = st.session_state["gps_mapping"][identifiant]
+            if prev in options:
+                return prev
 
-    for num_gps in range(1, 23):
-        conteneur = col_gauche if num_gps <= 11 else col_droite
+        id_lower = identifiant.lower()
+        # 2. Surnoms courants
+        if "bam" in id_lower:
+            return "BAMIERE Clément"
+        if "ope" in id_lower:
+            return "PELESEUMA Ope"
+        if "tij" in id_lower or "jean-étienne" in id_lower:
+            return "LESUEUR Jean-Étienne"
+        if "gabin" in id_lower:
+            return "DENIER Gabin"
+
+        # 3. Correspondance exacte ou partielle avec un nom de la liste
+        for j in noms_joueurs_tries:
+            if j.lower() == id_lower or id_lower in j.lower():
+                return j
+        return None
+
+    mapping: Dict[str, str] = {}
+    col_gauche, col_droite = st.columns(2)
+    split_index = (len(identifiants_gps) + 1) // 2
+
+    for idx, identifiant in enumerate(identifiants_gps):
+        conteneur = col_gauche if idx < split_index else col_droite
 
         with conteneur:
             c_photo, c_select = st.columns([1, 3])
 
-            # Index par défaut : restaure la sélection précédente si elle existe
-            default_idx = 0
-            prev = st.session_state["gps_mapping"].get(num_gps, "")
-            if prev in options:
-                default_idx = options.index(prev)
+            default_val = pre_selectionner_joueur(identifiant)
+            default_idx = options.index(default_val) if default_val in options else 0
+
+            safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", f"gps_sel_{identifiant}_{idx}")
 
             with c_select:
                 choix = st.selectbox(
-                    f"GPS n°{num_gps}",
+                    f"Boîtier : {identifiant}",
                     options=options,
                     index=default_idx,
-                    key=f"gps_select_{num_gps}",
+                    format_func=format_affichage_joueur,
+                    key=safe_key,
                 )
 
             with c_photo:
-                if choix != options[0]:
+                if choix != placeholder:
                     photo = obtenir_chemin_photo(choix)
                     if photo and os.path.isfile(photo):
                         st.image(photo, width=48)
@@ -616,55 +763,34 @@ def ui_attribution_gps(liste_noms_joueurs: List[str]) -> Dict[int, str]:
                         unsafe_allow_html=True,
                     )
 
-            if choix != options[0]:
-                mapping[num_gps] = choix
+            if choix != placeholder:
+                mapping[identifiant] = choix
 
-    # Persistance en session_state
     st.session_state["gps_mapping"] = mapping
     return mapping
 
 
-def appliquer_mapping(df_catapult: pd.DataFrame, dictionnaire_gps: Dict[int, str]) -> pd.DataFrame:
+def appliquer_mapping(df_catapult: pd.DataFrame, dictionnaire_gps: Dict[str, str]) -> pd.DataFrame:
     """
-    Remplace les identifiants numériques GPS dans la colonne 'Player Name'
-    par les vrais noms de joueurs à partir du dictionnaire {num_gps: "Nom"}.
-
-    Logique de détection :
-    1. Si 'Player Name' contient des entiers (1, 2, ... 22) → mapping direct.
-    2. Sinon, tente de récupérer le numéro depuis 'Tags' ou 'Split Name'.
+    Remplace les identifiants bruts (ex: '1', 'Bam's', '1Er Mi Temps') dans la colonne joueur
+    par les noms officiels sélectionnés.
     """
     if not dictionnaire_gps:
         return df_catapult
 
     df = df_catapult.copy()
-
-    # Identification de la colonne contenant le numéro GPS
-    player_col = find_column(df, ["Player Name", "Athlete Name", "Nom ; Prénom", "Player"])
+    player_col = find_column(df, [
+        "Player Name", "Athlete Name", "Nom ; Prénom", "Player", "Athlete", "Joueur", "Nom", "Name"
+    ])
     if not player_col:
         return df
 
-    # Tentative de conversion directe : Player Name = numéro de GPS
-    nums = pd.to_numeric(df[player_col], errors="coerce")
-    if nums.notna().sum() > len(df) * 0.5:
-        # La majorité des valeurs sont des entiers → c'est l'identifiant GPS
-        df["_gps_num"] = nums.astype("Int64")
-        df[player_col] = df["_gps_num"].map(dictionnaire_gps).fillna(df[player_col])
-        df.drop(columns=["_gps_num"], inplace=True)
-        return df
+    # Normalisation du dictionnaire
+    dict_norm = {str(k).strip(): v for k, v in dictionnaire_gps.items()}
 
-    # Fallback : chercher le numéro GPS dans 'Tags' ou 'Split Name'
-    tag_col = find_column(df, ["Tags", "Split Name", "N°de GPS", "GPS Number"])
-    if tag_col:
-        tag_nums = pd.to_numeric(df[tag_col], errors="coerce")
-        if tag_nums.notna().sum() > 0:
-            df["_gps_num"] = tag_nums.astype("Int64")
-            mapped = df["_gps_num"].map(dictionnaire_gps)
-            mask = mapped.notna()
-            df.loc[mask, player_col] = mapped[mask]
-            df.drop(columns=["_gps_num"], inplace=True)
-            return df
-
-    # Aucun numéro GPS détecté → retour sans modification
+    # Remplacement direct sur la série
+    s_player = df[player_col].astype(str).str.strip()
+    df[player_col] = s_player.map(dict_norm).fillna(df[player_col])
     return df
 
 
@@ -673,10 +799,7 @@ def appliquer_mapping(df_catapult: pd.DataFrame, dictionnaire_gps: Dict[int, str
 # ==============================================================================
 
 def load_template_positions() -> Dict[str, str]:
-    """
-    Extrait la cartographie des postes réels des joueurs RCA depuis l'onglet 'Liste joueurs'
-    du fichier modèle Modele_Vierge_STAPS.xlsx s'il existe.
-    """
+    """Extrait les postes du classeur modèle officiel si présent."""
     pos_map: Dict[str, str] = {}
     template_path = get_template_path()
     if not template_path:
@@ -706,55 +829,51 @@ def load_template_positions() -> Dict[str, str]:
 
 def assign_player_groups(df: pd.DataFrame, df_raw: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     """
-    Assigne un groupe positionnel ('5 de devant', '3ème Ligne', 'Trois-quarts') à chaque joueur.
-    - Utilise la colonne Position/Groupe/Poste si elle existe dans le fichier brut.
-    - Utilise le mapping officiel du club depuis Modele_Vierge_STAPS.xlsx s'il est présent.
-    - Sinon, attribue les joueurs de manière déterministe et équilibrée (round-robin).
+    Assigne le groupe athlétique ('5 de devant', '3ème Ligne', 'Trois-quarts') :
+    1. En priorité absolue via le dictionnaire officiel 'joueurs_data' (effectif sénior).
+    2. Puis via les métadonnées brutes Catapult.
+    3. Puis via le modèle Excel.
+    4. Répartition de secours équilibrée.
     """
     df = df.copy()
     player_col = "Nom ; Prénom"
-    position_map: Dict[str, str] = {}
-
-    # 1. Détection via les métadonnées de l'export brut (colonne Position, Tags, etc.)
-    if df_raw is not None:
-        pos_col = find_column(df_raw, ["Groupe", "Group", "Position", "Poste", "Tags"])
-        raw_player_col = find_column(df_raw, ["Player Name", "Athlete Name", "Nom ; Prénom", "Nom", "Player"])
-        if pos_col and raw_player_col:
-            for _, r in df_raw[[raw_player_col, pos_col]].dropna().drop_duplicates().iterrows():
-                p_name = str(r[raw_player_col]).strip()
-                p_pos = str(r[pos_col]).strip().lower()
-
-                if any(k in p_pos for k in ["pilier", "prop", "talonneur", "hooker", "deuxième", "2ème", "2eme", "lock", "devant"]):
-                    position_map[p_name] = "5 de devant"
-                elif any(k in p_pos for k in ["troisième", "3ème", "3eme", "flanker", "n°8", "no 8", "number 8"]):
-                    position_map[p_name] = "3ème Ligne"
-                elif any(k in p_pos for k in ["demi", "mêlée", "ouverture", "scrum", "fly", "centre", "ailier", "wing", "arrière", "fullback", "trois-quart", "back"]):
-                    position_map[p_name] = "Trois-quarts"
-
-    # 2. Complément avec la liste officielle du modèle RCA
-    template_positions = load_template_positions()
     GROUPS = ["5 de devant", "3ème Ligne", "Trois-quarts"]
+    template_positions = load_template_positions()
     unique_players = sorted(df[player_col].dropna().unique().tolist())
 
     group_list = []
     for idx, p in enumerate(df[player_col]):
-        p_clean = str(p).strip().lower()
-        if p in position_map:
-            group_list.append(position_map[p])
-        elif p_clean in template_positions:
-            group_list.append(template_positions[p_clean])
-        else:
-            # Recherche partielle de nom (ex: "COZIC Adrien" vs "Cozic")
-            matched_group = None
-            for t_name, t_grp in template_positions.items():
-                if t_name in p_clean or p_clean in t_name:
-                    matched_group = t_grp
-                    break
-            if matched_group:
-                group_list.append(matched_group)
-            else:
-                p_idx = unique_players.index(p) if p in unique_players else idx
-                group_list.append(GROUPS[p_idx % 3])
+        p_clean = str(p).strip()
+        p_lower = p_clean.lower()
+
+        # 1. Correspondance avec la base de données effectif RCA
+        matched_poste = None
+        for j_nom, j_poste in joueurs_data.items():
+            if j_nom.lower() == p_lower or j_nom.lower() in p_lower or p_lower in j_nom.lower():
+                matched_poste = j_poste
+                break
+
+        if matched_poste:
+            group_list.append(POSTE_VERS_GROUPE.get(matched_poste, "Trois-quarts"))
+            continue
+
+        # 2. Modèle Excel
+        if p_lower in template_positions:
+            group_list.append(template_positions[p_lower])
+            continue
+
+        matched_grp = None
+        for t_name, t_grp in template_positions.items():
+            if t_name in p_lower or p_lower in t_name:
+                matched_grp = t_grp
+                break
+        if matched_grp:
+            group_list.append(matched_grp)
+            continue
+
+        # 3. Repli déterministe
+        p_idx = unique_players.index(p) if p in unique_players else idx
+        group_list.append(GROUPS[p_idx % 3])
 
     df["Groupe"] = group_list
     return df
@@ -766,7 +885,6 @@ def process_catapult_data(df_raw: pd.DataFrame) -> pd.DataFrame:
     - Regroupe les données par joueur (session globale).
     - Convertit le Temps de jeu en minutes réelles.
     - Extrait et agrège toutes les métriques requises (Distance, Zones 1 à 5, Accel, Decel).
-    - Construit le DataFrame df_indiv conforme aux colonnes métier STAPS.
     """
     player_col = find_column(df_raw, [
         "Nom ; Prénom", "Player Name", "Athlete Name", "Player", "Athlete", "Joueur", "Nom", "Name"
@@ -857,7 +975,7 @@ def process_catapult_data(df_raw: pd.DataFrame) -> pd.DataFrame:
     df_clean["Dec_34"] = df_raw[dec_34_col].apply(clean_numeric_value) if dec_34_col else 0.0
     df_clean["Dec_gt4"] = df_raw[dec_gt4_col].apply(clean_numeric_value) if dec_gt4_col else 0.0
 
-    # Groupby par Joueur pour agréger la séance
+    # Groupby Joueur
     grouped = df_clean.groupby("Nom ; Prénom", as_index=False).agg({
         "Duration_min": "sum",
         "Distance_km": "sum",
@@ -925,7 +1043,6 @@ def process_catapult_data(df_raw: pd.DataFrame) -> pd.DataFrame:
     df_indiv['%VHSR'] = pct_vhsr
     df_indiv['HSR m/min'] = hsr_per_min
 
-    # Attribution du Groupe
     df_indiv = assign_player_groups(df_indiv, df_raw=df_raw)
     return df_indiv
 
@@ -935,13 +1052,7 @@ def process_catapult_data(df_raw: pd.DataFrame) -> pd.DataFrame:
 # ==============================================================================
 
 def calculer_metriques_jauges(df_subset: pd.DataFrame, group_name: str, mode_calc: str = "Moyenne / joueur") -> Dict[str, Tuple[float, float]]:
-    """
-    Calcule dynamiquement les 4 métriques des jauges pour le groupe sélectionné :
-    - Distance (m) : Somme ou moyenne de Distance (km) * 1000
-    - HSR (m) : Somme ou moyenne de Distance in Speed Zone 4 (km) * 1000
-    - VHSR (m) : Somme ou moyenne de Distance in Speed Zone 5 (km) * 1000
-    - ACC/DEC : Somme ou moyenne des Accel/Dec totales
-    """
+    """Calcule dynamiquement les 4 métriques des jauges pour le groupe sélectionné."""
     targets = OBJECTIFS_CONFIG.get(group_name, OBJECTIFS_CONFIG["Tous les groupes"])
 
     if len(df_subset) == 0:
@@ -949,11 +1060,9 @@ def calculer_metriques_jauges(df_subset: pd.DataFrame, group_name: str, mode_cal
 
     use_mean = (mode_calc == "Moyenne / joueur")
 
-    # 1. Distance en mètres
     d_m = df_subset["Distance (km)"] * 1000.0
     val_dist = d_m.mean() if use_mean else d_m.sum()
 
-    # 2. HSR (Zone 4 en mètres)
     z4_col = "Distance in Speed Zone 4  (km)"
     if z4_col in df_subset.columns:
         hsr_m = df_subset[z4_col] * 1000.0
@@ -961,7 +1070,6 @@ def calculer_metriques_jauges(df_subset: pd.DataFrame, group_name: str, mode_cal
         hsr_m = df_subset[" Distance haute intensité (m)"] * 0.70
     val_hsr = hsr_m.mean() if use_mean else hsr_m.sum()
 
-    # 3. VHSR (Zone 5 en mètres)
     z5_col = "Distance in Speed Zone 5  (km)"
     if z5_col in df_subset.columns:
         vhsr_m = df_subset[z5_col] * 1000.0
@@ -969,11 +1077,9 @@ def calculer_metriques_jauges(df_subset: pd.DataFrame, group_name: str, mode_cal
         vhsr_m = df_subset[" Distance haute intensité (m)"] * 0.30
     val_vhsr = vhsr_m.mean() if use_mean else vhsr_m.sum()
 
-    # 4. ACC/DEC total
     acc_dec = df_subset["Accel/Dec"] if "Accel/Dec" in df_subset.columns else pd.Series([0.0] * len(df_subset))
     val_acc_dec = acc_dec.mean() if use_mean else acc_dec.sum()
 
-    # Ajustement proportionnel de l'objectif si affichage en somme cumulée
     nb_joueurs = len(df_subset)
     multiplier = 1.0 if use_mean else max(float(nb_joueurs), 1.0)
 
@@ -986,13 +1092,7 @@ def calculer_metriques_jauges(df_subset: pd.DataFrame, group_name: str, mode_cal
 
 
 def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
-    """
-    Génère le Podium des 3 tops à partir des données réelles :
-    - Top speed (km/h) : tri sur Top Speed (km/h) décroissant.
-    - % de marche : tri sur %Marche décroissant.
-    - Haute intensité (m) : tri sur Zone 4 + Zone 5 (mètres) décroissant.
-    - Pour chaque joueur, génère avatar_src = photo Base64 locale ou Dicebear SVG.
-    """
+    """Génère le Podium des 3 tops à partir des données réelles avec photo Base64."""
     if len(df_subset) == 0:
         return {}
 
@@ -1045,7 +1145,7 @@ def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any
         "players": players_walk,
     }
 
-    # 3. HAUTE INTENSITÉ (m) -> Somme Zone 4 + Zone 5
+    # 3. HAUTE INTENSITÉ (m)
     hi_col = " Distance haute intensité (m)"
     if hi_col in df_subset.columns:
         df_sorted_hi = df_subset.sort_values(by=hi_col, ascending=False)
@@ -1404,7 +1504,6 @@ def main() -> None:
     df_indiv: Optional[pd.DataFrame] = None
 
     if uploaded_file is None:
-        # Message invitant l'utilisateur à charger son export
         col_msg, col_demo = st.columns([4, 1])
         with col_msg:
             st.info(
@@ -1413,10 +1512,9 @@ def main() -> None:
                 "pour générer instantanément le rapport **Retour Journée**, le **Podium** et la synthèse de séance."
             )
         with col_demo:
-            use_demo = st.checkbox("🧪 Mode Démo", value=False, help="Active des données de démonstration pour tester l'interface.")
+            use_demo = st.checkbox("🧪 Mode Démo", value=False, help="Active des données de démonstration avec l'effectif réel RCA.")
 
         if use_demo:
-            # Construction d'un DataFrame brut de démonstration
             demo_rows = []
             for d in MOCK_DEMO_DATA:
                 demo_rows.append({
@@ -1440,7 +1538,7 @@ def main() -> None:
             df_indiv = process_catapult_data(df_raw)
             st.toast("Mode démonstration actif avec les données de simulation RCA.")
         else:
-            return  # Arrêt propre en attente du fichier utilisateur
+            return
 
     else:
         try:
@@ -1448,36 +1546,13 @@ def main() -> None:
                 df_raw = load_catapult_file(uploaded_file)
 
             # ==================================================================
-            # ÉTAPE 1b : MAPPING GPS (si Player Name contient des numéros)
+            # ÉTAPE 1b : MAPPING GPS DYNAMIQUE (BASÉ SUR LES BOÎTIERS RÉELS)
             # ==================================================================
-            # Détecte si la colonne Player Name contient des numéros de boîtier GPS
-            player_col = find_column(df_raw, ["Player Name", "Athlete Name", "Nom ; Prénom", "Player"])
-            needs_mapping = False
-            if player_col:
-                nums = pd.to_numeric(df_raw[player_col], errors="coerce")
-                needs_mapping = nums.notna().sum() > len(df_raw) * 0.5
-
-            if needs_mapping:
-                st.warning(
-                    "⚠️ **Numéros GPS détectés** dans la colonne joueur. "
-                    "Utilisez le panneau ci-dessous pour attribuer chaque boîtier à un joueur."
-                )
-                with st.expander("📡 Attribution des Boîtiers GPS (cliquez pour ouvrir)", expanded=True):
-                    # Charger la liste des joueurs du modèle si disponible
-                    template_positions = load_template_positions()
-                    liste_joueurs_modele = sorted(set(
-                        name.title() for name in template_positions.keys()
-                    ))
-                    if not liste_joueurs_modele:
-                        liste_joueurs_modele = [d["Player Name"] for d in MOCK_DEMO_DATA]
-
-                    mapping_gps = ui_attribution_gps(liste_joueurs_modele)
-
-                    if mapping_gps:
-                        df_raw = appliquer_mapping(df_raw, mapping_gps)
-                        st.success(f"✅ Mapping appliqué : {len(mapping_gps)} boîtiers GPS attribués.")
-                    else:
-                        st.info("ℹ️ Aucun boîtier n'a encore été attribué. Sélectionnez les joueurs ci-dessus.")
+            with st.expander("📡 Attribution des Boîtiers GPS aux Joueurs (Effectif RCA)", expanded=True):
+                mapping_gps = ui_attribution_gps(df_raw=df_raw)
+                if mapping_gps:
+                    df_raw = appliquer_mapping(df_raw, mapping_gps)
+                    st.success(f"✅ Mapping appliqué : {len(mapping_gps)} boîtier(s) attribué(s) à l'effectif.")
 
             with st.spinner("Traitement des données GPS..."):
                 df_indiv = process_catapult_data(df_raw)
@@ -1508,7 +1583,6 @@ def main() -> None:
             help="'Moyenne / joueur' permet de comparer la performance moyenne du groupe à son objectif athlétique individuel.",
         )
 
-    # Filtrage du DataFrame selon le groupe
     if groupe_selectionne == "Tous les groupes":
         df_groupe_actif = df_indiv
     else:
@@ -1559,7 +1633,6 @@ def main() -> None:
     # ==========================================================================
     # ÉTAPE 4 : SECTION 2 : PODIUM (CLASSEMENT BASÉ SUR LES VRAIES DONNÉES)
     # ==========================================================================
-    # Le podium utilise photo_to_base64_data_uri() pour les avatars des joueurs
     podium_dynamique = generer_podium_dynamique(df_groupe_actif)
     render_podium_section(podium_dynamique)
 
@@ -1577,7 +1650,6 @@ def main() -> None:
             "L'export s'effectuera en mode de secours sans les formules et onglets annexes du club."
         )
 
-    # Indicateurs clés globaux (KPIs)
     kpi_cols = st.columns(4)
     with kpi_cols[0]:
         st.metric("Joueurs Analysés", len(df_groupe_actif))
@@ -1590,18 +1662,15 @@ def main() -> None:
 
     st.markdown("### 📋 Tableau de Bord Joueurs (`df_indiv`)")
 
-    # Préparation du DataFrame pour affichage (arrondi à 2 décimales et colonne Groupe mise en avant)
     df_display = df_groupe_actif.copy()
     numeric_cols = df_display.select_dtypes(include=[np.number]).columns
     df_display[numeric_cols] = df_display[numeric_cols].round(2)
 
-    # Réorganisation des colonnes d'affichage : placer 'Groupe' juste après le Nom
     cols_order = ["Nom ; Prénom", "Groupe"] + [c for c in FINAL_COLUMNS if c != "Nom ; Prénom" and c in df_display.columns]
     df_display = df_display[[c for c in cols_order if c in df_display.columns]]
 
     st.dataframe(df_display, use_container_width=True, hide_index=True)
 
-    # Téléchargement du classeur Excel complet
     st.markdown("### 📥 Télécharger le Fichier Excel de Séance")
     if template_path:
         excel_buffer = populate_template_excel(df_indiv=df_indiv, df_raw=df_raw)
