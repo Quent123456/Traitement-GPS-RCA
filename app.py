@@ -650,16 +650,18 @@ def load_catapult_file(uploaded_file: Any) -> pd.DataFrame:
 def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Dict[Union[int, str], str]:
     """
     Interface dynamique d'attribution des boîtiers GPS :
-    - Filtre et extrait uniquement les numéros de boîtiers GPS présents dans df_raw.
+    - Filtre et extrait uniquement les numéros uniques de boîtiers GPS présents dans df_raw.
     - Convertit les identifiants en entiers (int) et les trie par ordre croissant (1, 2, 3...).
-    - Génère STRICTEMENT autant de sélecteurs (st.selectbox) qu'il y a de boîtiers réellement utilisés.
+    - Itère DIRECTEMENT sur la liste des identifiants détectés (pas de range()).
+    - S'il manque un boîtier (ex: le 18), passe directement au suivant (17 puis 19).
+    - Affiche EXACTEMENT le même nombre de sélecteurs que de boîtiers détectés (ex: 21 sélecteurs pour 21 boîtiers).
     - Utilise format_func pour afficher 'Nom Prénom - Poste' tout en retournant le nom du joueur.
     - Affiche la photo officielle du joueur sélectionné ou l'avatar RCA.
     """
     st.markdown('<div class="section-header">📡 Attribution des Boîtiers GPS aux Joueurs</div>', unsafe_allow_html=True)
 
-    # 1. Extraction et tri numérique des identifiants GPS
-    boitiers_gps: List[int] = []
+    # 1. Extraction et tri numérique strict des identifiants GPS détectés
+    liste_gps_detectes: List[int] = []
     if df_raw is not None and not df_raw.empty:
         col_id = find_column(df_raw, [
             "Player Name", "Athlete Name", "Nom ; Prénom", "Player", "Athlete", "Joueur", "Nom", "Name"
@@ -668,7 +670,7 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Dict[Union[int,
             nums_trouves: set[int] = set()
             for val in df_raw[col_id].dropna():
                 val_str = str(val).strip()
-                # Conversion directe si entier ou flottant entier (ex: 1, 1.0, "1", "1.0")
+                # Conversion directe si valeur numérique (int, float, ou str numérique)
                 try:
                     num_float = float(val_str)
                     if num_float.is_integer() and num_float > 0:
@@ -677,7 +679,7 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Dict[Union[int,
                 except (ValueError, TypeError):
                     pass
 
-                # Extraction regex si chaîne du type "GPS 1", "Boîtier 12", etc.
+                # Extraction si chaîne contenant un identifiant numérique (ex: "GPS 17")
                 match = re.search(r"\b(\d+)\b", val_str)
                 if match:
                     try:
@@ -687,19 +689,15 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Dict[Union[int,
                     except (ValueError, TypeError):
                         pass
 
-            boitiers_gps = sorted(list(nums_trouves))
+            liste_gps_detectes = sorted(list(nums_trouves))
 
-    # Si aucun boîtier numérique n'a été détecté dans le fichier (ex: données de démo ou déjà nommées)
-    if not boitiers_gps:
-        if df_raw is not None and not df_raw.empty:
-            st.info("ℹ️ Les données contiennent déjà des noms de joueurs ou aucun numéro de boîtier GPS n'a été détecté.")
-            return {}
-        # Mode démo ou affichage initial par défaut : 22 boîtiers
-        boitiers_gps = list(range(1, 23))
+    # Si aucun boîtier numérique n'a été détecté dans le fichier
+    if not liste_gps_detectes:
+        st.info("ℹ️ Aucun numéro de boîtier GPS à attribuer (les joueurs sont déjà identifiés ou aucun numéro n'est présent).")
+        return {}
 
     st.caption(
-        f"**{len(boitiers_gps)} boîtier(s) GPS identifié(s)** sur cette séance "
-        f"(du boîtier n°{boitiers_gps[0]} au boîtier n°{boitiers_gps[-1]}). "
+        f"**{len(liste_gps_detectes)} boîtier(s) GPS actif(s) détecté(s)** sur cette séance. "
         "Attribuez chaque boîtier à son joueur :"
     )
 
@@ -722,28 +720,28 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Dict[Union[int,
 
     mapping: Dict[Union[int, str], str] = {}
     col_gauche, col_droite = st.columns(2)
-    split_index = (len(boitiers_gps) + 1) // 2
+    split_index = (len(liste_gps_detectes) + 1) // 2
 
-    # 3. Boucle stricte sur la liste triée des numéros de boîtiers
-    for idx, num_gps in enumerate(boitiers_gps):
+    # 3. Boucle STRICTE sur la liste des identifiants détectés (aucun range() utilisé)
+    for idx, gps_id in enumerate(liste_gps_detectes):
         conteneur = col_gauche if idx < split_index else col_droite
 
         with conteneur:
             c_photo, c_select = st.columns([1, 3])
 
             prev = (
-                st.session_state["gps_mapping"].get(num_gps)
-                or st.session_state["gps_mapping"].get(str(num_gps))
+                st.session_state["gps_mapping"].get(gps_id)
+                or st.session_state["gps_mapping"].get(str(gps_id))
             )
             default_idx = options.index(prev) if prev in options else 0
 
             with c_select:
                 choix = st.selectbox(
-                    f"Boîtier GPS n°{num_gps}",
+                    f"Boîtier GPS n°{gps_id}",
                     options=options,
                     index=default_idx,
                     format_func=format_affichage_joueur,
-                    key=f"gps_sel_boitier_{num_gps}",
+                    key=f"gps_sel_boitier_{gps_id}",
                 )
 
             with c_photo:
@@ -762,10 +760,10 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Dict[Union[int,
                     )
 
             if choix != placeholder:
-                mapping[num_gps] = choix
-                mapping[str(num_gps)] = choix
-                st.session_state["gps_mapping"][num_gps] = choix
-                st.session_state["gps_mapping"][str(num_gps)] = choix
+                mapping[gps_id] = choix
+                mapping[str(gps_id)] = choix
+                st.session_state["gps_mapping"][gps_id] = choix
+                st.session_state["gps_mapping"][str(gps_id)] = choix
 
     return mapping
 
