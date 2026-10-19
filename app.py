@@ -25,11 +25,18 @@ from __future__ import annotations
 import base64
 import datetime
 import io
+import json
 import os
 import re
 import textwrap
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple, Union
+
+try:
+    from streamlit_mic_recorder import speech_to_text
+    HAS_MIC_RECORDER = True
+except Exception:
+    HAS_MIC_RECORDER = False
 
 from fpdf import FPDF
 import matplotlib
@@ -1932,6 +1939,360 @@ def generer_rapport_pdf_coachs(
 
 
 # ==============================================================================
+# 7d. COPILOTE INTELLIGENT RCA (INTERPRÉTATION EN LANGAGE NATUREL & FILTRAGE DYNAMIQUE)
+# ==============================================================================
+
+ALIAS_COLONNES: Dict[str, str] = {
+    "distance": "Distance (km)",
+    "distance (km)": "Distance (km)",
+    "distance_km": "Distance (km)",
+    "km": "Distance (km)",
+    "vmax": "Top Speed (km/h)",
+    "top speed": "Top Speed (km/h)",
+    "top speed (km/h)": "Top Speed (km/h)",
+    "top_speed": "Top Speed (km/h)",
+    "vitesse": "Top Speed (km/h)",
+    "vitesse max": "Top Speed (km/h)",
+    "vitesse maximale": "Top Speed (km/h)",
+    "hsr": " Distance haute intensité (m)",
+    "hsr (m)": " Distance haute intensité (m)",
+    "haute intensite": " Distance haute intensité (m)",
+    "haute intensité": " Distance haute intensité (m)",
+    "distance haute intensite": " Distance haute intensité (m)",
+    "distance haute intensité": " Distance haute intensité (m)",
+    "vhsr": "VHSR (m)",
+    "vhsr (m)": "VHSR (m)",
+    "tres haute intensite": "VHSR (m)",
+    "très haute intensité": "VHSR (m)",
+    "groupe": "Groupe",
+    "poste": "Groupe",
+    "nom": "Nom ; Prénom",
+    "joueur": "Nom ; Prénom",
+    "marche": "%Marche ",
+    "%marche": "%Marche ",
+    "course": "%course",
+    "%course": "%course",
+    "temps": "Temps de jeu ",
+    "temps de jeu": "Temps de jeu ",
+    "distance/min": "Distance Per Min (m/min)",
+    "m/min": "Distance Per Min (m/min)",
+}
+
+
+def resoudre_nom_colonne(col_name: str, available_cols: List[str]) -> Optional[str]:
+    """Résout le nom de colonne exact en fonction des alias et des variations de casse/espaces."""
+    if not col_name:
+        return None
+    c_clean = col_name.strip()
+    if c_clean in available_cols:
+        return c_clean
+    c_lower = c_clean.lower()
+    for col in available_cols:
+        if col.strip().lower() == c_lower:
+            return col
+    if c_lower in ALIAS_COLONNES and ALIAS_COLONNES[c_lower] in available_cols:
+        return ALIAS_COLONNES[c_lower]
+    for k, target in ALIAS_COLONNES.items():
+        if k in c_lower and target in available_cols:
+            return target
+    for col in available_cols:
+        if c_lower in col.lower() or col.lower() in c_lower:
+            return col
+    return None
+
+
+def parse_requete_locale(query: str, colonnes: List[str]) -> Dict[str, Any]:
+    """
+    Analyseur local déterministe (mots-clés et expressions régulières)
+    activé si le LLM n'est pas configuré ou en cas de repli anti-panne.
+    """
+    q = query.lower().strip()
+    filtres: List[Dict[str, Any]] = []
+    desc_items: List[str] = []
+
+    # 1. Réinitialisation
+    if any(k in q for k in ["reset", "reinit", "tout", "tous", "annul", "effac", "aucun filtre", "complet"]):
+        return {
+            "filtres": [],
+            "tri": None,
+            "limite": None,
+            "description_filtre": "Effectif complet (réinitialisation)"
+        }
+
+    # 2. Filtrage par groupe de joueurs
+    if "5 de devant" in q or "cinq de devant" in q:
+        filtres.append({"colonne": "Groupe", "operateur": "==", "valeur": "5 de devant"})
+        desc_items.append("Groupe: 5 de devant")
+    elif any(k in q for k in ["3eme", "3ème", "troisieme", "troisième"]):
+        filtres.append({"colonne": "Groupe", "operateur": "==", "valeur": "3ème Ligne"})
+        desc_items.append("Groupe: 3ème Ligne")
+    elif any(k in q for k in ["avant", "pack", "gros"]):
+        filtres.append({"colonne": "Groupe", "operateur": "in", "valeur": ["5 de devant", "3ème Ligne"]})
+        desc_items.append("Avants (5 de devant + 3ème Ligne)")
+    elif any(k in q for k in ["arriere", "arrière", "trois-quart", "trois quart", "3/4", "trois-quarts", "lignes arrieres"]):
+        filtres.append({"colonne": "Groupe", "operateur": "==", "valeur": "Trois-quarts"})
+        desc_items.append("Trois-quarts")
+
+    # 3. Vitesse Max / Top Speed
+    is_speed_query = any(w in q for w in ["speed", "vitesse", "vmax", "pointe"]) or ("km/h" in q and "distance" not in q)
+    if is_speed_query:
+        m_v_less = (
+            re.search(r"(?:sous|inferieur\s+a|inferieure\s+a|<|en-dessous\s+de|moins\s+de)\s*(\d+(?:[.,]\d+)?)\s*(?:km/?h)?", q)
+            or re.search(r"(?:vitesse|speed|vmax)\s*<\s*(\d+(?:[.,]\d+)?)", q)
+        )
+        if m_v_less:
+            val = float(m_v_less.group(1).replace(",", "."))
+            filtres.append({"colonne": "Top Speed (km/h)", "operateur": "<", "valeur": val})
+            desc_items.append(f"Vitesse Max < {val:.1f} km/h")
+        else:
+            m_v_more = (
+                re.search(r"(?:superieur\s+a|superieure\s+a|>|au-dessus\s+de|plus\s+de)\s*(\d+(?:[.,]\d+)?)\s*(?:km/?h)?", q)
+                or re.search(r"(?:vitesse|speed|vmax)\s*>\s*(\d+(?:[.,]\d+)?)", q)
+            )
+            if m_v_more:
+                val = float(m_v_more.group(1).replace(",", "."))
+                filtres.append({"colonne": "Top Speed (km/h)", "operateur": ">", "valeur": val})
+                desc_items.append(f"Vitesse Max > {val:.1f} km/h")
+
+    # 4. Haute Intensité (HSR)
+    is_hsr_query = any(w in q for w in ["hsr", "haute intensite", "haute intensité", "haute-intensite"])
+    if is_hsr_query:
+        m_hsr_val = (
+            re.search(r"(?:plus\s+de|>|superieur\s+a|superieure\s+a|au-dessus\s+de)\s*(\d+(?:[.,]\d+)?)\s*(?:m|metres?)?\s*(?:en|de)?\s*(?:hsr|haute\s+intensit[ée])", q)
+            or re.search(r"(?:hsr|haute\s+intensit[ée])\s*(?:>|plus\s+de|superieur\s+a|superieure\s+a)?\s*(\d+(?:[.,]\d+)?)\s*(?:m|metres?)?", q)
+            or re.search(r"(\d+(?:[.,]\d+)?)\s*(?:m|metres?)\s*(?:en|de)?\s*(?:hsr|haute\s+intensit[ée])", q)
+        )
+        if m_hsr_val:
+            val = float(m_hsr_val.group(1).replace(",", "."))
+            if any(w in q for w in ["moins", "sous", "inferieur", "<"]):
+                filtres.append({"colonne": " Distance haute intensité (m)", "operateur": "<", "valeur": val})
+                desc_items.append(f"HSR < {int(val)} m")
+            else:
+                filtres.append({"colonne": " Distance haute intensité (m)", "operateur": ">", "valeur": val})
+                desc_items.append(f"HSR > {int(val)} m")
+
+    # 5. Très Haute Intensité (VHSR)
+    is_vhsr_query = any(w in q for w in ["vhsr", "tres haute", "très haute"])
+    if is_vhsr_query:
+        m_vhsr = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:m|metres?)?", q)
+        if m_vhsr:
+            val = float(m_vhsr.group(1).replace(",", "."))
+            filtres.append({"colonne": "VHSR (m)", "operateur": ">", "valeur": val})
+            desc_items.append(f"VHSR > {int(val)} m")
+
+    # 6. Distance totale (km)
+    is_dist_query = any(w in q for w in ["distance", "parcouru", "couru", "volume"]) and not is_hsr_query
+    if is_dist_query:
+        m_dist = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:km)?", q)
+        if m_dist:
+            val = float(m_dist.group(1).replace(",", "."))
+            if val < 20.0:
+                if any(w in q for w in ["moins", "sous", "inferieur", "<"]):
+                    filtres.append({"colonne": "Distance (km)", "operateur": "<", "valeur": val})
+                    desc_items.append(f"Distance < {val:.1f} km")
+                else:
+                    filtres.append({"colonne": "Distance (km)", "operateur": ">", "valeur": val})
+                    desc_items.append(f"Distance > {val:.1f} km")
+
+    # 7. Tri / Limite
+    limite = None
+    m_top_n = re.search(r"top\s*(\d+)", q)
+    if m_top_n:
+        limite = int(m_top_n.group(1))
+
+    tri = None
+    if is_speed_query:
+        tri = {"colonne": "Top Speed (km/h)", "ordre": "desc"}
+    elif is_dist_query:
+        tri = {"colonne": "Distance (km)", "ordre": "desc"}
+    elif is_hsr_query:
+        tri = {"colonne": " Distance haute intensité (m)", "ordre": "desc"}
+
+    desc = " + ".join(desc_items) if desc_items else f"Filtre : '{query}'"
+    return {"filtres": filtres, "tri": tri, "limite": limite, "description_filtre": desc}
+
+
+def interpreter_requete_copilote(
+    query: str,
+    colonnes_disponibles: List[str],
+    api_key: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Traduit une requête en langage naturel (français) en structure de filtrage JSON
+    pour le DataFrame des joueurs GPS en utilisant le LLM Gemini (ou analyseur local de repli).
+    """
+    q_clean = query.strip()
+    if not q_clean:
+        return {"filtres": [], "tri": None, "limite": None, "description_filtre": "Requête vide."}
+
+    q_low = q_clean.lower()
+    if any(w in q_low for w in ["reset", "reinit", "tout afficher", "tous les joueurs", "aucun filtre", "annuler"]):
+        return {"filtres": [], "tri": None, "limite": None, "description_filtre": "Réinitialisation : ensemble de l'effectif affiché."}
+
+    # 1. Tentative avec le LLM Gemini si disponible
+    try:
+        resolved_key = (
+            api_key
+            or os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("GOOGLE_API_KEY")
+            or (hasattr(st, "secrets") and ("GEMINI_API_KEY" in st.secrets) and st.secrets["GEMINI_API_KEY"])
+            or (hasattr(st, "secrets") and ("GOOGLE_API_KEY" in st.secrets) and st.secrets["GOOGLE_API_KEY"])
+            or (hasattr(st, "session_state") and st.session_state.get("gemini_api_key"))
+        )
+        if resolved_key and str(resolved_key).strip():
+            from google import genai
+            from google.genai import types
+
+            client = genai.Client(api_key=str(resolved_key).strip())
+
+            prompt = f"""Tu es l'assistant et copilote de données GPS du staff technique du Rugby Club Amiénois (RCA).
+L'entraîneur formule une requête en français (texte ou vocale) pour filtrer ou ordonner le tableau des joueurs.
+
+Colonnes disponibles dans le tableau (df_indiv) :
+- 'Nom ; Prénom' : Nom complet du joueur
+- 'Groupe' : '5 de devant', '3ème Ligne', 'Trois-quarts'
+  * Contexte rugby : 'avants' ou 'pack' = ['5 de devant', '3ème Ligne']
+  * 'arrières', 'trois-quarts', 'lignes arrières' = ['Trois-quarts']
+- 'Distance (km)' : distance totale parcourue (km)
+- 'Top Speed (km/h)' : vitesse de pointe maximale (km/h)
+- ' Distance haute intensité (m)' : distance HSR (> 19.8 km/h en mètres)
+- 'VHSR (m)' : distance très haute intensité (> 25.2 km/h en mètres)
+- '%Marche ' : pourcentage du temps passé à marcher (0 à 100)
+- 'Distance Per Min (m/min)' : intensité relative en mètres par minute
+
+Consigne de l'utilisateur : "{q_clean}"
+
+Retourne UNIQUEMENT un objet JSON valide avec cette structure stricte :
+{{
+  "filtres": [
+    {{
+      "colonne": "nom_exact_de_la_colonne",
+      "operateur": "> | >= | < | <= | == | != | in | contains",
+      "valeur": nombre ou chaîne ou tableau
+    }}
+  ],
+  "tri": {{
+    "colonne": "nom_exact_de_la_colonne",
+    "ordre": "asc | desc"
+  }} ou null,
+  "limite": nombre_entier ou null,
+  "description_filtre": "Court résumé en français de l'action effectuée"
+}}
+Si la requête demande de réinitialiser ou de tout montrer, retourne "filtres": [].
+"""
+
+            raw_json = None
+            try:
+                resp = client.models.generate_content(
+                    model="gemini-3.8-flash",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.0
+                    )
+                )
+                raw_json = resp.text
+            except Exception:
+                try:
+                    resp = client.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            temperature=0.0
+                        )
+                    )
+                    raw_json = resp.text
+                except Exception:
+                    pass
+
+            if raw_json:
+                cleaned_text = raw_json.strip()
+                if cleaned_text.startswith("```"):
+                    cleaned_text = re.sub(r"^```[a-zA-Z]*\n", "", cleaned_text)
+                    cleaned_text = re.sub(r"\n```$", "", cleaned_text)
+                data = json.loads(cleaned_text)
+                if isinstance(data, dict) and "filtres" in data:
+                    return data
+    except Exception:
+        pass
+
+    # 2. Analyseur local de repli sécurisé (déterministe et autonome)
+    return parse_requete_locale(q_clean, colonnes_disponibles)
+
+
+def appliquer_filtres_copilote(
+    df: pd.DataFrame,
+    config_filtre: Dict[str, Any]
+) -> Tuple[pd.DataFrame, str]:
+    """
+    Applique de manière stricte et déterministe les critères du copilote sur le DataFrame.
+    Retourne (df_filtre, description_lisible).
+    """
+    if df is None or df.empty:
+        return df, "Aucune donnée disponible."
+
+    df_out = df.copy()
+    filtres = config_filtre.get("filtres", [])
+    desc = config_filtre.get("description_filtre", "Filtre copilote appliqué")
+
+    if not filtres:
+        return df_out, "Effectif complet (aucun filtre actif)"
+
+    cols_dispo = list(df_out.columns)
+
+    for f in filtres:
+        raw_col = f.get("colonne", "")
+        op = f.get("operateur", "")
+        val = f.get("valeur")
+
+        col = resoudre_nom_colonne(raw_col, cols_dispo)
+        if not col or col not in df_out.columns:
+            continue
+
+        try:
+            if op in [">", ">=", "<", "<=", "==", "!="]:
+                val_num = float(val) if not isinstance(val, (int, float)) and str(val).replace(".", "", 1).replace("-", "", 1).isdigit() else val
+                series_num = pd.to_numeric(df_out[col], errors="coerce")
+                if op == ">":
+                    df_out = df_out[series_num > val_num]
+                elif op == ">=":
+                    df_out = df_out[series_num >= val_num]
+                elif op == "<":
+                    df_out = df_out[series_num < val_num]
+                elif op == "<=":
+                    df_out = df_out[series_num <= val_num]
+                elif op == "==":
+                    df_out = df_out[series_num == val_num]
+                elif op == "!=":
+                    df_out = df_out[series_num != val_num]
+            elif op == "in" and isinstance(val, list):
+                val_clean = [str(x).strip().lower() for x in val]
+                df_out = df_out[df_out[col].astype(str).str.strip().str.lower().isin(val_clean)]
+            elif op == "==" and isinstance(val, str):
+                df_out = df_out[df_out[col].astype(str).str.strip().str.lower() == val.strip().lower()]
+            elif op == "contains" and isinstance(val, str):
+                df_out = df_out[df_out[col].astype(str).str.contains(val, case=False, na=False)]
+        except Exception:
+            continue
+
+    # Tri optionnel
+    tri = config_filtre.get("tri")
+    if tri and isinstance(tri, dict):
+        col_tri = resoudre_nom_colonne(tri.get("colonne", ""), cols_dispo)
+        if col_tri and col_tri in df_out.columns:
+            ascending = str(tri.get("ordre", "desc")).lower() == "asc"
+            df_out = df_out.sort_values(by=col_tri, ascending=ascending)
+
+    # Limite optionnelle
+    limite = config_filtre.get("limite")
+    if limite and isinstance(limite, int) and limite > 0:
+        df_out = df_out.head(limite)
+
+    return df_out, desc
+
+
+# ==============================================================================
 # 8. APPLICATION STREAMLIT (INTERFACE UTILISATEUR COMPLÈTE)
 # ==============================================================================
 
@@ -2295,13 +2656,126 @@ def main() -> None:
             return
 
     # ==========================================================================
-    # ÉTAPE 2 : FILTRE GLOBAL PAR GROUPE POSITIONNEL
+    # ÉTAPE 2 : COPILOTE RCA (ASSISTANT INTELLIGENT VOCAL & TEXTE) & FILTRES
     # ==========================================================================
     st.markdown("---")
+
+    # Initialisation des états de session du Copilote
+    if "copilote_active" not in st.session_state:
+        st.session_state["copilote_active"] = False
+    if "copilote_config" not in st.session_state:
+        st.session_state["copilote_config"] = None
+    if "copilote_desc" not in st.session_state:
+        st.session_state["copilote_desc"] = ""
+    if "copilote_last_voice" not in st.session_state:
+        st.session_state["copilote_last_voice"] = ""
+
+    # Conteneur d'interface du Copilote RCA
+    with st.container():
+        st.markdown(
+            """
+            <div style="background-color: #F8FAFC; border: 1.5px solid #2E5A88; border-radius: 12px; padding: 14px 18px; margin-bottom: 12px;">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <div style="font-weight: 800; font-size: 1.12rem; color: #1F4E79;">
+                        🤖 Copilote RCA | Assistant Intelligent de Séance (Vocal & Clavier)
+                    </div>
+                </div>
+                <div style="font-size: 0.88rem; color: #64748B; margin-top: 3px;">
+                    Formulez une consigne en langage naturel (au clavier ou au micro) pour filtrer dynamiquement le tableau, les jauges et le rapport PDF officiel.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        col_q_text, col_q_btn, col_q_mic = st.columns([5.5, 1.5, 2.0])
+        query_text = col_q_text.text_input(
+            "Consigne pour le copilote :",
+            placeholder="Ex: Affiche les avants avec plus de 150m en HSR, ou sous 20 km/h de top speed...",
+            key="input_copilote_text",
+            label_visibility="collapsed",
+        )
+        btn_apply_copilote = col_q_btn.button("🚀 Appliquer", key="btn_apply_copilote", use_container_width=True)
+
+        voice_text = None
+        if HAS_MIC_RECORDER:
+            with col_q_mic:
+                voice_text = speech_to_text(
+                    language="fr",
+                    start_prompt="🎙️ Dicter (Micro)",
+                    stop_prompt="⏹️ Arrêter",
+                    just_once=True,
+                    key="copilote_voice_recorder",
+                    use_container_width=True,
+                )
+
+        # Suggestions rapides d'analyse
+        st.caption("💡 **Suggestions rapides :**")
+        chip_cols = st.columns(5)
+        chip_query = None
+        if chip_cols[0].button("⚡ Vitesse < 20 km/h", key="chip_v20", use_container_width=True):
+            chip_query = "Affiche-moi uniquement les joueurs sous 20 km/h de top speed"
+        if chip_cols[1].button("🏉 Avants HSR > 150m", key="chip_av_hsr", use_container_width=True):
+            chip_query = "Filtre les avants qui ont fait plus de 150m en HSR"
+        if chip_cols[2].button("🔥 Top Speed > 27 km/h", key="chip_v27", use_container_width=True):
+            chip_query = "Joueurs avec vitesse de pointe supérieure à 27 km/h"
+        if chip_cols[3].button("🏃 Distance > 5 km", key="chip_dist5", use_container_width=True):
+            chip_query = "Joueurs ayant parcouru plus de 5 km de distance"
+        if chip_cols[4].button("🛡️ 3ème Ligne", key="chip_3eme", use_container_width=True):
+            chip_query = "Affiche uniquement les joueurs de 3ème Ligne"
+
+        # Traitement de la requête active
+        active_query = None
+        if chip_query:
+            active_query = chip_query
+        elif btn_apply_copilote and query_text.strip():
+            active_query = query_text.strip()
+        elif voice_text and voice_text.strip() and voice_text != st.session_state.get("copilote_last_voice"):
+            st.session_state["copilote_last_voice"] = voice_text
+            active_query = voice_text.strip()
+            st.toast(f"🎙️ Commande vocale détectée : « {active_query} »")
+
+        if active_query:
+            with st.spinner("Interprétation de la consigne par le Copilote..."):
+                cfg = interpreter_requete_copilote(active_query, colonnes_disponibles=list(df_indiv.columns))
+                if not cfg.get("filtres"):
+                    st.session_state["copilote_active"] = False
+                    st.session_state["copilote_config"] = None
+                    st.session_state["copilote_desc"] = ""
+                    st.info("🔄 Filtres réinitialisés : ensemble de l'effectif affiché.")
+                else:
+                    test_df, desc = appliquer_filtres_copilote(df_indiv, cfg)
+                    if test_df.empty:
+                        st.warning(f"⚠️ Aucun joueur ne correspond aux critères '{desc}'. L'effectif complet est conservé.")
+                    else:
+                        st.session_state["copilote_active"] = True
+                        st.session_state["copilote_config"] = cfg
+                        st.session_state["copilote_desc"] = desc
+                        st.success(f"🎯 **Filtre appliqué :** {desc} ({len(test_df)} joueur(s) retenu(s))")
+
+    # Application stricte et déterministe du filtre Copilote
+    if st.session_state.get("copilote_active") and st.session_state.get("copilote_config"):
+        df_base, desc_active = appliquer_filtres_copilote(df_indiv, st.session_state["copilote_config"])
+        col_banner, col_reset = st.columns([4.8, 1.8])
+        with col_banner:
+            st.info(
+                f"🎯 **Filtre actif du Copilote :** {st.session_state.get('copilote_desc', desc_active)} "
+                f"— **{len(df_base)} / {len(df_indiv)} joueurs retenus**"
+            )
+        with col_reset:
+            if st.button("🔄 Réinitialiser les filtres", key="btn_reset_copilote_banner", use_container_width=True):
+                st.session_state["copilote_active"] = False
+                st.session_state["copilote_config"] = None
+                st.session_state["copilote_desc"] = ""
+                st.rerun()
+    else:
+        df_base = df_indiv
+
+    # Filtre positionnel classique et mode de calcul
     col_filter1, col_filter2 = st.columns([3, 2])
     with col_filter1:
         groupe_selectionne = st.selectbox(
-            "🏉 Filtrer le tableau de bord par groupe de joueurs :",
+            "🏉 Affiner par groupe positionnel :",
             options=["Tous les groupes", "5 de devant", "3ème Ligne", "Trois-quarts"],
             index=0,
             help="Ce filtre adapte l'ensemble des graphiques de charge, du podium et de la synthèse au groupe choisi.",
@@ -2315,9 +2789,9 @@ def main() -> None:
         )
 
     if groupe_selectionne == "Tous les groupes":
-        df_groupe_actif = df_indiv
+        df_groupe_actif = df_base
     else:
-        df_groupe_actif = df_indiv[df_indiv["Groupe"] == groupe_selectionne]
+        df_groupe_actif = df_base[df_base["Groupe"] == groupe_selectionne]
 
     # ==========================================================================
     # ÉTAPE 3 : SECTION 1 : RETOUR JOURNÉE (JAUGES CONNECTÉES AUX VRAIES DONNÉES)
@@ -2340,19 +2814,19 @@ def main() -> None:
             "🏉 Trois-quarts"
         ])
         with tab_avants:
-            sub = df_indiv[df_indiv["Groupe"] == "5 de devant"]
+            sub = df_base[df_base["Groupe"] == "5 de devant"]
             metrics = calculer_metriques_jauges(sub, "5 de devant", mode_calc=mode_calcul)
             render_dashboard_objectifs("5 de devant", metrics)
             st.caption(f"Effectif analysé : {len(sub)} joueurs dans les 5 de devant.")
 
         with tab_3eme:
-            sub = df_indiv[df_indiv["Groupe"] == "3ème Ligne"]
+            sub = df_base[df_base["Groupe"] == "3ème Ligne"]
             metrics = calculer_metriques_jauges(sub, "3ème Ligne", mode_calc=mode_calcul)
             render_dashboard_objectifs("3ème Ligne", metrics)
             st.caption(f"Effectif analysé : {len(sub)} joueurs en 3ème Ligne.")
 
         with tab_arrieres:
-            sub = df_indiv[df_indiv["Groupe"] == "Trois-quarts"]
+            sub = df_base[df_base["Groupe"] == "Trois-quarts"]
             metrics = calculer_metriques_jauges(sub, "Trois-quarts", mode_calc=mode_calcul)
             render_dashboard_objectifs("Trois-quarts", metrics)
             st.caption(f"Effectif analysé : {len(sub)} joueurs chez les Trois-quarts.")
@@ -2439,10 +2913,10 @@ def main() -> None:
                 if not s_d.empty:
                     session_date_val = s_d.iloc[0]
 
-        # Gestion et mise en cache de la note narrative du préparateur physique
-        cache_key = f"synthese_{len(df_indiv)}_{session_date_val}"
+        # Gestion et mise en cache de la note narrative sur la cohorte active (reflète le filtre Copilote & groupe)
+        cache_key = f"synthese_{len(df_groupe_actif)}_{session_date_val}_{st.session_state.get('copilote_desc', '')}_{groupe_selectionne}"
         if "synthese_cache_key" not in st.session_state or st.session_state["synthese_cache_key"] != cache_key:
-            st.session_state["synthese_note_coachs"] = generer_synthese_llm(df_indiv)
+            st.session_state["synthese_note_coachs"] = generer_synthese_llm(df_groupe_actif)
             st.session_state["synthese_cache_key"] = cache_key
 
         synthese_note_active = st.session_state.get("synthese_note_coachs", "")
@@ -2460,11 +2934,11 @@ def main() -> None:
                 synthese_note_active = edited_note
 
             if st.button("🔄 Régénérer la synthèse par IA", key="btn_regen_synthese"):
-                st.session_state["synthese_note_coachs"] = generer_synthese_llm(df_indiv)
+                st.session_state["synthese_note_coachs"] = generer_synthese_llm(df_groupe_actif)
                 st.rerun()
 
         pdf_bytes = generer_rapport_pdf_coachs(
-            df_indiv=df_indiv,
+            df_indiv=df_groupe_actif,
             date_seance=session_date_val,
             synthese_note=synthese_note_active,
         )
