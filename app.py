@@ -1447,15 +1447,36 @@ def generer_graphique_postes_matplotlib(df_indiv: pd.DataFrame) -> io.BytesIO:
     return buf
 
 
+def safe_latin1(s: Any) -> str:
+    """Assure qu'une chaîne est compatible avec l'encodage Latin-1 (Helvetica standard FPDF)."""
+    if s is None:
+        return ""
+    txt = str(s)
+    replacements = {
+        "\u2019": "'",
+        "\u2018": "'",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2026": "...",
+        "\u0153": "oe",
+        "\u0152": "OE",
+        "\u20ac": "EUR",
+        "\xa0": " ",
+    }
+    for k, v in replacements.items():
+        txt = txt.replace(k, v)
+    return txt.encode("latin-1", "replace").decode("latin-1")
+
+
 def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[Any] = None) -> bytes:
     """
-    Génère un rapport PDF optimisé pour les coachs du RCA :
-    - Page 1 : En-tête officiel, date claire & semaine, KPIs globaux, et 2 graphiques Matplotlib :
-               1) Distance Moyenne & HSR Moyen par Groupe
-               2) Vitesse Max Moyenne par Poste
-    - Page 2 : Tableau récapitulatif détaillé des performances par joueur et unité de jeu.
+    Génère un rapport PDF optimisé pour les coachs du RCA (format 1 page A4 Paysage) :
+    - En-tête officiel RCA, date lisible & semaine
+    - 5 Encarts KPIs globaux de la séance (dont Moyenne Haute Intensité / Joueur)
+    - Moitié gauche : Graphique Matplotlib de Distance Moyenne & HSR Moyen par Groupe
+    - Moitié droite : Podium dynamique de la séance (Top Speed, % Marche, Haute Intensité)
     """
-    date_texte = formater_date_seance_fr(date_seance)
+    date_texte = safe_latin1(formater_date_seance_fr(date_seance))
 
     class RCACoachPDF(FPDF):
         def header(self):
@@ -1465,7 +1486,7 @@ def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[Any
             self.set_xy(12, 3)
             self.set_font("Helvetica", "B", 13)
             self.set_text_color(255, 255, 255)
-            self.cell(140, 10, "RUGBY CLUB AMIÉNOIS  |  Rapport de Séance GPS - RCA", align="L")
+            self.cell(140, 10, "RUGBY CLUB AMIENOIS  |  Rapport de Seance GPS - RCA", align="L")
 
             self.set_xy(155, 3)
             self.set_font("Helvetica", "", 9.5)
@@ -1479,35 +1500,38 @@ def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[Any
             self.set_y(-12)
             self.set_font("Helvetica", "I", 8)
             self.set_text_color(148, 163, 184)
-            self.cell(0, 8, f"Document Staff Technique RCA - Page {self.page_no()}", align="C")
+            self.cell(0, 8, "Document Staff Technique RCA - Page 1/1", align="C")
 
     pdf = RCACoachPDF(orientation="L", unit="mm", format="A4")
-    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_auto_page_break(auto=False)
     pdf.set_margins(left=12, top=20, right=12)
 
     # =========================================================================
-    # PAGE 1 : EN-TÊTE, BLOCS KPIS GLOBAUX & LES 2 GRAPHIQUES MATPLOTLIB
+    # PAGE UNIQUE A4 PAYSAGE : EN-TÊTE, KPIS, GRAPHIQUE GROUPES & PODIUM SEANCE
     # =========================================================================
     pdf.add_page()
 
     if df_indiv.empty:
         pdf.set_font("Helvetica", "", 12)
-        pdf.cell(0, 10, "Aucune donnée de joueur disponible pour ce rapport.", align="L")
+        pdf.cell(0, 10, "Aucune donnee de joueur disponible pour ce rapport.", align="L")
         return bytes(pdf.output())
 
     # 1. Encarts KPIs globaux de Séance
     nb_joueurs = len(df_indiv)
-    dist_tot = df_indiv["Distance (km)"].sum()
-    dist_moy = df_indiv["Distance (km)"].mean()
-    vmax = df_indiv["Top Speed (km/h)"].max()
-    hsr_tot = df_indiv[" Distance haute intensité (m)"].sum()
+    dist_tot = float(df_indiv["Distance (km)"].sum()) if "Distance (km)" in df_indiv.columns else 0.0
+    dist_moy = float(df_indiv["Distance (km)"].mean()) if "Distance (km)" in df_indiv.columns else 0.0
+    vmax = float(df_indiv["Top Speed (km/h)"].max()) if "Top Speed (km/h)" in df_indiv.columns else 0.0
+    hsr_col = " Distance haute intensité (m)"
+    hsr_moy = float(df_indiv[hsr_col].mean()) if hsr_col in df_indiv.columns and not df_indiv[hsr_col].empty else 0.0
+    if pd.isna(hsr_moy):
+        hsr_moy = 0.0
 
     kpis = [
-        ("Joueurs Analysés", f"{nb_joueurs}"),
-        ("Distance Cumulée", f"{dist_tot:.1f} km"),
+        ("Joueurs Analyses", f"{nb_joueurs}"),
+        ("Distance Cumulee", f"{dist_tot:.1f} km"),
         ("Moyenne / Joueur", f"{dist_moy:.2f} km"),
-        ("Vitesse Max Séance", f"{vmax:.1f} km/h"),
-        ("Total Haute Intensité", f"{int(round(hsr_tot)):,d} m".replace(",", " ")),
+        ("Vitesse Max Seance", f"{vmax:.1f} km/h"),
+        ("Haute Intensite / Joueur", f"{int(round(hsr_moy)):,d} m".replace(",", " ")),
     ]
 
     card_w = 273 / len(kpis)
@@ -1522,127 +1546,166 @@ def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[Any
         pdf.set_xy(x_curr, y_curr + 1)
         pdf.set_font("Helvetica", "", 7.5)
         pdf.set_text_color(100, 116, 139)
-        pdf.cell(card_w - 2, 4, title, align="C")
+        pdf.cell(card_w - 2, 4, safe_latin1(title), align="C")
 
         pdf.set_xy(x_curr, y_curr + 5.5)
         pdf.set_font("Helvetica", "B", 10.5)
         pdf.set_text_color(31, 78, 121)
-        pdf.cell(card_w - 2, 6, val, align="C")
+        pdf.cell(card_w - 2, 6, safe_latin1(val), align="C")
 
         pdf.set_xy(x_curr + card_w, y_curr)
 
-    # 2. Génération et intégration des deux graphiques Matplotlib côte à côte
+    # 2. Graphique Matplotlib : Distance & HSR par Groupe (Moitié gauche)
     buf1 = generer_graphique_groupes_matplotlib(df_indiv)
-    buf2 = generer_graphique_postes_matplotlib(df_indiv)
-
     chart_y = 38
     chart_w = 133
     chart_h = 152
-
     pdf.image(buf1, x=12, y=chart_y, w=chart_w, h=chart_h)
-    pdf.image(buf2, x=151, y=chart_y, w=chart_w, h=chart_h)
 
-    # =========================================================================
-    # PAGE 2 : TABLEAU RÉCAPITULATIF DÉTAILLÉ DES PERFORMANCES JOUEURS
-    # =========================================================================
-    pdf.add_page()
+    # 3. Podium des Tops de la Séance (Moitié droite)
+    podium_data = generer_podium_dynamique(df_indiv)
 
-    pdf.set_xy(12, 21)
-    pdf.set_font("Helvetica", "B", 10.5)
-    pdf.set_text_color(31, 78, 121)
-    pdf.cell(0, 6, "TABLEAU RÉCAPITULATIF DÉTAILLÉ DES PERFORMANCES JOUEURS", align="L")
-    pdf.ln(8)
+    x_pod = 151
+    w_pod = 134
 
-    # Préparation du tableau trié (Par groupe athlétique puis distance décroissante)
-    groupe_ordre = {"5 de devant": 1, "3ème Ligne": 2, "Trois-quarts": 3}
-    df_tri = df_indiv.copy()
-    df_tri["_ordre"] = df_tri["Groupe"].map(groupe_ordre).fillna(4)
-    df_tri = df_tri.sort_values(by=["_ordre", "Distance (km)"], ascending=[True, False]).drop(columns=["_ordre"])
+    # Bandeau titre de la section Podium
+    pdf.set_fill_color(31, 78, 121)  # #1F4E79
+    pdf.rect(x_pod, chart_y, w_pod, 7.5, style="F")
+    pdf.set_xy(x_pod, chart_y)
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.set_text_color(255, 255, 255)
+    pdf.cell(w_pod, 7.5, "PODIUM DE LA SEANCE", align="C")
 
-    cols_def = [
-        ("Joueur", 46, "L"),
-        ("Poste", 30, "L"),
-        ("Groupe", 28, "C"),
-        ("Temps", 18, "C"),
-        ("Dist (km)", 24, "R"),
-        ("m/min", 22, "R"),
-        ("Vmax (km/h)", 25, "R"),
-        ("HSR (m)", 26, "R"),
-        ("VHSR (m)", 26, "R"),
-        ("Acc/Dec", 28, "R"),
+    categories_config = [
+        {
+            "key": "Top speed (km/h)",
+            "title": "TOP SPEED (km/h)",
+            "subtitle": "Vitesse Maximale",
+            "color": (31, 78, 121),  # #1F4E79
+        },
+        {
+            "key": "% de marche",
+            "title": "% DE MARCHE",
+            "subtitle": "Basse Intensite",
+            "color": (46, 90, 136),  # #2E5A88
+        },
+        {
+            "key": "Haute intensité (m)",
+            "title": "HAUTE INTENSITE (m)",
+            "subtitle": "Distance > 19.8 km/h",
+            "color": (163, 0, 0),    # #A30000
+        },
     ]
 
-    def render_table_header():
-        pdf.set_fill_color(46, 90, 136)  # Bleu roi RCA (#2E5A88)
+    rank_badges = {
+        1: {"label": "1er", "bg": (217, 119, 6), "fg": (255, 255, 255)},    # Or (#D97706)
+        2: {"label": "2eme", "bg": (100, 116, 139), "fg": (255, 255, 255)}, # Argent (#64748B)
+        3: {"label": "3eme", "bg": (180, 83, 9), "fg": (255, 255, 255)},    # Bronze (#B45309)
+    }
+
+    y_card_start = chart_y + 7.5 + 2.5  # 48.0 mm
+    card_h = 45.0
+    card_gap = 3.5
+
+    for i, cat_cfg in enumerate(categories_config):
+        y_card = y_card_start + i * (card_h + card_gap)
+
+        # Fond de la carte catégorie
+        pdf.set_fill_color(248, 250, 252)  # #F8FAFC
+        pdf.set_draw_color(203, 213, 225)  # #CBD5E1
+        pdf.rect(x_pod, y_card, w_pod, card_h, style="FD")
+
+        # En-tête de la carte catégorie
+        accent_color = cat_cfg["color"]
+        pdf.set_fill_color(*accent_color)
+        pdf.rect(x_pod, y_card, w_pod, 7.0, style="F")
+
+        # Titre catégorie (gauche)
+        pdf.set_xy(x_pod + 4, y_card)
+        pdf.set_font("Helvetica", "B", 8.5)
         pdf.set_text_color(255, 255, 255)
-        pdf.set_font("Helvetica", "B", 8)
-        pdf.set_draw_color(186, 204, 224)
-        for label, w, align in cols_def:
-            pdf.cell(w, 7, label, border=1, fill=True, align=align)
-        pdf.ln(7)
+        pdf.cell(70, 7.0, cat_cfg["title"], align="L")
 
-    render_table_header()
+        # Sous-titre catégorie (droite)
+        pdf.set_xy(x_pod + 74, y_card)
+        pdf.set_font("Helvetica", "I", 7.5)
+        pdf.set_text_color(226, 232, 240)
+        pdf.cell(56, 7.0, cat_cfg["subtitle"], align="R")
 
-    # Rendu des lignes de joueurs
-    pdf.set_font("Helvetica", "", 7.5)
-    for i, (_, row) in enumerate(df_tri.iterrows()):
-        if pdf.get_y() > 188:
-            pdf.add_page()
-            render_table_header()
+        # Récupération des joueurs de la catégorie
+        cat_data = podium_data.get(cat_cfg["key"], {})
+        players = cat_data.get("players", [])
 
-        # Alternance de couleur de ligne
-        if i % 2 == 0:
+        # Rendu des 3 joueurs (Top 3)
+        row_w = w_pod - 4  # 130 mm
+        row_h = 10.5
+        row_gap = 1.7
+        y_rows_start = y_card + 7.0 + 1.5
+
+        for rank_idx in range(1, 4):
+            y_row = y_rows_start + (rank_idx - 1) * (row_h + row_gap)
+            x_row = x_pod + 2
+
+            p_entry = players[rank_idx - 1] if len(players) >= rank_idx else {}
+            p_name = safe_latin1(p_entry.get("name", "-"))
+            p_stat = safe_latin1(p_entry.get("stat", "-"))
+
+            # Conteneur de ligne
             pdf.set_fill_color(255, 255, 255)
-        else:
-            pdf.set_fill_color(248, 250, 252)
+            pdf.set_draw_color(226, 232, 240)
+            pdf.rect(x_row, y_row, row_w, row_h, style="FD")
 
-        pdf.set_text_color(30, 41, 59)
-        pdf.set_draw_color(226, 232, 240)
+            # Style du badge rang
+            badge_info = rank_badges.get(rank_idx, {"label": f"{rank_idx}e", "bg": (100, 116, 139), "fg": (255, 255, 255)})
 
-        nom = str(row.get("Nom ; Prénom", "")).strip()
-        poste = joueurs_data.get(nom, "")
-        if not poste:
-            for j_nom, j_pos in joueurs_data.items():
-                if j_nom.lower() in nom.lower() or nom.lower() in j_nom.lower():
-                    poste = j_pos
-                    break
-        if not poste:
-            poste = "-"
+            # Vérification de l'existence de la photo locale
+            photo_path = obtenir_chemin_photo(p_name) if p_name and p_name != "-" else None
+            has_photo = bool(photo_path and os.path.isfile(photo_path) and os.path.basename(photo_path) != "avatar_par_defaut.jpg")
 
-        grp = str(row.get("Groupe", "-")).strip()
-        tps = f"{row.get('Temps de jeu ', 0.0):.0f} min"
-        dist_km = f"{row.get('Distance (km)', 0.0):.2f}"
-        dist_min = f"{row.get('Distance Per Min (m/min)', 0.0):.0f}"
-        v_max = f"{row.get('Top Speed (km/h)', 0.0):.1f}"
+            if has_photo:
+                # 1. Badge rang
+                pdf.set_fill_color(*badge_info["bg"])
+                pdf.rect(x_row + 2, y_row + 1.5, 9.5, 7.5, style="F")
+                pdf.set_xy(x_row + 2, y_row + 1.5)
+                pdf.set_font("Helvetica", "B", 7)
+                pdf.set_text_color(*badge_info["fg"])
+                pdf.cell(9.5, 7.5, badge_info["label"], align="C")
 
-        # HSR en mètres (Zone 4)
-        z4_km = row.get("Distance in Speed Zone 4  (km)", 0.0)
-        hsr_m = int(round(z4_km * 1000.0)) if z4_km > 0 else int(round(row.get(" Distance haute intensité (m)", 0.0) * 0.7))
+                # 2. Photo joueur
+                try:
+                    pdf.image(photo_path, x=x_row + 13, y=y_row + 1, w=8.5, h=8.5)
+                    pdf.set_draw_color(203, 213, 225)
+                    pdf.rect(x_row + 13, y_row + 1, 8.5, 8.5, style="D")
+                except Exception:
+                    has_photo = False
 
-        # VHSR en mètres (Zone 5)
-        z5_km = row.get("Distance in Speed Zone 5  (km)", 0.0)
-        vhsr_m = int(round(z5_km * 1000.0)) if z5_km > 0 else int(round(row.get(" Distance haute intensité (m)", 0.0) * 0.3))
+                # 3. Nom joueur
+                name_disp = p_name if len(p_name) <= 24 else p_name[:22] + ".."
+                pdf.set_xy(x_row + 23.5, y_row)
+                pdf.set_font("Helvetica", "B", 8)
+                pdf.set_text_color(30, 41, 59)
+                pdf.cell(66.5, row_h, name_disp, align="L")
+            else:
+                # 1. Badge rang propre
+                pdf.set_fill_color(*badge_info["bg"])
+                pdf.rect(x_row + 2, y_row + 1.5, 11.5, 7.5, style="F")
+                pdf.set_xy(x_row + 2, y_row + 1.5)
+                pdf.set_font("Helvetica", "B", 7.5)
+                pdf.set_text_color(*badge_info["fg"])
+                pdf.cell(11.5, 7.5, badge_info["label"], align="C")
 
-        acc_dec = f"{int(round(row.get('Accel/Dec', 0.0)))}"
+                # 2. Nom joueur
+                name_disp = p_name if len(p_name) <= 28 else p_name[:26] + ".."
+                pdf.set_xy(x_row + 16, y_row)
+                pdf.set_font("Helvetica", "B", 8.5)
+                pdf.set_text_color(30, 41, 59)
+                pdf.cell(74, row_h, name_disp, align="L")
 
-        row_vals = [
-            (nom, cols_def[0][1], cols_def[0][2]),
-            (poste, cols_def[1][1], cols_def[1][2]),
-            (grp, cols_def[2][1], cols_def[2][2]),
-            (tps, cols_def[3][1], cols_def[3][2]),
-            (dist_km, cols_def[4][1], cols_def[4][2]),
-            (dist_min, cols_def[5][1], cols_def[5][2]),
-            (v_max, cols_def[6][1], cols_def[6][2]),
-            (f"{hsr_m} m", cols_def[7][1], cols_def[7][2]),
-            (f"{vhsr_m} m", cols_def[8][1], cols_def[8][2]),
-            (acc_dec, cols_def[9][1], cols_def[9][2]),
-        ]
-
-        for val_txt, w, align in row_vals:
-            if len(val_txt) > 26 and w <= 46:
-                val_txt = val_txt[:24] + ".."
-            pdf.cell(w, 6, val_txt, border=1, fill=True, align=align)
-        pdf.ln(6)
+            # Statistique en gras à droite
+            pdf.set_xy(x_row + 90, y_row)
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.set_text_color(*accent_color)
+            pdf.cell(38, row_h, p_stat, align="R")
 
     return bytes(pdf.output())
 
