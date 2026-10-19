@@ -2112,24 +2112,55 @@ def parse_requete_locale(query: str, colonnes: List[str]) -> Dict[str, Any]:
     return {"filtres": filtres, "tri": tri, "limite": limite, "description_filtre": desc}
 
 
+SYSTEM_PROMPT_COPILOTE = (
+    "Tu es le Copilote RCA, l'assistant data science officiel du Rugby Club Amiénois (RCA). "
+    "Tu es expert en physiologie du sport, en préparation physique du rugby et en analyse des données GPS Catapult. "
+    "Tu réponds exclusivement aux questions concernant l'effectif sénior du RCA, les charges d'entraînement et la performance athlétique. "
+    "Utilise un ton technique, rigoureux et professionnel."
+)
+
+
 def interpreter_requete_copilote(
     query: str,
-    colonnes_disponibles: List[str],
+    df_indiv: Optional[pd.DataFrame] = None,
+    colonnes_disponibles: Optional[List[str]] = None,
     api_key: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Traduit une requête en langage naturel (français) en structure de filtrage JSON
-    pour le DataFrame des joueurs GPS en utilisant le LLM Gemini (ou analyseur local de repli).
+    pour une recherche ciblée indépendante en utilisant le LLM Gemini (ou analyseur local de repli).
+    Injecte le System Prompt officiel du Copilote RCA et le contexte chiffré réel de la séance.
     """
     q_clean = query.strip()
     if not q_clean:
-        return {"filtres": [], "tri": None, "limite": None, "description_filtre": "Requête vide."}
+        return {"filtres": [], "tri": None, "limite": None, "description_filtre": "Requête vide.", "commentaire_expert": ""}
 
     q_low = q_clean.lower()
-    if any(w in q_low for w in ["reset", "reinit", "tout afficher", "tous les joueurs", "aucun filtre", "annuler"]):
-        return {"filtres": [], "tri": None, "limite": None, "description_filtre": "Réinitialisation : ensemble de l'effectif affiché."}
+    if any(w in q_low for w in ["reset", "reinit", "tout afficher", "tous les joueurs", "aucun filtre", "fermer", "annuler"]):
+        return {"filtres": [], "tri": None, "limite": None, "description_filtre": "Réinitialisation : ensemble de l'effectif.", "commentaire_expert": ""}
 
-    # 1. Tentative avec le LLM Gemini si disponible
+    cols = colonnes_disponibles or (list(df_indiv.columns) if df_indiv is not None else list(ALIAS_COLONNES.values()))
+
+    # Injection du contexte réel chiffré de la séance
+    contexte_chiffre = ""
+    if df_indiv is not None and not df_indiv.empty:
+        nb_joueurs = len(df_indiv)
+        dist_tot = float(df_indiv["Distance (km)"].sum()) if "Distance (km)" in df_indiv.columns else 0.0
+        dist_moy = float(df_indiv["Distance (km)"].mean()) if "Distance (km)" in df_indiv.columns else 0.0
+        vmax = float(df_indiv["Top Speed (km/h)"].max()) if "Top Speed (km/h)" in df_indiv.columns else 0.0
+        hsr_col = " Distance haute intensité (m)" if " Distance haute intensité (m)" in df_indiv.columns else ("HSR (m)" if "HSR (m)" in df_indiv.columns else None)
+        hsr_moy = float(df_indiv[hsr_col].mean()) if hsr_col and not df_indiv[hsr_col].empty else 0.0
+        hsr_tot = float(df_indiv[hsr_col].sum()) if hsr_col and not df_indiv[hsr_col].empty else 0.0
+
+        contexte_chiffre = (
+            f"Contexte réel de la séance GPS du RCA en cours d'analyse :\n"
+            f"- Effectif total : {nb_joueurs} joueurs\n"
+            f"- Distance moyenne : {dist_moy:.2f} km/joueur (distance cumulée : {dist_tot:.1f} km)\n"
+            f"- Vmax max : {vmax:.1f} km/h\n"
+            f"- Volume HSR : moyenne de {int(round(hsr_moy))} m/joueur (total cumulé : {int(round(hsr_tot))} m)\n"
+        )
+
+    # 1. Tentative avec le LLM Gemini avec System Instruction
     try:
         resolved_key = (
             api_key
@@ -2145,22 +2176,19 @@ def interpreter_requete_copilote(
 
             client = genai.Client(api_key=str(resolved_key).strip())
 
-            prompt = f"""Tu es l'assistant et copilote de données GPS du staff technique du Rugby Club Amiénois (RCA).
-L'entraîneur formule une requête en français (texte ou vocale) pour filtrer ou ordonner le tableau des joueurs.
-
-Colonnes disponibles dans le tableau (df_indiv) :
+            prompt = f"""{contexte_chiffre}
+Colonnes disponibles dans le tableau des joueurs (df_indiv) :
 - 'Nom ; Prénom' : Nom complet du joueur
 - 'Groupe' : '5 de devant', '3ème Ligne', 'Trois-quarts'
-  * Contexte rugby : 'avants' ou 'pack' = ['5 de devant', '3ème Ligne']
-  * 'arrières', 'trois-quarts', 'lignes arrières' = ['Trois-quarts']
+  * Contexte rugby RCA : 'avants' ou 'pack' = ['5 de devant', '3ème Ligne'] ; 'arrières' ou 'trois-quarts' = ['Trois-quarts']
 - 'Distance (km)' : distance totale parcourue (km)
-- 'Top Speed (km/h)' : vitesse de pointe maximale (km/h)
+- 'Top Speed (km/h)' : vitesse maximale de pointe (km/h)
 - ' Distance haute intensité (m)' : distance HSR (> 19.8 km/h en mètres)
 - 'VHSR (m)' : distance très haute intensité (> 25.2 km/h en mètres)
-- '%Marche ' : pourcentage du temps passé à marcher (0 à 100)
+- '%Marche ' : pourcentage du temps passé en basse intensité (0 à 100)
 - 'Distance Per Min (m/min)' : intensité relative en mètres par minute
 
-Consigne de l'utilisateur : "{q_clean}"
+Consigne de recherche du staff technique : "{q_clean}"
 
 Retourne UNIQUEMENT un objet JSON valide avec cette structure stricte :
 {{
@@ -2176,9 +2204,10 @@ Retourne UNIQUEMENT un objet JSON valide avec cette structure stricte :
     "ordre": "asc | desc"
   }} ou null,
   "limite": nombre_entier ou null,
-  "description_filtre": "Court résumé en français de l'action effectuée"
+  "description_filtre": "Résumé technique et concis en français des critères appliqués",
+  "commentaire_expert": "Court commentaire technique d'expert en sciences du sport (1 à 2 phrases) sur le profil athlétique ciblé par cette recherche"
 }}
-Si la requête demande de réinitialiser ou de tout montrer, retourne "filtres": [].
+Si la requête demande de réinitialiser ou de fermer la recherche, retourne "filtres": [].
 """
 
             raw_json = None
@@ -2187,6 +2216,7 @@ Si la requête demande de réinitialiser ou de tout montrer, retourne "filtres":
                     model="gemini-3.8-flash",
                     contents=prompt,
                     config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_PROMPT_COPILOTE,
                         response_mime_type="application/json",
                         temperature=0.0
                     )
@@ -2198,6 +2228,7 @@ Si la requête demande de réinitialiser ou de tout montrer, retourne "filtres":
                         model="gemini-2.5-flash",
                         contents=prompt,
                         config=types.GenerateContentConfig(
+                            system_instruction=SYSTEM_PROMPT_COPILOTE,
                             response_mime_type="application/json",
                             temperature=0.0
                         )
@@ -2218,7 +2249,9 @@ Si la requête demande de réinitialiser ou de tout montrer, retourne "filtres":
         pass
 
     # 2. Analyseur local de repli sécurisé (déterministe et autonome)
-    return parse_requete_locale(q_clean, colonnes_disponibles)
+    res_locale = parse_requete_locale(q_clean, cols)
+    res_locale["commentaire_expert"] = "Recherche ciblée traitée par le moteur analytique local du Copilote RCA."
+    return res_locale
 
 
 def appliquer_filtres_copilote(
@@ -2251,7 +2284,7 @@ def appliquer_filtres_copilote(
             continue
 
         try:
-            if op in [">", ">=", "<", "<=", "==", "!="]:
+            if op in [">", ">=", "<", "<="]:
                 val_num = float(val) if not isinstance(val, (int, float)) and str(val).replace(".", "", 1).replace("-", "", 1).isdigit() else val
                 series_num = pd.to_numeric(df_out[col], errors="coerce")
                 if op == ">":
@@ -2262,15 +2295,25 @@ def appliquer_filtres_copilote(
                     df_out = df_out[series_num < val_num]
                 elif op == "<=":
                     df_out = df_out[series_num <= val_num]
-                elif op == "==":
+            elif op == "==":
+                is_num = isinstance(val, (int, float)) or (isinstance(val, str) and str(val).replace(".", "", 1).replace("-", "", 1).isdigit())
+                if is_num and pd.api.types.is_numeric_dtype(df_out[col]):
+                    val_num = float(val)
+                    series_num = pd.to_numeric(df_out[col], errors="coerce")
                     df_out = df_out[series_num == val_num]
-                elif op == "!=":
+                else:
+                    df_out = df_out[df_out[col].astype(str).str.strip().str.lower() == str(val).strip().lower()]
+            elif op == "!=":
+                is_num = isinstance(val, (int, float)) or (isinstance(val, str) and str(val).replace(".", "", 1).replace("-", "", 1).isdigit())
+                if is_num and pd.api.types.is_numeric_dtype(df_out[col]):
+                    val_num = float(val)
+                    series_num = pd.to_numeric(df_out[col], errors="coerce")
                     df_out = df_out[series_num != val_num]
+                else:
+                    df_out = df_out[df_out[col].astype(str).str.strip().str.lower() != str(val).strip().lower()]
             elif op == "in" and isinstance(val, list):
                 val_clean = [str(x).strip().lower() for x in val]
                 df_out = df_out[df_out[col].astype(str).str.strip().str.lower().isin(val_clean)]
-            elif op == "==" and isinstance(val, str):
-                df_out = df_out[df_out[col].astype(str).str.strip().str.lower() == val.strip().lower()]
             elif op == "contains" and isinstance(val, str):
                 df_out = df_out[df_out[col].astype(str).str.contains(val, case=False, na=False)]
         except Exception:
@@ -2663,14 +2706,16 @@ def main() -> None:
     # Initialisation des états de session du Copilote
     if "copilote_active" not in st.session_state:
         st.session_state["copilote_active"] = False
-    if "copilote_config" not in st.session_state:
-        st.session_state["copilote_config"] = None
+    if "copilote_resultat" not in st.session_state:
+        st.session_state["copilote_resultat"] = None
     if "copilote_desc" not in st.session_state:
         st.session_state["copilote_desc"] = ""
+    if "copilote_commentaire" not in st.session_state:
+        st.session_state["copilote_commentaire"] = ""
     if "copilote_last_voice" not in st.session_state:
         st.session_state["copilote_last_voice"] = ""
 
-    # Conteneur d'interface du Copilote RCA
+    # Conteneur d'interface du Copilote RCA (Recherche isolée experte)
     with st.container():
         st.markdown(
             """
@@ -2681,7 +2726,7 @@ def main() -> None:
                     </div>
                 </div>
                 <div style="font-size: 0.88rem; color: #64748B; margin-top: 3px;">
-                    Formulez une consigne en langage naturel (au clavier ou au micro) pour filtrer dynamiquement le tableau, les jauges et le rapport PDF officiel.
+                    Agent expert officiel du RCA : effectuez des recherches ciblées en langage naturel (au clavier ou au micro) en toute indépendance des données globales de la séance.
                 </div>
             </div>
             """,
@@ -2695,7 +2740,7 @@ def main() -> None:
             key="input_copilote_text",
             label_visibility="collapsed",
         )
-        btn_apply_copilote = col_q_btn.button("🚀 Appliquer", key="btn_apply_copilote", use_container_width=True)
+        btn_apply_copilote = col_q_btn.button("🚀 Rechercher", key="btn_apply_copilote", use_container_width=True)
 
         voice_text = None
         if HAS_MIC_RECORDER:
@@ -2709,7 +2754,7 @@ def main() -> None:
                     use_container_width=True,
                 )
 
-        # Suggestions rapides d'analyse
+        # Suggestions rapides d'analyse (5 boutons d'action rapide)
         st.caption("💡 **Suggestions rapides :**")
         chip_cols = st.columns(5)
         chip_query = None
@@ -2736,42 +2781,78 @@ def main() -> None:
             st.toast(f"🎙️ Commande vocale détectée : « {active_query} »")
 
         if active_query:
-            with st.spinner("Interprétation de la consigne par le Copilote..."):
-                cfg = interpreter_requete_copilote(active_query, colonnes_disponibles=list(df_indiv.columns))
+            with st.spinner("Analyse et recherche ciblée par le Copilote RCA..."):
+                cfg = interpreter_requete_copilote(
+                    active_query,
+                    df_indiv=df_indiv,
+                    colonnes_disponibles=list(df_indiv.columns)
+                )
                 if not cfg.get("filtres"):
                     st.session_state["copilote_active"] = False
-                    st.session_state["copilote_config"] = None
+                    st.session_state["copilote_resultat"] = None
                     st.session_state["copilote_desc"] = ""
-                    st.info("🔄 Filtres réinitialisés : ensemble de l'effectif affiché.")
+                    st.session_state["copilote_commentaire"] = ""
+                    st.info("🔄 Recherche ciblée réinitialisée.")
                 else:
-                    test_df, desc = appliquer_filtres_copilote(df_indiv, cfg)
-                    if test_df.empty:
-                        st.warning(f"⚠️ Aucun joueur ne correspond aux critères '{desc}'. L'effectif complet est conservé.")
-                    else:
-                        st.session_state["copilote_active"] = True
-                        st.session_state["copilote_config"] = cfg
-                        st.session_state["copilote_desc"] = desc
-                        st.success(f"🎯 **Filtre appliqué :** {desc} ({len(test_df)} joueur(s) retenu(s))")
+                    df_copilote_resultat, desc = appliquer_filtres_copilote(df_indiv, cfg)
+                    st.session_state["copilote_active"] = True
+                    st.session_state["copilote_resultat"] = df_copilote_resultat
+                    st.session_state["copilote_desc"] = desc
+                    st.session_state["copilote_commentaire"] = cfg.get("commentaire_expert", "")
+                    st.toast(f"🎯 Copilote : {len(df_copilote_resultat)} joueur(s) identifié(s)")
 
-    # Application stricte et déterministe du filtre Copilote
-    if st.session_state.get("copilote_active") and st.session_state.get("copilote_config"):
-        df_base, desc_active = appliquer_filtres_copilote(df_indiv, st.session_state["copilote_config"])
-        col_banner, col_reset = st.columns([4.8, 1.8])
-        with col_banner:
-            st.info(
-                f"🎯 **Filtre actif du Copilote :** {st.session_state.get('copilote_desc', desc_active)} "
-                f"— **{len(df_base)} / {len(df_indiv)} joueurs retenus**"
+    # Affichage isolé et propre du résultat du Copilote (Dissociation stricte)
+    if st.session_state.get("copilote_active") and st.session_state.get("copilote_resultat") is not None:
+        df_copilote_resultat = st.session_state["copilote_resultat"]
+        desc_res = st.session_state.get("copilote_desc", "Critères spécifiques")
+        com_expert = st.session_state.get("copilote_commentaire", "")
+        nb_trouves = len(df_copilote_resultat)
+        nb_total = len(df_indiv)
+
+        with st.container():
+            st.markdown(
+                f"""
+                <div style="background-color: #FFFFFF; border: 1.5px solid #1F4E79; border-radius: 12px; padding: 16px 20px; margin-top: 8px; margin-bottom: 16px; box-shadow: 0 4px 14px rgba(31, 78, 121, 0.08);">
+                    <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="font-size: 1.25rem;">🎯</span>
+                            <span style="font-size: 1.15rem; font-weight: 800; color: #1F4E79;">
+                                Résultats de la recherche ciblée du Copilote
+                            </span>
+                        </div>
+                        <span style="background-color: {'#EFF6FF' if nb_trouves > 0 else '#FEF2F2'}; color: {'#1D4ED8' if nb_trouves > 0 else '#B91C1C'}; border: 1px solid {'#BFDBFE' if nb_trouves > 0 else '#FECACA'}; padding: 4px 12px; border-radius: 20px; font-weight: 700; font-size: 0.9rem;">
+                            {nb_trouves} joueur{'s' if nb_trouves > 1 else ''} correspondant{'s' if nb_trouves > 1 else ''} trouvé{'s' if nb_trouves > 1 else ''} sur {nb_total}
+                        </span>
+                    </div>
+                    <div style="margin-top: 8px; font-size: 0.92rem; color: #334155;">
+                        <strong>Critères appliqués :</strong> <span style="color: #0F172A;">{desc_res}</span>
+                    </div>
+                    {f'<div style="margin-top: 8px; font-size: 0.88rem; color: #475569; font-style: italic; background-color: #F8FAFC; padding: 8px 12px; border-radius: 6px; border-left: 3px solid #1F4E79;">🏉 <strong>Analyse Copilote RCA :</strong> {com_expert}</div>' if com_expert else ''}
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-        with col_reset:
-            if st.button("🔄 Réinitialiser les filtres", key="btn_reset_copilote_banner", use_container_width=True):
-                st.session_state["copilote_active"] = False
-                st.session_state["copilote_config"] = None
-                st.session_state["copilote_desc"] = ""
-                st.rerun()
-    else:
-        df_base = df_indiv
 
-    # Filtre positionnel classique et mode de calcul
+            if df_copilote_resultat.empty:
+                st.warning(f"⚠️ Aucun joueur de l'effectif RCA ne correspond aux critères '{desc_res}'.")
+            else:
+                df_cop_display = df_copilote_resultat.copy()
+                num_cols = df_cop_display.select_dtypes(include=[np.number]).columns
+                df_cop_display[num_cols] = df_cop_display[num_cols].round(2)
+                cols_order_cop = ["Nom ; Prénom", "Groupe"] + [c for c in FINAL_COLUMNS if c != "Nom ; Prénom" and c in df_cop_display.columns]
+                df_cop_display = df_cop_display[[c for c in cols_order_cop if c in df_cop_display.columns]]
+                st.dataframe(df_cop_display, use_container_width=True, hide_index=True)
+
+            col_btn_close_cop, _ = st.columns([2.5, 4.5])
+            with col_btn_close_cop:
+                if st.button("❌ Fermer la recherche ciblée", key="btn_close_copilote_result", use_container_width=True):
+                    st.session_state["copilote_active"] = False
+                    st.session_state["copilote_resultat"] = None
+                    st.session_state["copilote_desc"] = ""
+                    st.session_state["copilote_commentaire"] = ""
+                    st.rerun()
+
+    # Filtre positionnel classique et mode de calcul (Dashboard global RCA)
     col_filter1, col_filter2 = st.columns([3, 2])
     with col_filter1:
         groupe_selectionne = st.selectbox(
@@ -2789,9 +2870,9 @@ def main() -> None:
         )
 
     if groupe_selectionne == "Tous les groupes":
-        df_groupe_actif = df_base
+        df_groupe_actif = df_indiv
     else:
-        df_groupe_actif = df_base[df_base["Groupe"] == groupe_selectionne]
+        df_groupe_actif = df_indiv[df_indiv["Groupe"] == groupe_selectionne]
 
     # ==========================================================================
     # ÉTAPE 3 : SECTION 1 : RETOUR JOURNÉE (JAUGES CONNECTÉES AUX VRAIES DONNÉES)
@@ -2814,19 +2895,19 @@ def main() -> None:
             "🏉 Trois-quarts"
         ])
         with tab_avants:
-            sub = df_base[df_base["Groupe"] == "5 de devant"]
+            sub = df_indiv[df_indiv["Groupe"] == "5 de devant"]
             metrics = calculer_metriques_jauges(sub, "5 de devant", mode_calc=mode_calcul)
             render_dashboard_objectifs("5 de devant", metrics)
             st.caption(f"Effectif analysé : {len(sub)} joueurs dans les 5 de devant.")
 
         with tab_3eme:
-            sub = df_base[df_base["Groupe"] == "3ème Ligne"]
+            sub = df_indiv[df_indiv["Groupe"] == "3ème Ligne"]
             metrics = calculer_metriques_jauges(sub, "3ème Ligne", mode_calc=mode_calcul)
             render_dashboard_objectifs("3ème Ligne", metrics)
             st.caption(f"Effectif analysé : {len(sub)} joueurs en 3ème Ligne.")
 
         with tab_arrieres:
-            sub = df_base[df_base["Groupe"] == "Trois-quarts"]
+            sub = df_indiv[df_indiv["Groupe"] == "Trois-quarts"]
             metrics = calculer_metriques_jauges(sub, "Trois-quarts", mode_calc=mode_calcul)
             render_dashboard_objectifs("Trois-quarts", metrics)
             st.caption(f"Effectif analysé : {len(sub)} joueurs chez les Trois-quarts.")
@@ -2913,10 +2994,10 @@ def main() -> None:
                 if not s_d.empty:
                     session_date_val = s_d.iloc[0]
 
-        # Gestion et mise en cache de la note narrative sur la cohorte active (reflète le filtre Copilote & groupe)
-        cache_key = f"synthese_{len(df_groupe_actif)}_{session_date_val}_{st.session_state.get('copilote_desc', '')}_{groupe_selectionne}"
+        # Gestion et mise en cache de la note narrative basée sur l'effectif global de la séance (df_indiv)
+        cache_key = f"synthese_global_{len(df_indiv)}_{session_date_val}"
         if "synthese_cache_key" not in st.session_state or st.session_state["synthese_cache_key"] != cache_key:
-            st.session_state["synthese_note_coachs"] = generer_synthese_llm(df_groupe_actif)
+            st.session_state["synthese_note_coachs"] = generer_synthese_llm(df_indiv)
             st.session_state["synthese_cache_key"] = cache_key
 
         synthese_note_active = st.session_state.get("synthese_note_coachs", "")
@@ -2934,11 +3015,11 @@ def main() -> None:
                 synthese_note_active = edited_note
 
             if st.button("🔄 Régénérer la synthèse par IA", key="btn_regen_synthese"):
-                st.session_state["synthese_note_coachs"] = generer_synthese_llm(df_groupe_actif)
+                st.session_state["synthese_note_coachs"] = generer_synthese_llm(df_indiv)
                 st.rerun()
 
         pdf_bytes = generer_rapport_pdf_coachs(
-            df_indiv=df_groupe_actif,
+            df_indiv=df_indiv,
             date_seance=session_date_val,
             synthese_note=synthese_note_active,
         )
