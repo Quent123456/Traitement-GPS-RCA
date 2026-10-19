@@ -1516,6 +1516,111 @@ def generer_graphique_postes_matplotlib(df_indiv: pd.DataFrame) -> io.BytesIO:
     return buf
 
 
+# ==============================================================================
+# 7c. SYNTHÈSE NARRATIVE PAR LLM (NOTE DU PRÉPARATEUR PHYSIQUE)
+# ==============================================================================
+
+def generer_synthese_llm(df_indiv: pd.DataFrame, api_key: Optional[str] = None) -> str:
+    """
+    Rédige un court paragraphe de synthèse professionnelle (2 à 3 phrases maximum)
+    destiné au staff technique du RCA en utilisant le client Gemini.
+    Sécurité anti-panne intégrée : retourne un texte de repli propre et factuel
+    si l'API key n'est pas configurée ou si l'appel échoue.
+    """
+    if df_indiv.empty:
+        return "Séance enregistrée - Aucune donnée individuelle disponible pour l'analyse des charges."
+
+    nb_joueurs = len(df_indiv)
+    dist_tot = float(df_indiv["Distance (km)"].sum()) if "Distance (km)" in df_indiv.columns else 0.0
+    dist_moy = float(df_indiv["Distance (km)"].mean()) if "Distance (km)" in df_indiv.columns else 0.0
+    vmax = float(df_indiv["Top Speed (km/h)"].max()) if "Top Speed (km/h)" in df_indiv.columns else 0.0
+
+    hsr_col = " Distance haute intensité (m)" if " Distance haute intensité (m)" in df_indiv.columns else ("HSR (m)" if "HSR (m)" in df_indiv.columns else None)
+    hsr_tot = float(df_indiv[hsr_col].sum()) if hsr_col and not df_indiv[hsr_col].empty else 0.0
+    hsr_moy = float(df_indiv[hsr_col].mean()) if hsr_col and not df_indiv[hsr_col].empty else 0.0
+    if pd.isna(hsr_moy):
+        hsr_moy = 0.0
+    if pd.isna(hsr_tot):
+        hsr_tot = 0.0
+
+    # Texte de repli propre et factuel garanti
+    fallback_texte = (
+        f"Séance enregistrée pour {nb_joueurs} joueurs avec une charge globale de {dist_tot:.1f} km "
+        f"({dist_moy:.2f} km/joueur) et un pic de vitesse mesuré à {vmax:.1f} km/h. "
+        f"Le volume moyen à haute intensité s'établit à {int(round(hsr_moy))} m par joueur. "
+        f"Analyse des charges validée par le pôle performance RCA."
+    )
+
+    try:
+        resolved_key = (
+            api_key
+            or os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("GOOGLE_API_KEY")
+            or (hasattr(st, "secrets") and ("GEMINI_API_KEY" in st.secrets) and st.secrets["GEMINI_API_KEY"])
+            or (hasattr(st, "secrets") and ("GOOGLE_API_KEY" in st.secrets) and st.secrets["GOOGLE_API_KEY"])
+            or (hasattr(st, "session_state") and st.session_state.get("gemini_api_key"))
+        )
+
+        if not resolved_key or not str(resolved_key).strip():
+            return fallback_texte
+
+        from google import genai
+        client = genai.Client(api_key=str(resolved_key).strip())
+
+        prompt = (
+            "Agis en tant que préparateur physique de rugby senior du Rugby Club Amiénois (RCA). "
+            "Rédige une synthèse athlétique factuelle, professionnelle et percutante (strictement 2 à 3 phrases maximum, "
+            "sans puces, sans tirets, sans titre et sans aucun emoji) pour l'entraîneur principal en te basant sur ces métriques GPS :\n"
+            f"- Effectif évalué : {nb_joueurs} joueurs\n"
+            f"- Distance totale cumulée : {dist_tot:.1f} km (moyenne de {dist_moy:.2f} km/joueur)\n"
+            f"- Vitesse maximale de la séance : {vmax:.1f} km/h\n"
+            f"- Volume de haute intensité (HSR > 19.8 km/h) : moyenne de {int(round(hsr_moy))} m/joueur (total cumulé : {int(round(hsr_tot))} m)\n"
+            "Style attendu : expert en sciences du sport, direct, axé sur la charge globale, la vitesse maximale et la sollicitation de haute intensité."
+        )
+
+        texte = None
+        # 1. Tentative avec client.interactions (gemini-3.8-flash)
+        try:
+            interaction = client.interactions.create(
+                model="gemini-3.8-flash",
+                input=prompt,
+            )
+            texte = getattr(interaction, "output_text", None)
+        except Exception:
+            pass
+
+        # 2. Repli vers client.models.generate_content (gemini-3.8-flash)
+        if not texte:
+            try:
+                resp = client.models.generate_content(
+                    model="gemini-3.8-flash",
+                    contents=prompt,
+                )
+                texte = getattr(resp, "text", None)
+            except Exception:
+                pass
+
+        # 3. Repli vers gemini-2.5-flash
+        if not texte:
+            try:
+                resp = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt,
+                )
+                texte = getattr(resp, "text", None)
+            except Exception:
+                pass
+
+        if texte and str(texte).strip():
+            clean_str = " ".join(str(texte).strip().split())
+            return clean_str
+
+        return fallback_texte
+
+    except Exception:
+        return fallback_texte
+
+
 def safe_latin1(s: Any) -> str:
     """Assure qu'une chaîne est compatible avec l'encodage Latin-1 (Helvetica standard FPDF)."""
     if s is None:
@@ -1524,24 +1629,42 @@ def safe_latin1(s: Any) -> str:
     replacements = {
         "\u2019": "'",
         "\u2018": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u201e": '"',
         "\u2013": "-",
         "\u2014": "-",
+        "\u2022": "-",
         "\u2026": "...",
         "\u0153": "oe",
         "\u0152": "OE",
         "\u20ac": "EUR",
         "\xa0": " ",
+        "\u200b": "",
+        "\ufeff": "",
     }
     for k, v in replacements.items():
         txt = txt.replace(k, v)
-    return txt.encode("latin-1", "replace").decode("latin-1")
+    clean_chars = []
+    for ch in txt:
+        try:
+            ch.encode("latin-1")
+            clean_chars.append(ch)
+        except UnicodeEncodeError:
+            clean_chars.append(" ")
+    return "".join(clean_chars)
 
 
-def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[Any] = None) -> bytes:
+def generer_rapport_pdf_coachs(
+    df_indiv: pd.DataFrame,
+    date_seance: Optional[Any] = None,
+    synthese_note: Optional[str] = None,
+) -> bytes:
     """
     Génère un rapport PDF optimisé pour les coachs du RCA (format 1 page A4 Paysage) :
     - En-tête officiel RCA, date lisible & semaine
     - 5 Encarts KPIs globaux de la séance (dont Moyenne Haute Intensité / Joueur)
+    - Encart narratif : Note du Préparateur Physique (Générée par LLM ou repli sécurisé)
     - Moitié gauche : Graphique Matplotlib de Distance Moyenne & HSR Moyen par Groupe
     - Moitié droite : Podium dynamique de la séance (Top Speed, % Marche, Haute Intensité)
     """
@@ -1576,7 +1699,7 @@ def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[Any
     pdf.set_margins(left=12, top=20, right=12)
 
     # =========================================================================
-    # PAGE UNIQUE A4 PAYSAGE : EN-TÊTE, KPIS, GRAPHIQUE GROUPES & PODIUM SEANCE
+    # PAGE UNIQUE A4 PAYSAGE : EN-TÊTE, KPIS, NOTE NARRATIVE, GRAPHIQUE & PODIUM
     # =========================================================================
     pdf.add_page()
 
@@ -1604,34 +1727,63 @@ def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[Any
     ]
 
     card_w = 273 / len(kpis)
-    pdf.set_y(21)
+    pdf.set_y(19.5)
     for title, val in kpis:
         x_curr = pdf.get_x()
         y_curr = pdf.get_y()
         pdf.set_fill_color(241, 245, 249)
         pdf.set_draw_color(203, 213, 225)
-        pdf.rect(x_curr, y_curr, card_w - 2, 13, style="FD")
+        pdf.rect(x_curr, y_curr, card_w - 2, 12, style="FD")
 
         pdf.set_xy(x_curr, y_curr + 1)
         pdf.set_font("Helvetica", "", 7.5)
         pdf.set_text_color(100, 116, 139)
-        pdf.cell(card_w - 2, 4, safe_latin1(title), align="C")
+        pdf.cell(card_w - 2, 3.5, safe_latin1(title), align="C")
 
-        pdf.set_xy(x_curr, y_curr + 5.5)
-        pdf.set_font("Helvetica", "B", 10.5)
+        pdf.set_xy(x_curr, y_curr + 5.0)
+        pdf.set_font("Helvetica", "B", 10)
         pdf.set_text_color(31, 78, 121)
-        pdf.cell(card_w - 2, 6, safe_latin1(val), align="C")
+        pdf.cell(card_w - 2, 5.5, safe_latin1(val), align="C")
 
         pdf.set_xy(x_curr + card_w, y_curr)
 
-    # 2. Graphique Matplotlib : Distance & HSR par Groupe (Moitié gauche)
+    # 2. Encart narratif : Note du Préparateur Physique (LLM ou repli sécurisé)
+    if synthese_note is None or not str(synthese_note).strip():
+        synthese_note = generer_synthese_llm(df_indiv)
+
+    y_note = 33.5
+    h_note = 14.5
+    w_note = 273.0
+
+    # Fond de l'encadré
+    pdf.set_fill_color(248, 250, 252)  # #F8FAFC
+    pdf.set_draw_color(203, 213, 225)  # #CBD5E1
+    pdf.rect(12, y_note, w_note, h_note, style="FD")
+
+    # Bordure gauche accentuée Bleu RCA (#1F4E79)
+    pdf.set_fill_color(31, 78, 121)
+    pdf.rect(12, y_note, 3.5, h_note, style="F")
+
+    # Titre du bloc narratif
+    pdf.set_xy(18, y_note + 1.2)
+    pdf.set_font("Helvetica", "B", 7.5)
+    pdf.set_text_color(31, 78, 121)
+    pdf.cell(w_note - 8, 3.5, "NOTE DU PREPARATEUR PHYSIQUE  |  SYNTHESE ATHLETIQUE", align="L")
+
+    # Corps du texte nettoyé pour compatibilité Latin-1
+    pdf.set_xy(18, y_note + 4.8)
+    pdf.set_font("Helvetica", "", 7.5)
+    pdf.set_text_color(51, 65, 85)
+    pdf.multi_cell(w=w_note - 9, h=3.6, txt=safe_latin1(synthese_note), align="L")
+
+    # 3. Graphique Matplotlib : Distance & HSR par Groupe (Moitié gauche)
     buf1 = generer_graphique_groupes_matplotlib(df_indiv)
-    chart_y = 38
+    chart_y = 50.5
     chart_w = 133
-    chart_h = 152
+    chart_h = 139
     pdf.image(buf1, x=12, y=chart_y, w=chart_w, h=chart_h)
 
-    # 3. Podium des Tops de la Séance (Moitié droite)
+    # 4. Podium des Tops de la Séance (Moitié droite)
     podium_data = generer_podium_dynamique(df_indiv)
 
     x_pod = 151
@@ -1639,11 +1791,11 @@ def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[Any
 
     # Bandeau titre de la section Podium
     pdf.set_fill_color(31, 78, 121)  # #1F4E79
-    pdf.rect(x_pod, chart_y, w_pod, 7.5, style="F")
+    pdf.rect(x_pod, chart_y, w_pod, 6.5, style="F")
     pdf.set_xy(x_pod, chart_y)
-    pdf.set_font("Helvetica", "B", 10)
+    pdf.set_font("Helvetica", "B", 9.5)
     pdf.set_text_color(255, 255, 255)
-    pdf.cell(w_pod, 7.5, "PODIUM DE LA SEANCE", align="C")
+    pdf.cell(w_pod, 6.5, "PODIUM DE LA SEANCE", align="C")
 
     categories_config = [
         {
@@ -1672,9 +1824,9 @@ def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[Any
         3: {"label": "3eme", "bg": (180, 83, 9), "fg": (255, 255, 255)},    # Bronze (#B45309)
     }
 
-    y_card_start = chart_y + 7.5 + 2.5  # 48.0 mm
-    card_h = 45.0
-    card_gap = 3.5
+    y_card_start = chart_y + 6.5 + 2.0  # 59.0 mm
+    card_h = 41.5
+    card_gap = 2.5
 
     for i, cat_cfg in enumerate(categories_config):
         y_card = y_card_start + i * (card_h + card_gap)
@@ -1687,19 +1839,19 @@ def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[Any
         # En-tête de la carte catégorie
         accent_color = cat_cfg["color"]
         pdf.set_fill_color(*accent_color)
-        pdf.rect(x_pod, y_card, w_pod, 7.0, style="F")
+        pdf.rect(x_pod, y_card, w_pod, 6.0, style="F")
 
         # Titre catégorie (gauche)
         pdf.set_xy(x_pod + 4, y_card)
         pdf.set_font("Helvetica", "B", 8.5)
         pdf.set_text_color(255, 255, 255)
-        pdf.cell(70, 7.0, cat_cfg["title"], align="L")
+        pdf.cell(70, 6.0, cat_cfg["title"], align="L")
 
         # Sous-titre catégorie (droite)
         pdf.set_xy(x_pod + 74, y_card)
         pdf.set_font("Helvetica", "I", 7.5)
         pdf.set_text_color(226, 232, 240)
-        pdf.cell(56, 7.0, cat_cfg["subtitle"], align="R")
+        pdf.cell(56, 6.0, cat_cfg["subtitle"], align="R")
 
         # Récupération des joueurs de la catégorie
         cat_data = podium_data.get(cat_cfg["key"], {})
@@ -1707,9 +1859,9 @@ def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[Any
 
         # Rendu des 3 joueurs (Top 3)
         row_w = w_pod - 4  # 130 mm
-        row_h = 10.5
-        row_gap = 1.7
-        y_rows_start = y_card + 7.0 + 1.5
+        row_h = 9.8
+        row_gap = 1.2
+        y_rows_start = y_card + 6.0 + 1.2
 
         for rank_idx in range(1, 4):
             y_row = y_rows_start + (rank_idx - 1) * (row_h + row_gap)
@@ -1734,17 +1886,17 @@ def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[Any
             if has_photo:
                 # 1. Badge rang
                 pdf.set_fill_color(*badge_info["bg"])
-                pdf.rect(x_row + 2, y_row + 1.5, 9.5, 7.5, style="F")
-                pdf.set_xy(x_row + 2, y_row + 1.5)
+                pdf.rect(x_row + 2, y_row + 1.2, 9.5, 7.4, style="F")
+                pdf.set_xy(x_row + 2, y_row + 1.2)
                 pdf.set_font("Helvetica", "B", 7)
                 pdf.set_text_color(*badge_info["fg"])
-                pdf.cell(9.5, 7.5, badge_info["label"], align="C")
+                pdf.cell(9.5, 7.4, badge_info["label"], align="C")
 
                 # 2. Photo joueur
                 try:
-                    pdf.image(photo_path, x=x_row + 13, y=y_row + 1, w=8.5, h=8.5)
+                    pdf.image(photo_path, x=x_row + 13, y=y_row + 0.9, w=8.0, h=8.0)
                     pdf.set_draw_color(203, 213, 225)
-                    pdf.rect(x_row + 13, y_row + 1, 8.5, 8.5, style="D")
+                    pdf.rect(x_row + 13, y_row + 0.9, 8.0, 8.0, style="D")
                 except Exception:
                     has_photo = False
 
@@ -1757,11 +1909,11 @@ def generer_rapport_pdf_coachs(df_indiv: pd.DataFrame, date_seance: Optional[Any
             else:
                 # 1. Badge rang propre
                 pdf.set_fill_color(*badge_info["bg"])
-                pdf.rect(x_row + 2, y_row + 1.5, 11.5, 7.5, style="F")
-                pdf.set_xy(x_row + 2, y_row + 1.5)
+                pdf.rect(x_row + 2, y_row + 1.2, 11.5, 7.4, style="F")
+                pdf.set_xy(x_row + 2, y_row + 1.2)
                 pdf.set_font("Helvetica", "B", 7.5)
                 pdf.set_text_color(*badge_info["fg"])
-                pdf.cell(11.5, 7.5, badge_info["label"], align="C")
+                pdf.cell(11.5, 7.4, badge_info["label"], align="C")
 
                 # 2. Nom joueur
                 name_disp = p_name if len(p_name) <= 28 else p_name[:26] + ".."
@@ -2287,7 +2439,35 @@ def main() -> None:
                 if not s_d.empty:
                     session_date_val = s_d.iloc[0]
 
-        pdf_bytes = generer_rapport_pdf_coachs(df_indiv=df_indiv, date_seance=session_date_val)
+        # Gestion et mise en cache de la note narrative du préparateur physique
+        cache_key = f"synthese_{len(df_indiv)}_{session_date_val}"
+        if "synthese_cache_key" not in st.session_state or st.session_state["synthese_cache_key"] != cache_key:
+            st.session_state["synthese_note_coachs"] = generer_synthese_llm(df_indiv)
+            st.session_state["synthese_cache_key"] = cache_key
+
+        synthese_note_active = st.session_state.get("synthese_note_coachs", "")
+
+        with st.expander("📝 Note du Préparateur Physique (Génération IA / Synthèse)", expanded=True):
+            st.caption("Synthèse narrative insérée automatiquement sur la Page 1 du rapport PDF pour le staff technique.")
+            edited_note = st.text_area(
+                "Contenu de la synthèse (modifiable avant export) :",
+                value=synthese_note_active,
+                height=90,
+                key="text_area_synthese_note",
+            )
+            if edited_note != synthese_note_active:
+                st.session_state["synthese_note_coachs"] = edited_note
+                synthese_note_active = edited_note
+
+            if st.button("🔄 Régénérer la synthèse par IA", key="btn_regen_synthese"):
+                st.session_state["synthese_note_coachs"] = generer_synthese_llm(df_indiv)
+                st.rerun()
+
+        pdf_bytes = generer_rapport_pdf_coachs(
+            df_indiv=df_indiv,
+            date_seance=session_date_val,
+            synthese_note=synthese_note_active,
+        )
         clean_date_tag = re.sub(r"[^0-9a-zA-Z]", "_", str(session_date_val or datetime.date.today().strftime("%d_%m_%Y")))
         pdf_filename = f"Rapport_Seance_GPS_RCA_{clean_date_tag}.pdf"
 
