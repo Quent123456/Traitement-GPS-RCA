@@ -915,10 +915,16 @@ def assign_player_groups(df: pd.DataFrame, df_raw: Optional[pd.DataFrame] = None
     return df
 
 
-def process_catapult_data(df_raw: pd.DataFrame) -> pd.DataFrame:
+def process_catapult_data(
+    df_raw: pd.DataFrame,
+    split_filter: Optional[Union[str, List[str]]] = None,
+    exclude_warmup: bool = False,
+) -> pd.DataFrame:
     """
-    Traite le DataFrame brut Catapult One :
-    - Regroupe les données par joueur (session globale).
+    Traite le DataFrame brut Catapult One selon les méthodes STAPS de la préparatrice physique RCA :
+    - Filtre intelligent des splits/sessions pour éviter de doubler les données (si session globale + splits).
+    - HSR (m) : Correspond strictement à la Zone 3 (Z3_km * 1000.0).
+    - VHSR (m) : Correspond strictement au cumul Zone 4 + Zone 5 ((Z4_km + Z5_km) * 1000.0).
     - Convertit le Temps de jeu en minutes réelles.
     - Extrait et agrège toutes les métriques requises (Distance, Zones 1 à 5, Accel, Decel).
     """
@@ -928,94 +934,152 @@ def process_catapult_data(df_raw: pd.DataFrame) -> pd.DataFrame:
     if not player_col:
         raise ValueError("Colonne Joueur introuvable dans le fichier. Colonnes attendues : 'Player Name', 'Athlete Name', etc.")
 
-    dur_col = find_column(df_raw, [
+    # 1. Gestion intelligente des lignes de session et des Splits (Sécurité anti-doublon)
+    split_col = find_column(df_raw, [
+        "Split Name", "Split", "Period Name", "Period", "Tags", "Tag", "Activity Name", "Session Name", "Session Title", "Segment"
+    ])
+
+    df_working = df_raw.copy()
+
+    if split_col and split_col in df_working.columns:
+        s_series = df_working[split_col].astype(str).str.strip()
+        s_lower = s_series.str.lower()
+
+        # A. Filtrage explicite si demandé (ex: liste de splits ou mot-clé)
+        if split_filter is not None:
+            if isinstance(split_filter, str):
+                mask = s_lower.str.contains(split_filter.strip().lower(), na=False)
+                if mask.any():
+                    df_working = df_working[mask].copy()
+            elif isinstance(split_filter, (list, tuple, set)):
+                targets = [str(x).strip().lower() for x in split_filter]
+                mask = s_lower.isin(targets)
+                if mask.any():
+                    df_working = df_working[mask].copy()
+
+        # B. Filtrage intelligent automatique anti-doublon
+        else:
+            GLOBAL_TAGS = {
+                "session", "whole session", "full session", "all", "total",
+                "seance", "séance", "globale", "global", "complete", "complète",
+                "session summary", "all session", "overall"
+            }
+            is_global = s_lower.isin(GLOBAL_TAGS) | s_lower.str.startswith("session ") | (s_lower == "session")
+            has_global_rows = is_global.any()
+            has_split_rows = (~is_global & (s_series != "") & (s_series.str.lower() != "nan")).any()
+
+            # Si l'export contient à la fois la ligne globale de session et des sous-séquences,
+            # on ne retient que la ligne globale par joueur pour éviter le doublement des données.
+            if has_global_rows and has_split_rows:
+                players_with_global = set(df_working.loc[is_global, player_col].astype(str).str.strip().unique())
+                mask_safe = is_global | (~df_working[player_col].astype(str).str.strip().isin(players_with_global))
+                df_working = df_working[mask_safe].copy()
+
+        # C. Exclusion optionnelle de l'échauffement
+        if exclude_warmup:
+            warmup_mask = s_lower.str.contains("echauff|échauff|warmup|warm-up|warm_up", na=False)
+            if (~warmup_mask).any():
+                df_working = df_working[~warmup_mask].copy()
+
+    dur_col = find_column(df_working, [
         "Duration", "Temps de jeu", "Duration (mins)", "Duration (s)", "Duration (sec)", "Durée", "Time", "Session Duration"
     ])
-    dist_col = find_column(df_raw, ["Distance (km)", "Total Distance (km)", "Distance"])
-    dist_m_col = find_column(df_raw, ["Distance (m)", "Total Distance (m)"])
+    dist_col = find_column(df_working, ["Distance (km)", "Total Distance (km)", "Distance"])
+    dist_m_col = find_column(df_working, ["Distance (m)", "Total Distance (m)"])
 
-    hsr_col = find_column(df_raw, [
-        "Distance in Speed Zone 4 (km)", "Distance in Speed Zone 4  (km)",
+    hsr_col = find_column(df_working, [
+        "Distance in Speed Zone 3 (km)", "Distance in Speed Zone 3  (km)",
         "Distance haute intensité (m)", "High Speed Running (m)", "HSR Distance (m)", "HSR Distance (>5m/s)"
     ])
-    vhsr_col = find_column(df_raw, [
+    vhsr_col = find_column(df_working, [
+        "Distance in Speed Zone 4 (km)", "Distance in Speed Zone 4  (km)",
         "Distance in Speed Zone 5 (km)", "Distance in Speed Zone 5  (km)",
         "Sprint Distance (m)", "VHSR Distance (m)", "Very High Speed Running (m)"
     ])
 
-    top_speed_col = find_column(df_raw, ["Top Speed (km/h)", "Max Velocity (km/h)", "Top Speed", "Max Velocity", "Vmax"])
-    max_accel_col = find_column(df_raw, ["Max Acceleration (m/s/s)", "Max Acceleration (m/s2)", "Max Acceleration", "Max Accel"])
-    max_decel_col = find_column(df_raw, ["Max Deceleration (m/s/s)", "Max Deceleration (m/s2)", "Max Deceleration", "Max Decel"])
+    top_speed_col = find_column(df_working, ["Top Speed (km/h)", "Max Velocity (km/h)", "Top Speed", "Max Velocity", "Vmax"])
+    max_accel_col = find_column(df_working, ["Max Acceleration (m/s/s)", "Max Acceleration (m/s2)", "Max Acceleration", "Max Accel"])
+    max_decel_col = find_column(df_working, ["Max Deceleration (m/s/s)", "Max Deceleration (m/s2)", "Max Deceleration", "Max Decel"])
 
-    z1_col = find_column(df_raw, ["Distance in Speed Zone 1 (km)", "Distance in Speed Zone 1  (km)", "Speed Zone 1", "Zone 1"])
-    z2_col = find_column(df_raw, ["Distance in Speed Zone 2 (km)", "Distance in Speed Zone 2  (km)", "Speed Zone 2", "Zone 2"])
-    z3_col = find_column(df_raw, ["Distance in Speed Zone 3 (km)", "Distance in Speed Zone 3  (km)", "Speed Zone 3", "Zone 3"])
-    z4_col = find_column(df_raw, ["Distance in Speed Zone 4 (km)", "Distance in Speed Zone 4  (km)", "Speed Zone 4", "Zone 4"])
-    z5_col = find_column(df_raw, ["Distance in Speed Zone 5 (km)", "Distance in Speed Zone 5  (km)", "Speed Zone 5", "Zone 5"])
+    z1_col = find_column(df_working, ["Distance in Speed Zone 1 (km)", "Distance in Speed Zone 1  (km)", "Speed Zone 1", "Zone 1"])
+    z2_col = find_column(df_working, ["Distance in Speed Zone 2 (km)", "Distance in Speed Zone 2  (km)", "Speed Zone 2", "Zone 2"])
+    z3_col = find_column(df_working, ["Distance in Speed Zone 3 (km)", "Distance in Speed Zone 3  (km)", "Speed Zone 3", "Zone 3"])
+    z4_col = find_column(df_working, ["Distance in Speed Zone 4 (km)", "Distance in Speed Zone 4  (km)", "Speed Zone 4", "Zone 4"])
+    z5_col = find_column(df_working, ["Distance in Speed Zone 5 (km)", "Distance in Speed Zone 5  (km)", "Speed Zone 5", "Zone 5"])
 
-    acc_34_col = find_column(df_raw, ["Accelerations Zone Count: 3 - 4 m/s/s", "Accelerations Zone Count: 3-4 m/s/s", "Accel 3-4", "Accelerations (>3m/s2)"])
-    acc_gt4_col = find_column(df_raw, ["Accelerations Zone Count: > 4 m/s/s", "Accelerations Zone Count: >4 m/s/s", "Accel >4"])
-    dec_34_col = find_column(df_raw, ["Deceleration Zone Count: 3 - 4 m/s/s", "Deceleration Zone Count: 3-4 m/s/s", "Decel 3-4", "Décélérations (<-3m/s2)"])
-    dec_gt4_col = find_column(df_raw, ["Deceleration Zone Count: > 4 m/s/s", "Deceleration Zone Count: >4 m/s/s", "Decel >4"])
+    acc_34_col = find_column(df_working, ["Accelerations Zone Count: 3 - 4 m/s/s", "Accelerations Zone Count: 3-4 m/s/s", "Accel 3-4", "Accelerations (>3m/s2)"])
+    acc_gt4_col = find_column(df_working, ["Accelerations Zone Count: > 4 m/s/s", "Accelerations Zone Count: >4 m/s/s", "Accel >4"])
+    dec_34_col = find_column(df_working, ["Deceleration Zone Count: 3 - 4 m/s/s", "Deceleration Zone Count: 3-4 m/s/s", "Decel 3-4", "Décélérations (<-3m/s2)"])
+    dec_gt4_col = find_column(df_working, ["Deceleration Zone Count: > 4 m/s/s", "Deceleration Zone Count: >4 m/s/s", "Decel >4"])
 
     df_clean = pd.DataFrame()
-    df_clean["Nom ; Prénom"] = df_raw[player_col].astype(str).str.strip()
+    df_clean["Nom ; Prénom"] = df_working[player_col].astype(str).str.strip()
 
     if dur_col:
-        df_clean["Duration_min"] = parse_duration_series(df_raw[dur_col], col_name=dur_col)
+        df_clean["Duration_min"] = parse_duration_series(df_working[dur_col], col_name=dur_col)
     else:
         df_clean["Duration_min"] = 0.0
 
     if dist_col:
-        vals = df_raw[dist_col].apply(clean_numeric_value)
+        vals = df_working[dist_col].apply(clean_numeric_value)
         if "(m)" in dist_col.lower() or vals.median() > 100.0:
             df_clean["Distance_km"] = vals / 1000.0
         else:
             df_clean["Distance_km"] = vals
     elif dist_m_col:
-        df_clean["Distance_km"] = df_raw[dist_m_col].apply(clean_numeric_value) / 1000.0
+        df_clean["Distance_km"] = df_working[dist_m_col].apply(clean_numeric_value) / 1000.0
     else:
         df_clean["Distance_km"] = 0.0
 
-    df_clean["Top_Speed"] = df_raw[top_speed_col].apply(clean_numeric_value) if top_speed_col else 0.0
-    df_clean["Max_Accel"] = df_raw[max_accel_col].apply(clean_numeric_value) if max_accel_col else 0.0
-    df_clean["Max_Decel"] = df_raw[max_decel_col].apply(lambda x: abs(clean_numeric_value(x))) if max_decel_col else 0.0
+    df_clean["Top_Speed"] = df_working[top_speed_col].apply(clean_numeric_value) if top_speed_col else 0.0
+    df_clean["Max_Accel"] = df_working[max_accel_col].apply(clean_numeric_value) if max_accel_col else 0.0
+    df_clean["Max_Decel"] = df_working[max_decel_col].apply(lambda x: abs(clean_numeric_value(x))) if max_decel_col else 0.0
 
     for z_name, c_source in [("Z1_km", z1_col), ("Z2_km", z2_col), ("Z3_km", z3_col), ("Z4_km", z4_col), ("Z5_km", z5_col)]:
         if c_source:
-            vals = df_raw[c_source].apply(clean_numeric_value)
+            vals = df_working[c_source].apply(clean_numeric_value)
             if "(m)" in c_source.lower() or vals.median() > 20.0:
                 vals = vals / 1000.0
             df_clean[z_name] = vals
         else:
             df_clean[z_name] = 0.0
 
-    # HSR (Zone 4) et VHSR (Zone 5) en mètres
-    if z4_col and z5_col:
-        df_clean["Z4_m"] = df_clean["Z4_km"] * 1000.0
-        df_clean["Z5_m"] = df_clean["Z5_km"] * 1000.0
-        df_clean["HSR_m"] = df_clean["Z4_m"] + df_clean["Z5_m"]
-    elif hsr_col and vhsr_col:
-        v_hsr = df_raw[hsr_col].apply(clean_numeric_value)
-        v_vhsr = df_raw[vhsr_col].apply(clean_numeric_value)
-        df_clean["Z4_m"] = v_hsr if "(m)" in hsr_col.lower() or v_hsr.median() > 10.0 else v_hsr * 1000.0
-        df_clean["Z5_m"] = v_vhsr if "(m)" in vhsr_col.lower() or v_vhsr.median() > 5.0 else v_vhsr * 1000.0
-        df_clean["HSR_m"] = df_clean["Z4_m"] + df_clean["Z5_m"]
-    else:
-        df_clean["Z4_m"] = df_clean["Z4_km"] * 1000.0
-        df_clean["Z5_m"] = df_clean["Z5_km"] * 1000.0
-        df_clean["HSR_m"] = (df_clean["Z3_km"] + df_clean["Z4_km"] + df_clean["Z5_km"]) * 1000.0
+    # Si z3_col était absent mais hsr_col présent (ex: "HSR Distance (>5m/s)")
+    if not z3_col and hsr_col:
+        v_hsr = df_working[hsr_col].apply(clean_numeric_value)
+        val_hsr_km = (v_hsr / 1000.0) if "(m)" in hsr_col.lower() or v_hsr.median() > 10.0 else v_hsr
+        df_clean["Z3_km"] = val_hsr_km
 
-    df_clean["Acc_34"] = df_raw[acc_34_col].apply(clean_numeric_value) if acc_34_col else 0.0
-    df_clean["Acc_gt4"] = df_raw[acc_gt4_col].apply(clean_numeric_value) if acc_gt4_col else 0.0
-    df_clean["Dec_34"] = df_raw[dec_34_col].apply(clean_numeric_value) if dec_34_col else 0.0
-    df_clean["Dec_gt4"] = df_raw[dec_gt4_col].apply(clean_numeric_value) if dec_gt4_col else 0.0
+    # Nomenclature officielle préparatrice physique RCA :
+    # 1. HSR (m) correspond strictement à la Zone 3
+    df_clean["HSR_m"] = df_clean["Z3_km"] * 1000.0
+
+    # 2. VHSR (m) correspond strictement au cumul Zone 4 + Zone 5
+    df_clean["Z4_m"] = df_clean["Z4_km"] * 1000.0
+    df_clean["Z5_m"] = df_clean["Z5_km"] * 1000.0
+    df_clean["VHSR_m"] = (df_clean["Z4_km"] + df_clean["Z5_km"]) * 1000.0
+
+    # Si z4_col et z5_col étaient absents mais vhsr_col présent (ex: "Sprint Distance (m)")
+    if not z4_col and not z5_col and vhsr_col:
+        v_vhsr = df_working[vhsr_col].apply(clean_numeric_value)
+        val_vhsr_m = v_vhsr if "(m)" in vhsr_col.lower() or v_vhsr.median() > 5.0 else v_vhsr * 1000.0
+        df_clean["VHSR_m"] = val_vhsr_m
+        df_clean["Z4_m"] = val_vhsr_m * 0.7
+        df_clean["Z5_m"] = val_vhsr_m * 0.3
+        df_clean["Z4_km"] = df_clean["Z4_m"] / 1000.0
+        df_clean["Z5_km"] = df_clean["Z5_m"] / 1000.0
+
+    df_clean["Acc_34"] = df_working[acc_34_col].apply(clean_numeric_value) if acc_34_col else 0.0
+    df_clean["Acc_gt4"] = df_working[acc_gt4_col].apply(clean_numeric_value) if acc_gt4_col else 0.0
+    df_clean["Dec_34"] = df_working[dec_34_col].apply(clean_numeric_value) if dec_34_col else 0.0
+    df_clean["Dec_gt4"] = df_working[dec_gt4_col].apply(clean_numeric_value) if dec_gt4_col else 0.0
 
     # Groupby Joueur
     grouped = df_clean.groupby("Nom ; Prénom", as_index=False).agg({
         "Duration_min": "sum",
         "Distance_km": "sum",
         "HSR_m": "sum",
+        "VHSR_m": "sum",
         "Z4_m": "sum",
         "Z5_m": "sum",
         "Top_Speed": "max",
@@ -1078,8 +1142,9 @@ def process_catapult_data(df_raw: pd.DataFrame) -> pd.DataFrame:
     df_indiv['%HSR '] = pct_hsr
     df_indiv['%VHSR'] = pct_vhsr
     df_indiv['HSR m/min'] = hsr_per_min
+    df_indiv['VHSR (m)'] = grouped['VHSR_m']
 
-    df_indiv = assign_player_groups(df_indiv, df_raw=df_raw)
+    df_indiv = assign_player_groups(df_indiv, df_raw=df_working)
     return df_indiv
 
 
@@ -1099,18 +1164,22 @@ def calculer_metriques_jauges(df_subset: pd.DataFrame, group_name: str, mode_cal
     d_m = df_subset["Distance (km)"] * 1000.0
     val_dist = d_m.mean() if use_mean else d_m.sum()
 
-    z4_col = "Distance in Speed Zone 4  (km)"
-    if z4_col in df_subset.columns:
-        hsr_m = df_subset[z4_col] * 1000.0
+    # HSR = Zone 3 (selon méthodologie STAPS RCA)
+    if "Distance in Speed Zone 3  (km)" in df_subset.columns:
+        hsr_m = df_subset["Distance in Speed Zone 3  (km)"] * 1000.0
+    elif " Distance haute intensité (m)" in df_subset.columns:
+        hsr_m = df_subset[" Distance haute intensité (m)"]
     else:
-        hsr_m = df_subset[" Distance haute intensité (m)"] * 0.70
+        hsr_m = pd.Series([0.0] * len(df_subset))
     val_hsr = hsr_m.mean() if use_mean else hsr_m.sum()
 
-    z5_col = "Distance in Speed Zone 5  (km)"
-    if z5_col in df_subset.columns:
-        vhsr_m = df_subset[z5_col] * 1000.0
+    # VHSR = Zone 4 + Zone 5
+    if "VHSR (m)" in df_subset.columns:
+        vhsr_m = df_subset["VHSR (m)"]
+    elif "Distance in Speed Zone 4  (km)" in df_subset.columns and "Distance in Speed Zone 5  (km)" in df_subset.columns:
+        vhsr_m = (df_subset["Distance in Speed Zone 4  (km)"] + df_subset["Distance in Speed Zone 5  (km)"]) * 1000.0
     else:
-        vhsr_m = df_subset[" Distance haute intensité (m)"] * 0.30
+        vhsr_m = pd.Series([0.0] * len(df_subset))
     val_vhsr = vhsr_m.mean() if use_mean else vhsr_m.sum()
 
     acc_dec = df_subset["Accel/Dec"] if "Accel/Dec" in df_subset.columns else pd.Series([0.0] * len(df_subset))
@@ -2018,8 +2087,54 @@ def main() -> None:
                     df_raw = appliquer_mapping(df_raw, mapping_gps)
                     st.success(f"✅ Mapping appliqué : {len(mapping_gps)} boîtier(s) attribué(s) à l'effectif.")
 
+            # ==================================================================
+            # ÉTAPE 1c : GESTION DES SPLITS & SÉQUENCES CATAPULT
+            # ==================================================================
+            split_col_detected = find_column(df_raw, [
+                "Split Name", "Split", "Period Name", "Period", "Tags", "Tag", "Activity Name", "Session Name", "Session Title", "Segment"
+            ])
+            selected_splits_val = None
+            excl_warmup_val = False
+
+            if split_col_detected and split_col_detected in df_raw.columns:
+                all_splits = [
+                    s for s in df_raw[split_col_detected].dropna().astype(str).str.strip().unique().tolist()
+                    if s and s.lower() != "nan"
+                ]
+                if len(all_splits) > 1:
+                    with st.expander("⏱️ Gestion des Séquences & Splits de Séance (Catapult)", expanded=False):
+                        st.info("Des sous-séquences (splits / ateliers) ont été détectées. Par défaut, le filtre intelligent retient la séance globale pour éviter tout doublement de distance.")
+                        c_sp1, c_sp2 = st.columns([3, 2])
+                        with c_sp1:
+                            mode_split = st.radio(
+                                "Sélection des données à analyser :",
+                                options=["Automatique (Séance globale / Anti-doublon)", "Toutes les séquences", "Filtrer manuellement par Split"],
+                                index=0,
+                                key="radio_split_mode",
+                            )
+                        with c_sp2:
+                            excl_warmup_val = st.checkbox(
+                                "Exclure l'échauffement",
+                                value=False,
+                                help="Exclut les séquences contenant 'échauffement' ou 'warmup'.",
+                                key="chk_excl_warmup",
+                            )
+                        if mode_split == "Filtrer manuellement par Split":
+                            selected_splits_val = st.multiselect(
+                                "Choisir les splits à conserver :",
+                                options=all_splits,
+                                default=all_splits,
+                                key="ms_splits_selected",
+                            )
+                        elif mode_split == "Toutes les séquences":
+                            selected_splits_val = all_splits
+
             with st.spinner("Traitement des données GPS..."):
-                df_indiv = process_catapult_data(df_raw)
+                df_indiv = process_catapult_data(
+                    df_raw,
+                    split_filter=selected_splits_val,
+                    exclude_warmup=excl_warmup_val,
+                )
             st.success(f"✅ Fichier chargé avec succès ! {len(df_indiv)} joueurs identifiés sur la séance.")
         except Exception as e:
             st.error(f"❌ Erreur lors du chargement du fichier Catapult : {str(e)}")
