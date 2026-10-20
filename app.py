@@ -71,7 +71,7 @@ COLOR_MUTED = "#555555"
 # 1. BASE DE DONNÉES EFFECTIF SÉNIORS DU RUGBY CLUB AMIÉNOIS (EXTRACTION PDF)
 # ------------------------------------------------------------------------------
 joueurs_data: Dict[str, str] = {
-    # Piliers
+    # Piliers (5 de devant)
     "SALUA Landry": "Pilier",
     "SALUA Noam": "Pilier",
     "FRION Quentin": "Pilier",
@@ -86,29 +86,38 @@ joueurs_data: Dict[str, str] = {
     "VASELLI Sébastien": "Pilier",
     "TANTER Edouard": "Pilier",
     "DAULT Bastien": "Pilier",
-    # Talonneurs
+    "SCHNEERBERGER Julien": "Pilier",
+    "DUGROPREZ Julien": "Pilier",
+    # Talonneurs (5 de devant)
     "LESUEUR Jean-Étienne": "Talonneur",
-    "SAINTOMER Lucas": "Talonneur",
+    "Jean-Étienne ( TIJ)": "Talonneur",
     "GENERMONT Roméo": "Talonneur",
     "GUIBERT Samuel": "Talonneur",
-    # 2èmes lignes
+    "GIET Axel": "Talonneur",
+    "D. Anthymme": "Talonneur",
+    # 2èmes lignes (5 de devant)
     "WAEYAERT Thomas": "2ème ligne",
     "GRENET Paul": "2ème ligne",
-    "SOTILLO Alejo": "2ème ligne",
     "BOIDIN Donovan": "2ème ligne",
     "VDH Simon": "2ème ligne",
     "DENIER Gabin": "2ème ligne",
+    "Gabin D.": "2ème ligne",
     "ROY Etienne": "2ème ligne",
     "FOUQUET Victorien": "2ème ligne",
-    # 3èmes lignes
+    # 3èmes lignes (Alignement Préparatrice Physique RCA : SOTILLO Alejo et SAINTOMER Lucas inclus)
+    "SOTILLO Alejo": "3ème ligne",
+    "SAINTOMER Lucas": "3ème ligne",
+    "SAITOMER Lucas": "3ème ligne",
+    "SOTILLO Lucas": "3ème ligne",
     "VASELLI Enzo": "3ème ligne",
+    "ORION Lucas": "3ème ligne",
+    "OLIER Lucas": "3ème ligne",
+    "CARPENTIER Simon": "3ème ligne",
     "LAFEUILLE Emilien": "3ème ligne",
     "MARTIN Benjamin": "3ème ligne",
     "MONTI Ciro": "3ème ligne",
     "WIOTTE Louis": "3ème ligne",
     "GENTIEN Tim": "3ème ligne",
-    "ORION Lucas": "3ème ligne",
-    "CARPENTIER Simon": "3ème ligne",
     "CARLIER Louis": "3ème ligne",
     "COSSARD Léandre": "3ème ligne",
     "SAINTOMER Louis": "3ème ligne",
@@ -116,50 +125,195 @@ joueurs_data: Dict[str, str] = {
     "BINNINGER Alban": "3ème ligne",
     "BLANC Jules": "3ème ligne",
     "KAZUMBA Camille": "3ème ligne",
-    # Demis de mêlée
+    # Demis de mêlée (Trois-quarts)
     "TESSON Gabriel": "Demi de mêlée",
     "BAMIERE Clément": "Demi de mêlée",
+    "BAM'S": "Demi de mêlée",
     "SANTONI Stephan": "Demi de mêlée",
     "BOEUF Elliot": "Demi de mêlée",
-    # Demis d'ouverture
+    "BŒUF Eliot": "Demi de mêlée",
+    "MAUGARD Nicolas": "Demi de mêlée",
+    "BOUMENDIL Antoine": "Demi de mêlée",
+    # Demis d'ouverture (Trois-quarts)
     "HARRY Max": "Demi d'ouverture",
+    "HARRY Maxence": "Demi d'ouverture",
     "CARPENTIER Maël": "Demi d'ouverture",
     "ULMUCK Victor": "Demi d'ouverture",
+    "USUBILLAGA Victor": "Demi d'ouverture",
     "GOMES Louis": "Demi d'ouverture",
     "SUEUR Xavier": "Demi d'ouverture",
-    # Centres
+    # Centres (Trois-quarts)
     "PRÉVOTÉ Oliver": "Centre",
+    "PREVOTE Olivier": "Centre",
     "PELESEUMA Ope": "Centre",
+    "OPE": "Centre",
     "TREMBLAY Brieuc": "Centre",
     "DE BRYUN Octave": "Centre",
+    "DE BRUYN Octave": "Centre",
     "VENIN Benoît": "Centre",
     "HURTEL Oscar": "Centre",
-    # Ailiers
+    "Oscar": "Centre",
+    "DELAVALLÉE Quentin": "Centre",
+    "MANDIVENGA Brendon": "Centre",
+    # Ailiers (Trois-quarts - dont Jules D. / DELACROIX Jules)
+    "DELACROIX Jules": "Ailier",
     "CARPENTIER Joseph": "Ailier",
     "SALUA Maka": "Ailier",
+    "SALUA Makatea": "Ailier",
     "SELTZER Antoine": "Ailier",
     "BATON Léonard": "Ailier",
+    "BATTON Léonard": "Ailier",
     "MARZIANO Nathan": "Ailier",
     "SRIDI Youness": "Ailier",
     "LEROUX Mathis": "Ailier",
-    # Arrières
+    "GANE Thomas": "Ailier",
+    "DELATTRE Jacques": "Ailier",
+    # Arrières (Trois-quarts)
     "LESPINASSE Lucien": "Arrière",
     "PRÉVOST Thomas": "Arrière",
+    "PREVOST Thomas": "Arrière",
     "MOINE Arthur": "Arrière",
     "VILAIN Beryl": "Arrière",
 }
 
-# Cartographie Poste -> Groupe athlétique officiel
+
+def mapper_poste_vers_groupe_rca(poste_detaille: str, nom_joueur: str = "") -> str:
+    """
+    Convertit automatiquement et de façon robuste un poste détaillé du rugby en l'un
+    des 3 grands groupes d'analyse officiels de la préparatrice physique du RCA :
+    1. '5 de devant' : Pilier, Pilier droit, Pilier gauche, Talonneur, 2ème ligne, Deuxième ligne, Première ligne, 5 de devant.
+    2. '3ème Ligne' : 3ème ligne, Troisième ligne, 3ème ligne aile, 3ème ligne centre, Flanker, Numéro 8.
+    3. 'Trois-quarts' : Demis (mêlée/ouverture/9/10), Ouvrière, Demis, Centre, Ailier, Arrière, Trois-quarts, 3/4.
+
+    Prend également en compte les alignements prioritaires demandés par la préparatrice physique :
+    - Lucas S. et Alejo S. rattachés en '3ème Ligne'.
+    - Bastien D., Thomas P., Edouard T., Jean-Étienne L. en '5 de devant'.
+    - Enzo V., Lucas O., Simon C. en '3ème Ligne'.
+    - Jules D. (DELACROIX Jules), Elliot B., Maël C., Victor U., Olivier P., Ope P., Maka S., Arthur M., Octave D., Lucien L. en 'Trois-quarts'.
+    """
+    nom_clean = str(nom_joueur).strip().lower() if nom_joueur else ""
+
+    # 1. Règle d'alignement prioritaire par joueur spécifique (Staff RCA)
+    if nom_clean:
+        # Lucas S. & Alejo S. -> 3ème Ligne (selon méthodologie préparatrice physique RCA)
+        if "sotillo" in nom_clean:
+            return "3ème Ligne"
+        if ("saintomer" in nom_clean or "saitomer" in nom_clean) and "lucas" in nom_clean:
+            return "3ème Ligne"
+
+        # 5 de devant spécifiques
+        if any(k in nom_clean for k in [
+            "dault bastien", "bastien d", "dault",
+            "pecquery thomas", "thomas p", "pecquery",
+            "tanter edouard", "edouard t", "tanter",
+            "lesueur jean-étienne", "lesueur jean-etienne", "jean-étienne l", "jean-etienne l", "lesueur", "tij",
+            "cozic adrien", "cozic"
+        ]):
+            return "5 de devant"
+
+        # 3ème Ligne spécifiques
+        if any(k in nom_clean for k in [
+            "vaselli enzo", "enzo v",
+            "orion lucas", "olier lucas", "lucas o",
+            "carpentier simon", "simon c",
+            "blanc jules", "lafeuille emilien", "monti ciro"
+        ]):
+            return "3ème Ligne"
+
+        # Trois-quarts spécifiques
+        if any(k in nom_clean for k in [
+            "delacroix jules", "jules d", "delacroix",
+            "boeuf elliot", "bœuf eliot", "boeuf eliot", "bœuf elliot", "elliot b", "eliot b",
+            "carpentier maël", "carpentier mael", "maël c", "mael c",
+            "ulmuck victor", "usubillaga victor", "victor u", "ulmuck", "usubillaga",
+            "prévoté oliver", "prevote olivier", "olivier p", "oliver p", "prevote", "prévoté",
+            "peleseuma ope", "ope p", "ope",
+            "salua maka", "salua makatea", "maka s",
+            "moine arthur", "arthur m",
+            "de bruyn octave", "de bryun octave", "octave d",
+            "lespinasse lucien", "lucien l", "lespinasse",
+            "bam's", "bamiere", "harry max", "harry maxence"
+        ]):
+            return "Trois-quarts"
+
+    # 2. Conversion automatique par poste détaillé
+    p_clean = str(poste_detaille).strip().lower()
+    if not p_clean:
+        return "Trois-quarts"
+
+    # 5 de devant
+    # Pilier, Pilier droit, Pilier gauche, Talonneur, 2ème ligne, Deuxième ligne, Première ligne, 5 de devant
+    if any(k in p_clean for k in [
+        "pilier", "prop", "talon", "hooker",
+        "2ème ligne", "2eme ligne", "deuxième ligne", "deuxieme ligne", "2nd ligne", "2e ligne", "lock",
+        "première ligne", "premiere ligne", "1ère ligne", "1ere ligne",
+        "5 de devant", "cinq de devant", "front row", "tight five"
+    ]):
+        return "5 de devant"
+
+    # 3ème Ligne
+    # 3ème ligne, Troisième ligne, 3ème ligne aile, 3ème ligne centre, Flanker, Numéro 8
+    if any(k in p_clean for k in [
+        "3ème ligne", "3eme ligne", "troisième ligne", "troisieme ligne", "3e ligne",
+        "3ème ligne aile", "3eme ligne aile", "3ème ligne centre", "3eme ligne centre",
+        "flanker", "flank", "troisième ligne aile", "troisième ligne centre",
+        "numéro 8", "numero 8", "num 8", "n°8", "no8", "n8",
+        "third row", "back row", "loose forward"
+    ]) or p_clean == "8":
+        return "3ème Ligne"
+
+    # Trois-quarts
+    # Demi de mêlée (9), Demi d'ouverture (10), Ouvrière, Demis, Centre, Ailier, Arrière, Trois-quarts, 3/4
+    if any(k in p_clean for k in [
+        "demi de mêlée", "demi de melee", "demi melee", "scrum half", "scrum-half",
+        "demi d'ouverture", "demi d ouverture", "demi ouverture", "fly half", "fly-half", "ouvreur", "ouvrière", "ouvriere",
+        "demi", "demis",
+        "centre", "center", "premier centre", "second centre",
+        "ailier", "wing", "winger",
+        "arrière", "arriere", "fullback", "full back",
+        "trois-quarts", "trois quarts", "trois-quart", "trois quart", "3/4", "backs"
+    ]) or p_clean in ["9", "10", "11", "12", "13", "14", "15"]:
+        return "Trois-quarts"
+
+    # 3. Règles heuristiques de repli
+    if "5" in p_clean or "devant" in p_clean:
+        return "5 de devant"
+    if "3" in p_clean:
+        return "3ème Ligne"
+
+    return "Trois-quarts"
+
+
+# Cartographie Poste -> Groupe athlétique officiel RCA (3 catégories)
 POSTE_VERS_GROUPE: Dict[str, str] = {
+    # 5 de devant
     "Pilier": "5 de devant",
+    "Pilier droit": "5 de devant",
+    "Pilier gauche": "5 de devant",
     "Talonneur": "5 de devant",
     "2ème ligne": "5 de devant",
+    "Deuxième ligne": "5 de devant",
+    "Première ligne": "5 de devant",
+    "5 de devant": "5 de devant",
+    # 3ème Ligne
     "3ème ligne": "3ème Ligne",
+    "Troisième ligne": "3ème Ligne",
+    "3ème ligne aile": "3ème Ligne",
+    "3ème ligne centre": "3ème Ligne",
+    "Flanker": "3ème Ligne",
+    "Numéro 8": "3ème Ligne",
+    # Trois-quarts
     "Demi de mêlée": "Trois-quarts",
     "Demi d'ouverture": "Trois-quarts",
+    "Ouvrière": "Trois-quarts",
+    "Demis": "Trois-quarts",
     "Centre": "Trois-quarts",
+    "Centres": "Trois-quarts",
     "Ailier": "Trois-quarts",
+    "Ailiers": "Trois-quarts",
     "Arrière": "Trois-quarts",
+    "Arrières": "Trois-quarts",
+    "Trois-quarts": "Trois-quarts",
 }
 
 # Objectifs athlétiques de référence par groupe (Moyenne individuelle cible par séance)
@@ -777,6 +931,25 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Dict[Union[int,
                 st.session_state["gps_mapping"][gps_id] = choix
                 st.session_state["gps_mapping"][str(gps_id)] = choix
 
+    # 4. Sécurité anti-doublon lors de l'attribution manuelle des GPS
+    joueurs_assignes: Dict[str, List[int]] = {}
+    for g_id in liste_gps_detectes:
+        j_choisi = mapping.get(g_id)
+        if j_choisi and j_choisi != placeholder:
+            joueurs_assignes.setdefault(j_choisi, []).append(g_id)
+
+    doublons = {j: ids for j, ids in joueurs_assignes.items() if len(ids) > 1}
+    if doublons:
+        details_doublons = ", ".join([
+            f"**{j}** (boîtiers {', '.join(f'n°{i}' for i in ids)})"
+            for j, ids in doublons.items()
+        ])
+        st.warning(
+            f"⚠️ **Attention - Doublon détecté dans l'attribution GPS :** {details_doublons}. "
+            "Un même joueur est assigné à plusieurs boîtiers différents sur la même séance. "
+            "Veuillez corriger la sélection afin d'éviter la fusion erronée des distances et la réduction artificielle de l'effectif."
+        )
+
     return mapping
 
 
@@ -857,12 +1030,7 @@ def load_template_positions() -> Dict[str, str]:
                 c0 = str(row[0].value or '').strip().lower()
                 c1 = str(row[1].value or '').strip()
                 if c0 and c0 != 'moyenne':
-                    if any(k in c0 for k in ['pilier', 'talon', '2']):
-                        cur_grp = '5 de devant'
-                    elif '3' in c0:
-                        cur_grp = '3ème Ligne'
-                    elif any(k in c0 for k in ['demi', 'centre', 'ailier', 'arri']):
-                        cur_grp = 'Trois-quarts'
+                    cur_grp = mapper_poste_vers_groupe_rca(c0)
                 if c1 and c1.lower() != '1er mi temps ' and cur_grp:
                     pos_map[c1.lower()] = cur_grp
     except Exception:
@@ -872,11 +1040,12 @@ def load_template_positions() -> Dict[str, str]:
 
 def assign_player_groups(df: pd.DataFrame, df_raw: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     """
-    Assigne le groupe athlétique ('5 de devant', '3ème Ligne', 'Trois-quarts') :
-    1. En priorité absolue via le dictionnaire officiel 'joueurs_data' (effectif sénior).
+    Assigne le groupe athlétique officiel ('5 de devant', '3ème Ligne', 'Trois-quarts') :
+    1. En priorité absolue via le dictionnaire officiel 'joueurs_data' (effectif sénior RCA).
     2. Puis via les métadonnées brutes Catapult.
     3. Puis via le modèle Excel.
     4. Répartition de secours équilibrée.
+    Conserve également le poste rugby précis dans la colonne 'Poste_Detaille'.
     """
     df = df.copy()
     player_col = "Nom ; Prénom"
@@ -885,6 +1054,7 @@ def assign_player_groups(df: pd.DataFrame, df_raw: Optional[pd.DataFrame] = None
     unique_players = sorted(df[player_col].dropna().unique().tolist())
 
     group_list = []
+    poste_detaille_list = []
     for idx, p in enumerate(df[player_col]):
         p_clean = str(p).strip()
         p_lower = p_clean.lower()
@@ -897,12 +1067,33 @@ def assign_player_groups(df: pd.DataFrame, df_raw: Optional[pd.DataFrame] = None
                 break
 
         if matched_poste:
-            group_list.append(POSTE_VERS_GROUPE.get(matched_poste, "Trois-quarts"))
+            grp = mapper_poste_vers_groupe_rca(matched_poste, nom_joueur=p_clean)
+            poste_detaille_list.append(matched_poste)
+            group_list.append(grp)
             continue
 
-        # 2. Modèle Excel
+        # 2. Métadonnées brutes Catapult (si présentes dans df_raw)
+        raw_poste = None
+        if df_raw is not None and not df_raw.empty:
+            p_raw_col = find_column(df_raw, ["Position Name", "Position", "Poste", "Pos"])
+            name_raw_col = find_column(df_raw, ["Nom ; Prénom", "Player Name", "Athlete Name", "Player", "Athlete", "Joueur", "Nom", "Name"])
+            if p_raw_col and name_raw_col and p_raw_col in df_raw.columns and name_raw_col in df_raw.columns:
+                sub_r = df_raw[df_raw[name_raw_col].astype(str).str.strip().str.lower() == p_lower]
+                if not sub_r.empty and pd.notna(sub_r[p_raw_col].iloc[0]):
+                    raw_poste = str(sub_r[p_raw_col].iloc[0]).strip()
+
+        if raw_poste:
+            grp = mapper_poste_vers_groupe_rca(raw_poste, nom_joueur=p_clean)
+            poste_detaille_list.append(raw_poste)
+            group_list.append(grp)
+            continue
+
+        # 3. Modèle Excel
         if p_lower in template_positions:
-            group_list.append(template_positions[p_lower])
+            t_pos = template_positions[p_lower]
+            grp = mapper_poste_vers_groupe_rca(t_pos, nom_joueur=p_clean)
+            poste_detaille_list.append(t_pos)
+            group_list.append(grp)
             continue
 
         matched_grp = None
@@ -911,13 +1102,18 @@ def assign_player_groups(df: pd.DataFrame, df_raw: Optional[pd.DataFrame] = None
                 matched_grp = t_grp
                 break
         if matched_grp:
-            group_list.append(matched_grp)
+            grp = mapper_poste_vers_groupe_rca(matched_grp, nom_joueur=p_clean)
+            poste_detaille_list.append(matched_grp)
+            group_list.append(grp)
             continue
 
-        # 3. Repli déterministe
+        # 4. Repli déterministe
         p_idx = unique_players.index(p) if p in unique_players else idx
-        group_list.append(GROUPS[p_idx % 3])
+        fallback_grp = GROUPS[p_idx % 3]
+        poste_detaille_list.append(fallback_grp)
+        group_list.append(fallback_grp)
 
+    df["Poste_Detaille"] = poste_detaille_list
     df["Groupe"] = group_list
     return df
 
@@ -1520,7 +1716,9 @@ def generer_graphique_postes_matplotlib(df_indiv: pd.DataFrame) -> io.BytesIO:
     postes_list = []
     for _, row in df_temp.iterrows():
         nom = str(row.get("Nom ; Prénom", "")).strip()
-        poste = joueurs_data.get(nom, "")
+        poste = str(row.get("Poste_Detaille", "")).strip()
+        if not poste:
+            poste = joueurs_data.get(nom, "")
         if not poste:
             for j_nom, j_pos in joueurs_data.items():
                 if j_nom.lower() in nom.lower() or nom.lower() in j_nom.lower():
@@ -2025,6 +2223,10 @@ ALIAS_COLONNES: Dict[str, str] = {
     "accel/dec": "Accel/Dec",
     "accel": "Accel/Dec",
     "accelerations": "Accel/Dec",
+    "poste detaille": "Poste_Detaille",
+    "poste détaillé": "Poste_Detaille",
+    "poste_detaille": "Poste_Detaille",
+    "position": "Poste_Detaille",
 }
 
 
@@ -2690,7 +2892,15 @@ def main() -> None:
                 mapping_gps = ui_attribution_gps(df_raw=df_raw)
                 if mapping_gps:
                     df_raw = appliquer_mapping(df_raw, mapping_gps)
-                    st.success(f"✅ Mapping appliqué : {len(mapping_gps)} boîtier(s) attribué(s) à l'effectif.")
+                    int_keys = [k for k in mapping_gps if isinstance(k, int)]
+                    joueurs_uniques = set(mapping_gps[k] for k in int_keys)
+                    if len(joueurs_uniques) < len(int_keys):
+                        st.warning(
+                            f"⚠️ **Attention :** {len(int_keys)} boîtiers attribués pour {len(joueurs_uniques)} joueur(s) unique(s). "
+                            "Des doublons existent et les distances des boîtiers d'un même joueur seront fusionnées."
+                        )
+                    else:
+                        st.success(f"✅ Mapping appliqué : {len(int_keys)} boîtier(s) attribué(s) à l'effectif.")
 
             # ==================================================================
             # ÉTAPE 1c : GESTION DES SPLITS & SÉQUENCES CATAPULT
@@ -2900,7 +3110,7 @@ def main() -> None:
                 df_cop_display = df_copilote_resultat.copy()
                 num_cols = df_cop_display.select_dtypes(include=[np.number]).columns
                 df_cop_display[num_cols] = df_cop_display[num_cols].round(2)
-                cols_order_cop = ["Nom ; Prénom", "Groupe"] + [c for c in FINAL_COLUMNS if c != "Nom ; Prénom" and c in df_cop_display.columns]
+                cols_order_cop = ["Nom ; Prénom", "Groupe"] + (["Poste_Detaille"] if "Poste_Detaille" in df_cop_display.columns else []) + [c for c in FINAL_COLUMNS if c != "Nom ; Prénom" and c in df_cop_display.columns]
                 df_cop_display = df_cop_display[[c for c in cols_order_cop if c in df_cop_display.columns]]
                 st.dataframe(df_cop_display, use_container_width=True, hide_index=True)
 
@@ -3013,7 +3223,7 @@ def main() -> None:
     numeric_cols = df_display.select_dtypes(include=[np.number]).columns
     df_display[numeric_cols] = df_display[numeric_cols].round(2)
 
-    cols_order = ["Nom ; Prénom", "Groupe"] + [c for c in FINAL_COLUMNS if c != "Nom ; Prénom" and c in df_display.columns]
+    cols_order = ["Nom ; Prénom", "Groupe"] + (["Poste_Detaille"] if "Poste_Detaille" in df_display.columns else []) + [c for c in FINAL_COLUMNS if c != "Nom ; Prénom" and c in df_display.columns]
     df_display = df_display[[c for c in cols_order if c in df_display.columns]]
 
     st.dataframe(df_display, use_container_width=True, hide_index=True)
