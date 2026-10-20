@@ -924,16 +924,20 @@ def assign_player_groups(df: pd.DataFrame, df_raw: Optional[pd.DataFrame] = None
 
 def process_catapult_data(
     df_raw: pd.DataFrame,
+    split_mode: str = "splits",
     split_filter: Optional[Union[str, List[str]]] = None,
     exclude_warmup: bool = False,
 ) -> pd.DataFrame:
     """
     Traite le DataFrame brut Catapult One selon les méthodes STAPS de la préparatrice physique RCA :
-    - Filtre intelligent des splits/sessions pour éviter de doubler les données (si session globale + splits).
-    - HSR (m) : Correspond strictement à la Zone 3 (Z3_km * 1000.0).
+    - Par défaut ('splits') : Exclut la ligne globale 'all' et somme uniquement les ateliers réels (Split 1..N).
+    - Mode 'all' : Retient la ligne globale 'all' (séance brute complète avec temps morts).
+    - HSR (m) : Correspond strictement à la Zone 3 (Z3_km * 1000.0) pour jauges et graphiques de groupe.
     - VHSR (m) : Correspond strictement au cumul Zone 4 + Zone 5 ((Z4_km + Z5_km) * 1000.0).
+    - Haute intensité Podium (m) : Cumul total Zone 3 + Zone 4 + Zone 5 ((Z3_km + Z4_km + Z5_km) * 1000.0).
+    - ACC / DEC n° (> 3 m/s²) : Somme des 4 zones d'accélérations et décélérations intenses (> 3 m/s²).
+    - Distance Per Min (m/min) : Moyenne des splits d'ateliers.
     - Convertit le Temps de jeu en minutes réelles.
-    - Extrait et agrège toutes les métriques requises (Distance, Zones 1 à 5, Accel, Decel).
     """
     player_col = find_column(df_raw, [
         "Nom ; Prénom", "Player Name", "Athlete Name", "Player", "Athlete", "Joueur", "Nom", "Name"
@@ -941,7 +945,7 @@ def process_catapult_data(
     if not player_col:
         raise ValueError("Colonne Joueur introuvable dans le fichier. Colonnes attendues : 'Player Name', 'Athlete Name', etc.")
 
-    # 1. Gestion intelligente des lignes de session et des Splits (Sécurité anti-doublon)
+    # 1. Gestion des lignes de session et des Splits (Méthode Staff RCA vs Ligne all)
     split_col = find_column(df_raw, [
         "Split Name", "Split", "Period Name", "Period", "Tags", "Tag", "Activity Name", "Session Name", "Session Title", "Segment"
     ])
@@ -952,7 +956,7 @@ def process_catapult_data(
         s_series = df_working[split_col].astype(str).str.strip()
         s_lower = s_series.str.lower()
 
-        # A. Filtrage explicite si demandé (ex: liste de splits ou mot-clé)
+        # A. Filtrage explicite si demandé (ex: multiselect d'ateliers spécifiques)
         if split_filter is not None:
             if isinstance(split_filter, str):
                 mask = s_lower.str.contains(split_filter.strip().lower(), na=False)
@@ -964,7 +968,7 @@ def process_catapult_data(
                 if mask.any():
                     df_working = df_working[mask].copy()
 
-        # B. Filtrage intelligent automatique anti-doublon
+        # B. Filtrage selon le mode choisi (Splits ateliers par défaut vs Ligne all)
         else:
             GLOBAL_TAGS = {
                 "session", "whole session", "full session", "all", "total",
@@ -975,16 +979,23 @@ def process_catapult_data(
             has_global_rows = is_global.any()
             has_split_rows = (~is_global & (s_series != "") & (s_series.str.lower() != "nan")).any()
 
-            # Si l'export contient à la fois la ligne globale de session et des sous-séquences,
-            # on ne retient que la ligne globale par joueur pour éviter le doublement des données.
-            if has_global_rows and has_split_rows:
+            norm_mode = str(split_mode).lower().strip()
+            use_splits_aggregation = ("split" in norm_mode or "atelier" in norm_mode or norm_mode == "default") and has_split_rows
+
+            if use_splits_aggregation and has_global_rows:
+                # Mode Préparatrice Physique : Exclure la ligne globale "all" pour agréger uniquement les ateliers réels
+                players_with_splits = set(df_working.loc[~is_global, player_col].astype(str).str.strip().unique())
+                mask_safe = (~is_global) | (~df_working[player_col].astype(str).str.strip().isin(players_with_splits))
+                df_working = df_working[mask_safe].copy()
+            elif "all" in norm_mode and has_global_rows:
+                # Mode Séance Brute Complète : Retenir la ligne globale "all"
                 players_with_global = set(df_working.loc[is_global, player_col].astype(str).str.strip().unique())
                 mask_safe = is_global | (~df_working[player_col].astype(str).str.strip().isin(players_with_global))
                 df_working = df_working[mask_safe].copy()
 
         # C. Exclusion optionnelle de l'échauffement
         if exclude_warmup:
-            warmup_mask = s_lower.str.contains("echauff|échauff|warmup|warm-up|warm_up", na=False)
+            warmup_mask = df_working[split_col].astype(str).str.lower().str.contains("echauff|échauff|warmup|warm-up|warm_up", na=False)
             if (~warmup_mask).any():
                 df_working = df_working[~warmup_mask].copy()
 
@@ -1005,6 +1016,9 @@ def process_catapult_data(
     ])
 
     top_speed_col = find_column(df_working, ["Top Speed (km/h)", "Max Velocity (km/h)", "Top Speed", "Max Velocity", "Vmax"])
+    hr_max_col = find_column(df_working, ["Hr Max (bpm)", "Max Heart Rate (bpm)", "HR Max", "Max HR", "Heart Rate Max", "Hr Max"])
+    dpm_col = find_column(df_working, ["Distance Per Min (m/min)", "Meterage Per Minute", "m/min", "Distance per min", "Dist/min"])
+
     max_accel_col = find_column(df_working, ["Max Acceleration (m/s/s)", "Max Acceleration (m/s2)", "Max Acceleration", "Max Accel"])
     max_decel_col = find_column(df_working, ["Max Deceleration (m/s/s)", "Max Deceleration (m/s2)", "Max Deceleration", "Max Decel"])
 
@@ -1018,6 +1032,7 @@ def process_catapult_data(
     acc_gt4_col = find_column(df_working, ["Accelerations Zone Count: > 4 m/s/s", "Accelerations Zone Count: >4 m/s/s", "Accel >4"])
     dec_34_col = find_column(df_working, ["Deceleration Zone Count: 3 - 4 m/s/s", "Deceleration Zone Count: 3-4 m/s/s", "Decel 3-4", "Décélérations (<-3m/s2)"])
     dec_gt4_col = find_column(df_working, ["Deceleration Zone Count: > 4 m/s/s", "Deceleration Zone Count: >4 m/s/s", "Decel >4"])
+    impacts_col = find_column(df_working, ["Impacts", "Total Impacts", "Player Load"])
 
     df_clean = pd.DataFrame()
     df_clean["Nom ; Prénom"] = df_working[player_col].astype(str).str.strip()
@@ -1039,8 +1054,11 @@ def process_catapult_data(
         df_clean["Distance_km"] = 0.0
 
     df_clean["Top_Speed"] = df_working[top_speed_col].apply(clean_numeric_value) if top_speed_col else 0.0
+    df_clean["Hr_Max"] = df_working[hr_max_col].apply(clean_numeric_value) if hr_max_col else 0.0
+    df_clean["Distance_Per_Min"] = df_working[dpm_col].apply(clean_numeric_value) if dpm_col else 0.0
     df_clean["Max_Accel"] = df_working[max_accel_col].apply(clean_numeric_value) if max_accel_col else 0.0
     df_clean["Max_Decel"] = df_working[max_decel_col].apply(lambda x: abs(clean_numeric_value(x))) if max_decel_col else 0.0
+    df_clean["Impacts"] = df_working[impacts_col].apply(clean_numeric_value) if impacts_col else 0.0
 
     for z_name, c_source in [("Z1_km", z1_col), ("Z2_km", z2_col), ("Z3_km", z3_col), ("Z4_km", z4_col), ("Z5_km", z5_col)]:
         if c_source:
@@ -1082,7 +1100,7 @@ def process_catapult_data(
     df_clean["Dec_gt4"] = df_working[dec_gt4_col].apply(clean_numeric_value) if dec_gt4_col else 0.0
 
     # Groupby Joueur
-    grouped = df_clean.groupby("Nom ; Prénom", as_index=False).agg({
+    agg_dict = {
         "Duration_min": "sum",
         "Distance_km": "sum",
         "HSR_m": "sum",
@@ -1090,6 +1108,8 @@ def process_catapult_data(
         "Z4_m": "sum",
         "Z5_m": "sum",
         "Top_Speed": "max",
+        "Hr_Max": "max",
+        "Distance_Per_Min": "mean",
         "Z1_km": "sum",
         "Z2_km": "sum",
         "Z3_km": "sum",
@@ -1101,7 +1121,9 @@ def process_catapult_data(
         "Acc_gt4": "sum",
         "Dec_34": "sum",
         "Dec_gt4": "sum",
-    })
+        "Impacts": "sum",
+    }
+    grouped = df_clean.groupby("Nom ; Prénom", as_index=False).agg(agg_dict)
 
     grouped["Duration_min"] = grouped["Duration_min"].astype(float)
     pos_dur = grouped["Duration_min"][grouped["Duration_min"] > 0]
@@ -1116,20 +1138,32 @@ def process_catapult_data(
     d_total_m = grouped["Distance_km"] * 1000.0
     dist_tot_km = grouped["Distance_km"]
 
-    dist_per_min = np.where(temps_jeu > 0, d_total_m / temps_jeu, 0.0)
+    # Distance Per Min : moyenne des splits si disponible, sinon d_total_m / temps_jeu
+    if grouped["Distance_Per_Min"].max() > 0:
+        dist_per_min = grouped["Distance_Per_Min"].values
+    else:
+        dist_per_min = np.where(temps_jeu > 0, d_total_m / temps_jeu, 0.0)
+
     hsr_per_min = np.where(temps_jeu > 0, grouped["HSR_m"] / temps_jeu, 0.0)
+
+    # ACC / DEC n° (> 3 m/s²) : somme exacte des 4 zones
     accel_decel_total = grouped["Acc_34"] + grouped["Acc_gt4"] + grouped["Dec_34"] + grouped["Dec_gt4"]
 
-    pct_marche = np.where(dist_tot_km > 0, grouped["Z1_km"] / dist_tot_km, 0.0)
-    pct_course = np.where(dist_tot_km > 0, grouped["Z2_km"] / dist_tot_km, 0.0)
-    pct_hsr = np.where(dist_tot_km > 0, grouped["Z3_km"] / dist_tot_km, 0.0)
-    pct_vhsr = np.where(dist_tot_km > 0, (grouped["Z4_km"] + grouped["Z5_km"]) / dist_tot_km, 0.0)
+    # % de marche directement calculé sur les données agrégées selon le mode actif
+    pct_marche = np.where(dist_tot_km > 0, (grouped["Z1_km"] / dist_tot_km) * 100.0, 0.0)
+    pct_course = np.where(dist_tot_km > 0, (grouped["Z2_km"] / dist_tot_km) * 100.0, 0.0)
+    pct_hsr = np.where(dist_tot_km > 0, (grouped["Z3_km"] / dist_tot_km) * 100.0, 0.0)
+    pct_vhsr = np.where(dist_tot_km > 0, ((grouped["Z4_km"] + grouped["Z5_km"]) / dist_tot_km) * 100.0, 0.0)
+
+    # Haute intensité Podium (m) : cumul total Zone 3 + Zone 4 + Zone 5 (> 14.4 km/h)
+    haute_intensite_podium = (grouped["Z3_km"] + grouped["Z4_km"] + grouped["Z5_km"]) * 1000.0
 
     df_indiv = pd.DataFrame()
     df_indiv['Nom ; Prénom'] = grouped['Nom ; Prénom']
     df_indiv['Temps de jeu '] = temps_jeu.astype(float)
     df_indiv['Distance (km)'] = grouped['Distance_km']
     df_indiv[' Distance haute intensité (m)'] = grouped['HSR_m']
+    df_indiv['Haute intensité Podium (m)'] = haute_intensite_podium
     df_indiv['Top Speed (km/h)'] = grouped['Top_Speed']
     df_indiv['Distance Per Min (m/min)'] = dist_per_min
     df_indiv['Distance in Speed Zone 1  (km)'] = grouped['Z1_km']
@@ -1150,6 +1184,8 @@ def process_catapult_data(
     df_indiv['%VHSR'] = pct_vhsr
     df_indiv['HSR m/min'] = hsr_per_min
     df_indiv['VHSR (m)'] = grouped['VHSR_m']
+    if hr_max_col:
+        df_indiv['Hr Max (bpm)'] = grouped['Hr_Max']
 
     df_indiv = assign_player_groups(df_indiv, df_raw=df_working)
     return df_indiv
@@ -1257,8 +1293,8 @@ def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any
         "players": players_walk,
     }
 
-    # 3. HAUTE INTENSITÉ (m)
-    hi_col = " Distance haute intensité (m)"
+    # 3. HAUTE INTENSITÉ (m) - ALIGNEMENT SUR LA MÉTHODE STAFF RCA (Cumul Zones 3, 4 et 5 > 14.4 km/h)
+    hi_col = "Haute intensité Podium (m)" if "Haute intensité Podium (m)" in df_subset.columns else " Distance haute intensité (m)"
     if hi_col in df_subset.columns:
         df_sorted_hi = df_subset.sort_values(by=hi_col, ascending=False)
     else:
@@ -1299,8 +1335,14 @@ def populate_template_excel(df_indiv: pd.DataFrame, df_raw: Optional[pd.DataFram
             r = 3 + i
             for col_idx, col_name in enumerate(FINAL_COLUMNS[:22], start=1):
                 val = row[col_name]
+                # Formatage des pourcentages pour le format natif Excel "0%"
+                if col_name in ['%Marche ', '%course', '%HSR ', '%VHSR'] and isinstance(val, (int, float)) and val > 1.0:
+                    val = val / 100.0
                 ws_indiv.cell(row=r, column=col_idx, value=val)
 
+            # Formules et métriques de la préparatrice physique RCA
+            ws_indiv.cell(row=r, column=4, value=f"=SUM(I{r}:K{r})*1000")
+            ws_indiv.cell(row=r, column=18, value=f"=SUM(N{r}:Q{r})")
             ws_indiv.cell(row=r, column=23, value=f"=SUM(S{r}:V{r})")
             ws_indiv.cell(row=r, column=24, value=row['HSR m/min'])
             ws_indiv.cell(row=r, column=26, value=f"=I{r}*1000")
@@ -1720,7 +1762,7 @@ def generer_rapport_pdf_coachs(
     dist_tot = float(df_indiv["Distance (km)"].sum()) if "Distance (km)" in df_indiv.columns else 0.0
     dist_moy = float(df_indiv["Distance (km)"].mean()) if "Distance (km)" in df_indiv.columns else 0.0
     vmax = float(df_indiv["Top Speed (km/h)"].max()) if "Top Speed (km/h)" in df_indiv.columns else 0.0
-    hsr_col = " Distance haute intensité (m)"
+    hsr_col = "Haute intensité Podium (m)" if "Haute intensité Podium (m)" in df_indiv.columns else " Distance haute intensité (m)"
     hsr_moy = float(df_indiv[hsr_col].mean()) if hsr_col in df_indiv.columns and not df_indiv[hsr_col].empty else 0.0
     if pd.isna(hsr_moy):
         hsr_moy = 0.0
@@ -1820,7 +1862,7 @@ def generer_rapport_pdf_coachs(
         {
             "key": "Haute intensité (m)",
             "title": "HAUTE INTENSITE (m)",
-            "subtitle": "Distance > 19.8 km/h",
+            "subtitle": "Cumul > 14.4 km/h",
             "color": (163, 0, 0),    # #A30000
         },
     ]
@@ -1976,6 +2018,13 @@ ALIAS_COLONNES: Dict[str, str] = {
     "temps de jeu": "Temps de jeu ",
     "distance/min": "Distance Per Min (m/min)",
     "m/min": "Distance Per Min (m/min)",
+    "haute intensite podium": "Haute intensité Podium (m)",
+    "haute intensité podium": "Haute intensité Podium (m)",
+    "podium haute intensite": "Haute intensité Podium (m)",
+    "acc/dec": "Accel/Dec",
+    "accel/dec": "Accel/Dec",
+    "accel": "Accel/Dec",
+    "accelerations": "Accel/Dec",
 }
 
 
@@ -2651,6 +2700,7 @@ def main() -> None:
             ])
             selected_splits_val = None
             excl_warmup_val = False
+            split_mode_val = "splits"
 
             if split_col_detected and split_col_detected in df_raw.columns:
                 all_splits = [
@@ -2659,14 +2709,19 @@ def main() -> None:
                 ]
                 if len(all_splits) > 1:
                     with st.expander("⏱️ Gestion des Séquences & Splits de Séance (Catapult)", expanded=False):
-                        st.info("Des sous-séquences (splits / ateliers) ont été détectées. Par défaut, le filtre intelligent retient la séance globale pour éviter tout doublement de distance.")
+                        st.info("💡 **Méthode Staff RCA (par défaut) :** Les volumes sont calculés en additionnant uniquement les séquences d'ateliers réelles (`Split 1..N`), excluant ainsi la marche des temps morts et transitions.")
                         c_sp1, c_sp2 = st.columns([3, 2])
                         with c_sp1:
                             mode_split = st.radio(
                                 "Sélection des données à analyser :",
-                                options=["Automatique (Séance globale / Anti-doublon)", "Toutes les séquences", "Filtrer manuellement par Split"],
+                                options=[
+                                    "Somme des Splits (Méthode Staff RCA - sans temps morts)",
+                                    "Ligne globale 'all' (Séance brute complète)",
+                                    "Filtrer manuellement par Split",
+                                ],
                                 index=0,
                                 key="radio_split_mode",
+                                help="Basculer entre la méthode de la préparatrice physique (somme des ateliers réels) et la ligne globale 'all' (séance continue)."
                             )
                         with c_sp2:
                             excl_warmup_val = st.checkbox(
@@ -2675,19 +2730,25 @@ def main() -> None:
                                 help="Exclut les séquences contenant 'échauffement' ou 'warmup'.",
                                 key="chk_excl_warmup",
                             )
-                        if mode_split == "Filtrer manuellement par Split":
+                        if mode_split == "Somme des Splits (Méthode Staff RCA - sans temps morts)":
+                            split_mode_val = "splits"
+                            selected_splits_val = None
+                        elif mode_split == "Ligne globale 'all' (Séance brute complète)":
+                            split_mode_val = "all"
+                            selected_splits_val = None
+                        elif mode_split == "Filtrer manuellement par Split":
+                            split_mode_val = "manual"
                             selected_splits_val = st.multiselect(
                                 "Choisir les splits à conserver :",
                                 options=all_splits,
                                 default=all_splits,
                                 key="ms_splits_selected",
                             )
-                        elif mode_split == "Toutes les séquences":
-                            selected_splits_val = all_splits
 
             with st.spinner("Traitement des données GPS..."):
                 df_indiv = process_catapult_data(
                     df_raw,
+                    split_mode=split_mode_val,
                     split_filter=selected_splits_val,
                     exclude_warmup=excl_warmup_val,
                 )
