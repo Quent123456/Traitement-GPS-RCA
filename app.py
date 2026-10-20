@@ -787,8 +787,8 @@ def load_catapult_csv(file_bytes: bytes) -> pd.DataFrame:
 
 def load_catapult_file(uploaded_file: Any) -> pd.DataFrame:
     """Lit un export Catapult One (.csv, .xlsx, .xls) en sautant les métadonnées."""
-    file_name = uploaded_file.name.lower()
-    file_bytes = uploaded_file.getvalue()
+    file_name = getattr(uploaded_file, "name", "file.xlsx").lower()
+    file_bytes = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
 
     if file_name.endswith((".xlsx", ".xls")):
         preview_df = pd.read_excel(io.BytesIO(file_bytes), header=None, nrows=15)
@@ -813,19 +813,44 @@ def load_catapult_file(uploaded_file: Any) -> pd.DataFrame:
 # 4. MAPPING GPS DYNAMIQUE & INTELLIGENT (EFFECTIF DU CLUB)
 # ==============================================================================
 
-def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Dict[Union[int, str], str]:
+# Mapping standard de référence des 21 boîtiers GPS du club
+DEFAULT_GPS_MAPPING: Dict[int, str] = {
+    1: "PECQUERY Thomas",
+    2: "Jean-Étienne ( TIJ)",
+    3: "COZIC Adrien",
+    4: "LAFEUILLE Emilien",
+    5: "SOTILLO Alejo",
+    6: "ORION Lucas",
+    7: "VASELLI Enzo",
+    8: "DAULT Bastien",
+    9: "BAM'S",
+    10: "CARPENTIER Maël",
+    11: "SALUA Makatea",
+    12: "HARRY Maxence",
+    13: "ULMUCK Victor",
+    14: "PREVOTE Olivier",
+    15: "LESPINASSE Lucien",
+    16: "PREVOST Thomas",
+    17: "BLANC Jules",
+    19: "DE BRUYN Octave",
+    20: "TREMBLAY Brieuc",
+    21: "BŒUF Eliot",
+    22: "DELACROIX Jules",
+}
+
+
+def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Union[int, str], str], bool]:
     """
     Interface dynamique d'attribution des boîtiers GPS :
     - Filtre et extrait uniquement les numéros uniques de boîtiers GPS présents dans df_raw.
     - Convertit les identifiants en entiers (int) et les trie par ordre croissant (1, 2, 3...).
-    - Itère DIRECTEMENT sur la liste des identifiants détectés (pas de range()).
-    - S'il manque un boîtier (ex: le 18), passe directement au suivant (17 puis 19).
-    - Affiche EXACTEMENT le même nombre de sélecteurs que de boîtiers détectés (ex: 21 sélecteurs pour 21 boîtiers).
-    - Utilise format_func pour afficher 'Nom Prénom - Poste' tout en retournant le nom du joueur.
-    - Affiche la photo officielle du joueur sélectionné ou l'avatar RCA.
+    - Pré-remplit les boîtiers avec le mapping standard officiel du club.
+    - Affiche chaque boîtier avec sélecteur de joueur ('Nom Prénom - Poste'), photo et badge du groupe officiel RCA.
+    - Convertit automatiquement le poste détaillé vers l'un des 3 groupes officiels RCA (5 de devant, 3ème Ligne, Trois-quarts).
+    - Sécurité anti-doublon bloquante : interdit formellement d'attribuer un même joueur à 2 boîtiers.
+    - Intègre le bouton de validation explicite « ✅ Valider l'effectif et l'association GPS ».
+    Retourne (mapping, has_doublons).
     """
-    st.markdown('<div class="section-header">📡 Attribution des Boîtiers GPS aux Joueurs</div>', unsafe_allow_html=True)
-
     # 1. Extraction et tri numérique strict des identifiants GPS détectés
     liste_gps_detectes: List[int] = []
     if df_raw is not None and not df_raw.empty:
@@ -857,14 +882,42 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Dict[Union[int,
 
             liste_gps_detectes = sorted(list(nums_trouves))
 
-    # Si aucun boîtier numérique n'a été détecté dans le fichier
+    # Si aucun boîtier numérique n'a été détecté dans le fichier (ex: noms déjà écrits en clair)
     if not liste_gps_detectes:
-        st.info("ℹ️ Aucun numéro de boîtier GPS à attribuer (les joueurs sont déjà identifiés ou aucun numéro n'est présent).")
-        return {}
+        names_found = []
+        if df_raw is not None and not df_raw.empty:
+            col_id = find_column(df_raw, [
+                "Player Name", "Athlete Name", "Nom ; Prénom", "Player", "Athlete", "Joueur", "Nom", "Name"
+            ])
+            if col_id and col_id in df_raw.columns:
+                names_found = [str(x).strip() for x in df_raw[col_id].dropna().unique() if str(x).strip()]
+
+        if names_found:
+            st.success(f"ℹ️ **{len(names_found)} joueur(s) identifié(s)** directement par leur nom dans le fichier :")
+            c_e1, c_e2 = st.columns(2)
+            half = (len(names_found) + 1) // 2
+            for i_idx, n in enumerate(names_found):
+                col_t = c_e1 if i_idx < half else c_e2
+                p = joueurs_data.get(n, "Non spécifié")
+                g = mapper_poste_vers_groupe_rca(p, n)
+                col_t.markdown(f"• **{n}** — Poste : *{p}* ➔ `{g}`")
+
+            st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+            c_b1, c_b2, c_b3 = st.columns([1, 2, 1])
+            with c_b2:
+                if st.button("✅ Valider l'effectif et l'association GPS", type="primary", use_container_width=True, key="btn_valider_sans_boitiers"):
+                    st.session_state["step2_validated"] = True
+                    st.session_state["gps_mapping"] = {n: n for n in names_found}
+                    st.toast("✅ Effectif validé avec succès !")
+                    st.rerun()
+            return {n: n for n in names_found}, False
+        else:
+            st.warning("⚠️ Aucun joueur ni numéro de boîtier GPS n'a été détecté dans le fichier.")
+            return {}, False
 
     st.caption(
         f"**{len(liste_gps_detectes)} boîtier(s) GPS actif(s) détecté(s)** sur cette séance. "
-        "Attribuez chaque boîtier à son joueur :"
+        "Associez chaque boîtier à son joueur :"
     )
 
     # 2. Liste des joueurs RCA disponibles (tri alphabétique)
@@ -898,6 +951,7 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Dict[Union[int,
             prev = (
                 st.session_state["gps_mapping"].get(gps_id)
                 or st.session_state["gps_mapping"].get(str(gps_id))
+                or DEFAULT_GPS_MAPPING.get(gps_id)
             )
             default_idx = options.index(prev) if prev in options else 0
 
@@ -909,6 +963,22 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Dict[Union[int,
                     format_func=format_affichage_joueur,
                     key=f"gps_sel_boitier_{gps_id}",
                 )
+
+                if choix != placeholder:
+                    poste_d = joueurs_data.get(choix, "Inconnu")
+                    grp_rca = mapper_poste_vers_groupe_rca(poste_d, choix)
+                    if grp_rca == "5 de devant":
+                        badge_html = '<span style="background-color:#EFF6FF;color:#1D4ED8;border:1px solid #BFDBFE;padding:2px 7px;border-radius:5px;font-weight:700;font-size:0.75rem;">🏉 5 de devant</span>'
+                    elif grp_rca == "3ème Ligne":
+                        badge_html = '<span style="background-color:#F0FDF4;color:#15803D;border:1px solid #BBF7D0;padding:2px 7px;border-radius:5px;font-weight:700;font-size:0.75rem;">🏉 3ème Ligne</span>'
+                    else:
+                        badge_html = '<span style="background-color:#FEF2F2;color:#B91C1C;border:1px solid #FECACA;padding:2px 7px;border-radius:5px;font-weight:700;font-size:0.75rem;">🏉 Trois-quarts</span>'
+
+                    st.markdown(
+                        f"<div style='font-size:0.80rem;color:#475569;margin-top:-6px;margin-bottom:8px;'>"
+                        f"Poste : <strong>{poste_d}</strong> &nbsp;➔&nbsp; {badge_html}</div>",
+                        unsafe_allow_html=True,
+                    )
 
             with c_photo:
                 if choix != placeholder:
@@ -931,7 +1001,7 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Dict[Union[int,
                 st.session_state["gps_mapping"][gps_id] = choix
                 st.session_state["gps_mapping"][str(gps_id)] = choix
 
-    # 4. Sécurité anti-doublon lors de l'attribution manuelle des GPS
+    # 4. Sécurité anti-doublon stricte lors de l'attribution des GPS
     joueurs_assignes: Dict[str, List[int]] = {}
     for g_id in liste_gps_detectes:
         j_choisi = mapping.get(g_id)
@@ -939,18 +1009,52 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Dict[Union[int,
             joueurs_assignes.setdefault(j_choisi, []).append(g_id)
 
     doublons = {j: ids for j, ids in joueurs_assignes.items() if len(ids) > 1}
-    if doublons:
+    has_doublons = len(doublons) > 0
+
+    if has_doublons:
         details_doublons = ", ".join([
-            f"**{j}** (boîtiers {', '.join(f'n°{i}' for i in ids)})"
+            f"« {j} » (boîtiers {', '.join(f'n°{i}' for i in ids)})"
             for j, ids in doublons.items()
         ])
-        st.warning(
-            f"⚠️ **Attention - Doublon détecté dans l'attribution GPS :** {details_doublons}. "
-            "Un même joueur est assigné à plusieurs boîtiers différents sur la même séance. "
-            "Veuillez corriger la sélection afin d'éviter la fusion erronée des distances et la réduction artificielle de l'effectif."
+        st.error(
+            f"⛔ **Sécurité Anti-Doublon Active — Validation Impossible :**\n\n"
+            f"Le(s) joueur(s) suivant(s) sont assignés à plusieurs boîtiers différents : {details_doublons}.\n\n"
+            "Un même joueur ne peut pas être attribué à deux boîtiers GPS sur la même séance. "
+            "Veuillez corriger ces doublons afin de pouvoir valider l'effectif."
         )
 
-    return mapping
+    # Récapitulatif d'attribution
+    nb_assignes = len(joueurs_assignes)
+    nb_total = len(liste_gps_detectes)
+    if nb_assignes < nb_total and not has_doublons:
+        st.warning(f"⚠️ **Attention :** {nb_total - nb_assignes} boîtier(s) sur {nb_total} ne sont pas encore attribués.")
+    elif not has_doublons and nb_assignes > 0:
+        st.success(f"✅ Tous les {nb_assignes} boîtiers GPS détectés sont attribués sans aucun doublon.")
+
+    # 5. Bouton de validation explicite de l'Étape 2
+    st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+    c_btn1, c_btn2, c_btn3 = st.columns([1, 2, 1])
+    with c_btn2:
+        btn_valider = st.button(
+            "✅ Valider l'effectif et l'association GPS",
+            type="primary",
+            disabled=has_doublons or nb_assignes == 0,
+            use_container_width=True,
+            key="btn_valider_effectif_step2",
+            help="Valide définitivement l'attribution des boîtiers GPS et débloque l'accès aux graphiques, podiums et rapports.",
+        )
+        if btn_valider:
+            if has_doublons:
+                st.error("⛔ Validation bloquée : veuillez résoudre les doublons avant de continuer.")
+            elif nb_assignes == 0:
+                st.warning("⚠️ Veuillez attribuer au moins un boîtier GPS avant de valider.")
+            else:
+                st.session_state["step2_validated"] = True
+                st.session_state["gps_mapping"] = mapping
+                st.toast("✅ Effectif et association GPS validés avec succès !")
+                st.rerun()
+
+    return mapping, has_doublons
 
 
 def appliquer_mapping(df_catapult: pd.DataFrame, dictionnaire_gps: Dict[Union[int, str], str]) -> pd.DataFrame:
@@ -2819,6 +2923,82 @@ def main() -> None:
         .podium-runner-box:hover {
             background-color: #F1F5F9;
         }
+
+        /* Stepper 3 étapes RCA */
+        .stepper-container {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin: 18px 0 24px 0;
+            padding: 12px 18px;
+            background: #FFFFFF;
+            border: 1px solid #E2E8F0;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.03);
+        }
+        .step-item {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 14px;
+            border-radius: 8px;
+            transition: all 0.2s ease;
+        }
+        .step-item.active {
+            background-color: #EFF6FF;
+            border: 1.5px solid #1F4E79;
+            color: #1F4E79;
+            font-weight: 700;
+        }
+        .step-item.completed {
+            background-color: #F0FDF4;
+            border: 1.5px solid #16A34A;
+            color: #15803D;
+            font-weight: 600;
+        }
+        .step-item.pending {
+            background-color: #F8FAFC;
+            border: 1px solid #E2E8F0;
+            color: #94A3B8;
+        }
+        .step-num {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.88rem;
+            font-weight: 800;
+        }
+        .step-item.active .step-num {
+            background-color: #1F4E79;
+            color: #FFFFFF;
+        }
+        .step-item.completed .step-num {
+            background-color: #16A34A;
+            color: #FFFFFF;
+        }
+        .step-item.pending .step-num {
+            background-color: #CBD5E1;
+            color: #64748B;
+        }
+        .step-text-title {
+            font-size: 0.92rem;
+            line-height: 1.2;
+        }
+        .step-text-sub {
+            font-size: 0.75rem;
+            color: #64748B;
+            font-weight: 400;
+        }
+        .step-arrow {
+            color: #CBD5E1;
+            font-size: 1.1rem;
+            font-weight: bold;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -2831,28 +3011,79 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    # ==========================================================================
-    # ÉTAPE 1 : UPLOAD DU FICHIER EN HAUT DE PAGE (.CSV OU .XLSX)
-    # ==========================================================================
-    uploaded_file = st.file_uploader(
-        "📥 Déposer l'export brut Catapult One (.csv ou .xlsx) :",
-        type=["csv", "xlsx", "xls"],
-        help="Prend en charge les exports Catapult One, PlayerTek et OpenField au format CSV ou Excel avec détection automatique du vrai tableau.",
+    # --------------------------------------------------------------------------
+    # GESTION DES ÉTATS DE SESSION (3 ÉTAPES OBLIGATOIRES)
+    # --------------------------------------------------------------------------
+    if "df_raw" not in st.session_state:
+        st.session_state["df_raw"] = None
+    if "uploaded_file_sig" not in st.session_state:
+        st.session_state["uploaded_file_sig"] = None
+    if "step2_validated" not in st.session_state:
+        st.session_state["step2_validated"] = False
+    if "gps_mapping" not in st.session_state:
+        st.session_state["gps_mapping"] = {}
+
+    is_step1_done = st.session_state.get("df_raw") is not None
+    is_step2_done = is_step1_done and bool(st.session_state.get("step2_validated", False))
+    is_step3_active = is_step2_done
+
+    step1_cls = "completed" if is_step1_done else "active"
+    step2_cls = "completed" if is_step2_done else ("active" if is_step1_done else "pending")
+    step3_cls = "active" if is_step3_active else "pending"
+
+    st.markdown(
+        f"""
+        <div class="stepper-container">
+            <div class="step-item {step1_cls}">
+                <div class="step-num">{'✓' if is_step1_done else '1'}</div>
+                <div>
+                    <div class="step-text-title">1. Importation Catapult</div>
+                    <div class="step-text-sub">{'Fichier prêt' if is_step1_done else 'Export Excel (.xlsx)'}</div>
+                </div>
+            </div>
+            <div class="step-arrow">➔</div>
+            <div class="step-item {step2_cls}">
+                <div class="step-num">{'✓' if is_step2_done else '2'}</div>
+                <div>
+                    <div class="step-text-title">2. Boîtiers GPS & Effectif</div>
+                    <div class="step-text-sub">{'Effectif validé' if is_step2_done else 'Association & Postes'}</div>
+                </div>
+            </div>
+            <div class="step-arrow">➔</div>
+            <div class="step-item {step3_cls}">
+                <div class="step-num">3</div>
+                <div>
+                    <div class="step-text-title">3. Analyses & Rapports</div>
+                    <div class="step-text-sub">{'Prêt à consulter' if is_step3_active else 'Verrouillé'}</div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    df_raw: Optional[pd.DataFrame] = None
-    df_indiv: Optional[pd.DataFrame] = None
+    # ==========================================================================
+    # ÉTAPE 1 : IMPORTATION DU FICHIER BRUT CATAPULT (.XLSX)
+    # ==========================================================================
+    st.markdown('<div class="section-header">📥 Étape 1 : Importation du Fichier Brut Catapult</div>', unsafe_allow_html=True)
+
+    uploaded_file = st.file_uploader(
+        "Déposer l'export Excel brut Catapult One (.xlsx) :",
+        type=["xlsx", "xls", "csv"],
+        help="Prend en charge les exports Catapult One, PlayerTek et OpenField au format Excel (.xlsx) ou CSV avec détection automatique du tableau.",
+        key="main_file_uploader",
+    )
 
     if uploaded_file is None:
         col_msg, col_demo = st.columns([4, 1])
         with col_msg:
             st.info(
-                "👋 **Bienvenue sur le portail d'analyse GPS du RCA.**\n\n"
-                "Veuillez glisser-déposer votre export brut Catapult (`.csv` ou `.xlsx`) ci-dessus "
-                "pour générer instantanément le rapport **Retour Journée**, le **Podium** et la synthèse de séance."
+                "👋 **Bienvenue sur le portail d'analyse GPS du Rugby Club Amiénois (RCA).**\n\n"
+                "👉 **Étape 1 obligatoire :** Veuillez importer l'export Excel brut Catapult (`.xlsx`) "
+                "de la séance du jour ci-dessus pour initialiser le traitement."
             )
         with col_demo:
-            use_demo = st.checkbox("🧪 Mode Démo", value=False, help="Active des données de démonstration avec l'effectif réel RCA.")
+            use_demo = st.checkbox("🧪 Mode Démo", value=False, help="Active des données de démonstration avec l'effectif réel RCA.", key="chk_mode_demo")
 
         if use_demo:
             demo_rows = []
@@ -2874,104 +3105,168 @@ def main() -> None:
                     "Deceleration Zone Count: 3 - 4 m/s/s": d["Dec34"],
                     "Deceleration Zone Count: > 4 m/s/s": d["Dec4"],
                 })
-            df_raw = pd.DataFrame(demo_rows)
-            df_indiv = process_catapult_data(df_raw)
+            st.session_state["df_raw"] = pd.DataFrame(demo_rows)
+            st.session_state["uploaded_file_sig"] = "demo_data_rca"
             st.toast("Mode démonstration actif avec les données de simulation RCA.")
         else:
+            st.session_state["df_raw"] = None
+            st.session_state["uploaded_file_sig"] = None
+            st.session_state["step2_validated"] = False
+            # BLOQUE STRICTEMENT L'EXÉCUTION TANT QU'AUCUN FICHIER N'EST CHARGÉ
             return
 
     else:
-        try:
+        file_sig = f"{uploaded_file.name}_{uploaded_file.size}"
+        if st.session_state.get("uploaded_file_sig") != file_sig:
+            st.session_state["uploaded_file_sig"] = file_sig
+            st.session_state["step2_validated"] = False
             with st.spinner("Lecture et analyse de l'export Catapult One..."):
-                df_raw = load_catapult_file(uploaded_file)
+                try:
+                    st.session_state["df_raw"] = load_catapult_file(uploaded_file)
+                    st.toast(f"✅ Fichier '{uploaded_file.name}' importé avec succès.")
+                except Exception as e:
+                    st.error(f"❌ Erreur lors du chargement du fichier Catapult : {str(e)}")
+                    with st.expander("Détails techniques de l'erreur"):
+                        st.exception(e)
+                    return
 
-            # ==================================================================
-            # ÉTAPE 1b : MAPPING GPS DYNAMIQUE (BASÉ SUR LES BOÎTIERS RÉELS)
-            # ==================================================================
-            with st.expander("📡 Attribution des Boîtiers GPS aux Joueurs (Effectif RCA)", expanded=True):
-                mapping_gps = ui_attribution_gps(df_raw=df_raw)
-                if mapping_gps:
-                    df_raw = appliquer_mapping(df_raw, mapping_gps)
-                    int_keys = [k for k in mapping_gps if isinstance(k, int)]
-                    joueurs_uniques = set(mapping_gps[k] for k in int_keys)
-                    if len(joueurs_uniques) < len(int_keys):
-                        st.warning(
-                            f"⚠️ **Attention :** {len(int_keys)} boîtiers attribués pour {len(joueurs_uniques)} joueur(s) unique(s). "
-                            "Des doublons existent et les distances des boîtiers d'un même joueur seront fusionnées."
-                        )
-                    else:
-                        st.success(f"✅ Mapping appliqué : {len(int_keys)} boîtier(s) attribué(s) à l'effectif.")
-
-            # ==================================================================
-            # ÉTAPE 1c : GESTION DES SPLITS & SÉQUENCES CATAPULT
-            # ==================================================================
-            split_col_detected = find_column(df_raw, [
-                "Split Name", "Split", "Period Name", "Period", "Tags", "Tag", "Activity Name", "Session Name", "Session Title", "Segment"
-            ])
-            selected_splits_val = None
-            excl_warmup_val = False
-            split_mode_val = "splits"
-
-            if split_col_detected and split_col_detected in df_raw.columns:
-                all_splits = [
-                    s for s in df_raw[split_col_detected].dropna().astype(str).str.strip().unique().tolist()
-                    if s and s.lower() != "nan"
-                ]
-                if len(all_splits) > 1:
-                    with st.expander("⏱️ Gestion des Séquences & Splits de Séance (Catapult)", expanded=False):
-                        st.info("💡 **Méthode Staff RCA (par défaut) :** Les volumes sont calculés en additionnant uniquement les séquences d'ateliers réelles (`Split 1..N`), excluant ainsi la marche des temps morts et transitions.")
-                        c_sp1, c_sp2 = st.columns([3, 2])
-                        with c_sp1:
-                            mode_split = st.radio(
-                                "Sélection des données à analyser :",
-                                options=[
-                                    "Somme des Splits (Méthode Staff RCA - sans temps morts)",
-                                    "Ligne globale 'all' (Séance brute complète)",
-                                    "Filtrer manuellement par Split",
-                                ],
-                                index=0,
-                                key="radio_split_mode",
-                                help="Basculer entre la méthode de la préparatrice physique (somme des ateliers réels) et la ligne globale 'all' (séance continue)."
-                            )
-                        with c_sp2:
-                            excl_warmup_val = st.checkbox(
-                                "Exclure l'échauffement",
-                                value=False,
-                                help="Exclut les séquences contenant 'échauffement' ou 'warmup'.",
-                                key="chk_excl_warmup",
-                            )
-                        if mode_split == "Somme des Splits (Méthode Staff RCA - sans temps morts)":
-                            split_mode_val = "splits"
-                            selected_splits_val = None
-                        elif mode_split == "Ligne globale 'all' (Séance brute complète)":
-                            split_mode_val = "all"
-                            selected_splits_val = None
-                        elif mode_split == "Filtrer manuellement par Split":
-                            split_mode_val = "manual"
-                            selected_splits_val = st.multiselect(
-                                "Choisir les splits à conserver :",
-                                options=all_splits,
-                                default=all_splits,
-                                key="ms_splits_selected",
-                            )
-
-            with st.spinner("Traitement des données GPS..."):
-                df_indiv = process_catapult_data(
-                    df_raw,
-                    split_mode=split_mode_val,
-                    split_filter=selected_splits_val,
-                    exclude_warmup=excl_warmup_val,
-                )
-            st.success(f"✅ Fichier chargé avec succès ! {len(df_indiv)} joueurs identifiés sur la séance.")
-        except Exception as e:
-            st.error(f"❌ Erreur lors du chargement du fichier Catapult : {str(e)}")
-            with st.expander("Détails techniques de l'erreur"):
-                st.exception(e)
-            return
+    df_raw = st.session_state.get("df_raw")
+    if df_raw is None or df_raw.empty:
+        st.warning("⚠️ Les données brutes sont vides ou non reconnues.")
+        return
 
     # ==========================================================================
-    # ÉTAPE 2 : COPILOTE RCA (ASSISTANT INTELLIGENT VOCAL & TEXTE) & FILTRES
+    # ÉTAPE 2 : ASSOCIATION DES BOÎTIERS GPS AUX JOUEURS ET AUX POSTES
     # ==========================================================================
+    st.markdown('<div class="section-header">📡 Étape 2 : Association des Boîtiers GPS aux Joueurs et aux Postes</div>', unsafe_allow_html=True)
+
+    if not st.session_state.get("step2_validated", False):
+        st.info(
+            "📋 **Consignes de l'Étape 2 :**\n\n"
+            "1. Associez chaque numéro de boîtier GPS détecté au joueur correspondant.\n"
+            "2. Le poste détaillé et sa conversion automatique vers l'un des **3 grands groupes officiels du RCA** "
+            "(`5 de devant`, `3ème Ligne`, `Trois-quarts`) sont appliqués en direct.\n"
+            "3. **Sécurité anti-doublon :** Il est strictement interdit d'attribuer un même joueur à plusieurs boîtiers sur la séance.\n"
+            "4. Cliquez sur **« ✅ Valider l'effectif et l'association GPS »** pour débloquer l'Étape 3."
+        )
+
+        ui_attribution_gps(df_raw=df_raw)
+
+        st.markdown(
+            """
+            <div style="background-color: #F8FAFC; border: 1.5px dashed #94A3B8; border-radius: 10px; padding: 16px; text-align: center; color: #475569; margin-top: 14px;">
+                🔒 <strong>Étape 3 en attente :</strong> Aucun graphique, aucun podium et aucun rapport officiel (PDF/Excel) ne s'affichera tant que l'effectif n'a pas été validé sans doublon.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # RÈGLE ABSOLUE : BLOQUE STRICTEMENT L'EXÉCUTION TANT QUE L'ÉTAPE 2 N'EST PAS VALIDÉE
+        return
+
+    # Si l'Étape 2 est validée, afficher le récapitulatif avec possibilité de modification
+    mapping_gps = st.session_state.get("gps_mapping", {})
+    with st.container():
+        c_val1, c_val2 = st.columns([4, 1.5])
+        with c_val1:
+            st.success(
+                f"✅ **Étape 2 validée :** Effectif officiel verrouillé avec {len(set(mapping_gps.values()))} joueur(s) unique(s) associé(s) sans aucun doublon."
+            )
+        with c_val2:
+            if st.button("🔄 Modifier l'attribution GPS / Effectif", key="btn_reopen_step2", use_container_width=True):
+                st.session_state["step2_validated"] = False
+                st.rerun()
+
+    with st.expander("👀 Voir le détail de l'association GPS validée", expanded=False):
+        c_exp1, c_exp2 = st.columns(2)
+        int_keys = sorted([k for k in mapping_gps if isinstance(k, int)])
+        half = (len(int_keys) + 1) // 2
+        for i_idx, k in enumerate(int_keys):
+            col_target = c_exp1 if i_idx < half else c_exp2
+            nom_j = mapping_gps[k]
+            poste_j = joueurs_data.get(nom_j, "")
+            grp_j = mapper_poste_vers_groupe_rca(poste_j, nom_j)
+            col_target.markdown(f"• **Boîtier {k}** : {nom_j} (*{poste_j}* ➔ `{grp_j}`)")
+
+    # ==========================================================================
+    # ÉTAPE 3 : GÉNÉRATION DES TABLEAUX, GRAPHIQUES, PODIUMS ET RAPPORTS OFFICIELS
+    # ==========================================================================
+    st.markdown('<div class="section-header">📊 Étape 3 : Tableaux, Graphiques, Podiums et Rapports Officiels</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-desc">'
+        'Analyses athlétiques de la séance calculées sur la base de l\'effectif validé, '
+        'des ateliers effectifs (somme des splits) et des objectifs officiels du RCA.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    # 1. Application de l'attribution GPS validée
+    df_raw_mapped = appliquer_mapping(df_raw, mapping_gps)
+
+    # 2. Gestion des Splits (Par défaut : Somme des Splits ateliers, sans la ligne "all")
+    split_col_detected = find_column(df_raw_mapped, [
+        "Split Name", "Split", "Period Name", "Period", "Tags", "Tag", "Activity Name", "Session Name", "Session Title", "Segment"
+    ])
+    selected_splits_val = None
+    excl_warmup_val = False
+    split_mode_val = "splits"
+
+    if split_col_detected and split_col_detected in df_raw_mapped.columns:
+        all_splits = [
+            s for s in df_raw_mapped[split_col_detected].dropna().astype(str).str.strip().unique().tolist()
+            if s and s.lower() != "nan"
+        ]
+        if len(all_splits) > 1:
+            with st.expander("⏱️ Gestion des Séquences & Splits de Séance (Catapult)", expanded=False):
+                st.info("💡 **Méthode Staff RCA (par défaut) :** Les volumes sont calculés en additionnant uniquement les séquences d'ateliers réelles (`Split 1..N`), excluant ainsi la marche des temps morts et transitions de la ligne globale 'all'.")
+                c_sp1, c_sp2 = st.columns([3, 2])
+                with c_sp1:
+                    mode_split = st.radio(
+                        "Sélection des données à analyser :",
+                        options=[
+                            "Somme des Splits (Méthode Staff RCA - sans temps morts)",
+                            "Ligne globale 'all' (Séance brute complète)",
+                            "Filtrer manuellement par Split",
+                        ],
+                        index=0,
+                        key="radio_split_mode",
+                        help="Basculer entre la méthode de la préparatrice physique (somme des ateliers réels) et la ligne globale 'all' (séance continue)."
+                    )
+                with c_sp2:
+                    excl_warmup_val = st.checkbox(
+                        "Exclure l'échauffement",
+                        value=False,
+                        help="Exclut les séquences contenant 'échauffement' ou 'warmup'.",
+                        key="chk_excl_warmup",
+                    )
+                if mode_split == "Somme des Splits (Méthode Staff RCA - sans temps morts)":
+                    split_mode_val = "splits"
+                    selected_splits_val = None
+                elif mode_split == "Ligne globale 'all' (Séance brute complète)":
+                    split_mode_val = "all"
+                    selected_splits_val = None
+                elif mode_split == "Filtrer manuellement par Split":
+                    split_mode_val = "manual"
+                    selected_splits_val = st.multiselect(
+                        "Choisir les splits à conserver :",
+                        options=all_splits,
+                        default=all_splits,
+                        key="ms_splits_selected",
+                    )
+
+    with st.spinner("Calcul des métriques consolidées STAPS RCA..."):
+        df_indiv = process_catapult_data(
+            df_raw_mapped,
+            split_mode=split_mode_val,
+            split_filter=selected_splits_val,
+            exclude_warmup=excl_warmup_val,
+        )
+
+    st.success(f"✅ Analyse athlétique terminée ! {len(df_indiv)} joueurs traités sur la séance.")
+
+    # --------------------------------------------------------------------------
+    # 3.1. COPILOTE RCA (ASSISTANT INTELLIGENT VOCAL & TEXTE - RECHERCHE ISOLÉE)
+    # --------------------------------------------------------------------------
     st.markdown("---")
 
     # Initialisation des états de session du Copilote
@@ -3145,9 +3440,9 @@ def main() -> None:
     else:
         df_groupe_actif = df_indiv[df_indiv["Groupe"] == groupe_selectionne]
 
-    # ==========================================================================
-    # ÉTAPE 3 : SECTION 1 : RETOUR JOURNÉE (JAUGES CONNECTÉES AUX VRAIES DONNÉES)
-    # ==========================================================================
+    # --------------------------------------------------------------------------
+    # 3.2. SECTION RETOUR JOURNÉE (JAUGES CONNECTÉES AUX VRAIES DONNÉES)
+    # --------------------------------------------------------------------------
     st.markdown('<div class="section-header">📊 RETOUR JOURNÉE</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="section-desc">'
@@ -3187,17 +3482,17 @@ def main() -> None:
         render_dashboard_objectifs(groupe_selectionne, metrics)
         st.caption(f"Effectif analysé : {len(df_groupe_actif)} joueur(s) dans le groupe '{groupe_selectionne}'.")
 
-    # ==========================================================================
-    # ÉTAPE 4 : SECTION 2 : PODIUM (CLASSEMENT BASÉ SUR LES VRAIES DONNÉES)
-    # ==========================================================================
+    # --------------------------------------------------------------------------
+    # 3.3. SECTION PODIUM (CLASSEMENT BASÉ SUR LES VRAIES DONNÉES)
+    # --------------------------------------------------------------------------
     podium_dynamique = generer_podium_dynamique(df_groupe_actif)
     render_podium_section(podium_dynamique)
 
     st.markdown("---")
 
-    # ==========================================================================
-    # ÉTAPE 5 : SECTION 3 : SYNTHÈSE INDIVIDUELLE & EXPORT EXCEL OFFICIEL
-    # ==========================================================================
+    # --------------------------------------------------------------------------
+    # 3.4. SECTION SYNTHÈSE INDIVIDUELLE & EXPORTS OFFICIELS (EXCEL & PDF)
+    # --------------------------------------------------------------------------
     st.markdown('<div class="section-header">📁 Synthèse Complète de Séance & Export Excel</div>', unsafe_allow_html=True)
 
     template_path = get_template_path()
@@ -3234,7 +3529,7 @@ def main() -> None:
     with col_excel:
         st.markdown("#### 📊 Classeur Excel Complet")
         if template_path:
-            excel_buffer = populate_template_excel(df_indiv=df_indiv, df_raw=df_raw)
+            excel_buffer = populate_template_excel(df_indiv=df_indiv, df_raw=df_raw_mapped)
             st.download_button(
                 label=f"📥 Télécharger {OUTPUT_DOWNLOAD_FILENAME}",
                 data=excel_buffer.getvalue(),
@@ -3258,10 +3553,10 @@ def main() -> None:
         st.markdown("#### 🏉 Rapport PDF pour les Coachs")
         # Récupération de la date de séance si disponible
         session_date_val = None
-        if df_raw is not None:
-            c_date = find_column(df_raw, ["Date", "Session Date", "Date de séance", "Date de seance"])
-            if c_date and c_date in df_raw.columns:
-                s_d = df_raw[c_date].dropna().astype(str).str.strip()
+        if df_raw_mapped is not None:
+            c_date = find_column(df_raw_mapped, ["Date", "Session Date", "Date de séance", "Date de seance"])
+            if c_date and c_date in df_raw_mapped.columns:
+                s_d = df_raw_mapped[c_date].dropna().astype(str).str.strip()
                 if not s_d.empty:
                     session_date_val = s_d.iloc[0]
 
