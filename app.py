@@ -838,13 +838,60 @@ DEFAULT_GPS_MAPPING: Dict[int, str] = {
     22: "DELACROIX Jules",
 }
 
+# Fichier JSON local pour la persistance permanente des attributions GPS
+CONFIG_GPS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_rca_gps.json")
+
+
+def charger_mapping_gps_persistant() -> Dict[str, str]:
+    """
+    Charge le dictionnaire d'association GPS -> Joueur depuis config_rca_gps.json s'il existe.
+    Retourne un dictionnaire normalisé { 'gps_id': 'Nom Joueur' }.
+    """
+    if os.path.exists(CONFIG_GPS_FILE):
+        try:
+            with open(CONFIG_GPS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    raw_map = data.get("mapping", data)
+                    if isinstance(raw_map, dict):
+                        return {
+                            str(k).strip(): str(v).strip()
+                            for k, v in raw_map.items()
+                            if v and str(v).strip() not in ["— Sélectionner un joueur —", "-"]
+                        }
+        except Exception:
+            pass
+    return {}
+
+
+def sauvegarder_mapping_gps_persistant(mapping: Dict[Any, str]) -> bool:
+    """
+    Sauvegarde le dictionnaire d'association GPS -> Joueur dans config_rca_gps.json.
+    Ne conserve que les clés normalisées uniques et valides.
+    """
+    clean_map: Dict[str, str] = {}
+    for k, v in mapping.items():
+        if v and str(v).strip() and str(v).strip() not in ["— Sélectionner un joueur —", "-"]:
+            clean_map[str(k).strip()] = str(v).strip()
+    payload = {
+        "mapping": clean_map,
+        "derniere_mise_a_jour": datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+        "nb_boitiers": len(clean_map),
+    }
+    try:
+        with open(CONFIG_GPS_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
 
 def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Union[int, str], str], bool]:
     """
     Interface dynamique d'attribution des boîtiers GPS :
     - Filtre et extrait uniquement les numéros uniques de boîtiers GPS présents dans df_raw.
     - Convertit les identifiants en entiers (int) et les trie par ordre croissant (1, 2, 3...).
-    - Pré-remplit les boîtiers avec le mapping standard officiel du club.
+    - Mémorisation et pré-remplissage intelligent automatique via st.session_state.mapping_gps_joueurs et config_rca_gps.json.
     - Affiche chaque boîtier avec sélecteur de joueur ('Nom Prénom - Poste'), photo et badge du groupe officiel RCA.
     - Convertit automatiquement le poste détaillé vers l'un des 3 groupes officiels RCA (5 de devant, 3ème Ligne, Trois-quarts).
     - Sécurité anti-doublon bloquante : interdit formellement d'attribuer un même joueur à 2 boîtiers.
@@ -907,18 +954,16 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
             with c_b2:
                 if st.button("✅ Valider l'effectif et l'association GPS", type="primary", use_container_width=True, key="btn_valider_sans_boitiers"):
                     st.session_state["step2_validated"] = True
-                    st.session_state["gps_mapping"] = {n: n for n in names_found}
-                    st.toast("✅ Effectif validé avec succès !")
+                    map_direct = {n: n for n in names_found}
+                    st.session_state["gps_mapping"] = map_direct
+                    st.session_state["mapping_gps_joueurs"] = map_direct
+                    sauvegarder_mapping_gps_persistant(map_direct)
+                    st.toast("✅ Effectif validé et mémorisé avec succès !")
                     st.rerun()
             return {n: n for n in names_found}, False
         else:
             st.warning("⚠️ Aucun joueur ni numéro de boîtier GPS n'a été détecté dans le fichier.")
             return {}, False
-
-    st.caption(
-        f"**{len(liste_gps_detectes)} boîtier(s) GPS actif(s) détecté(s)** sur cette séance. "
-        "Associez chaque boîtier à son joueur :"
-    )
 
     # 2. Liste des joueurs RCA disponibles (tri alphabétique)
     placeholder = "— Sélectionner un joueur —"
@@ -934,8 +979,49 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
             return f"{nom} - {poste}"
         return nom
 
+    # Initialisation & Synchronisation des dictionnaires de session
+    if "mapping_gps_joueurs" not in st.session_state:
+        st.session_state["mapping_gps_joueurs"] = charger_mapping_gps_persistant() or {str(k): v for k, v in DEFAULT_GPS_MAPPING.items()}
     if "gps_mapping" not in st.session_state:
-        st.session_state["gps_mapping"] = {}
+        st.session_state["gps_mapping"] = dict(st.session_state["mapping_gps_joueurs"])
+
+    saved_disk = charger_mapping_gps_persistant()
+    saved_session = st.session_state.get("mapping_gps_joueurs") or st.session_state.get("gps_mapping") or {}
+
+    # Dictionnaire de référence combiné pour pré-remplir instantanément
+    reference_mapping: Dict[str, str] = {str(k): v for k, v in DEFAULT_GPS_MAPPING.items()}
+    reference_mapping.update(saved_disk)
+    reference_mapping.update({str(k): v for k, v in saved_session.items() if v and v != placeholder})
+
+    # Calcul du nombre de boîtiers pré-remplis
+    nb_prefilled = sum(
+        1 for g_id in liste_gps_detectes
+        if reference_mapping.get(str(g_id)) in options and reference_mapping.get(str(g_id)) != placeholder
+    )
+
+    c_info1, c_info2 = st.columns([3.5, 1.5])
+    with c_info1:
+        if nb_prefilled > 0:
+            st.success(
+                f"💡 **Mémorisation & Pré-remplissage actif :** {nb_prefilled} boîtier(s) sur {len(liste_gps_detectes)} "
+                "ont été pré-remplis automatiquement selon vos configurations précédentes enregistrées."
+            )
+        else:
+            st.caption(
+                f"**{len(liste_gps_detectes)} boîtier(s) GPS actif(s) détecté(s)** sur cette séance. "
+                "Associez chaque boîtier à son joueur :"
+            )
+    with c_info2:
+        if st.button("🔄 Rétablir mapping usine", help="Restaure les attributions initiales officielles du club RCA", key="btn_reset_default_factory"):
+            default_map = {str(k): v for k, v in DEFAULT_GPS_MAPPING.items()}
+            st.session_state["mapping_gps_joueurs"] = default_map
+            st.session_state["gps_mapping"] = default_map
+            sauvegarder_mapping_gps_persistant(default_map)
+            for k in list(st.session_state.keys()):
+                if k.startswith("gps_sel_boitier_"):
+                    del st.session_state[k]
+            st.toast("Attributions d'usine RCA restaurées.")
+            st.rerun()
 
     mapping: Dict[Union[int, str], str] = {}
     col_gauche, col_droite = st.columns(2)
@@ -949,8 +1035,10 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
             c_photo, c_select = st.columns([1, 3])
 
             prev = (
-                st.session_state["gps_mapping"].get(gps_id)
-                or st.session_state["gps_mapping"].get(str(gps_id))
+                saved_session.get(gps_id)
+                or saved_session.get(str(gps_id))
+                or reference_mapping.get(str(gps_id))
+                or saved_disk.get(str(gps_id))
                 or DEFAULT_GPS_MAPPING.get(gps_id)
             )
             default_idx = options.index(prev) if prev in options else 0
@@ -1000,6 +1088,8 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
                 mapping[str(gps_id)] = choix
                 st.session_state["gps_mapping"][gps_id] = choix
                 st.session_state["gps_mapping"][str(gps_id)] = choix
+                st.session_state["mapping_gps_joueurs"][gps_id] = choix
+                st.session_state["mapping_gps_joueurs"][str(gps_id)] = choix
 
     # 4. Sécurité anti-doublon stricte lors de l'attribution des GPS
     joueurs_assignes: Dict[str, List[int]] = {}
@@ -1031,7 +1121,7 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
     elif not has_doublons and nb_assignes > 0:
         st.success(f"✅ Tous les {nb_assignes} boîtiers GPS détectés sont attribués sans aucun doublon.")
 
-    # 5. Bouton de validation explicite de l'Étape 2
+    # 5. Bouton de validation explicite de l'Étape 2 (Sauvegarde dans st.session_state et fichier JSON)
     st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
     c_btn1, c_btn2, c_btn3 = st.columns([1, 2, 1])
     with c_btn2:
@@ -1041,7 +1131,7 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
             disabled=has_doublons or nb_assignes == 0,
             use_container_width=True,
             key="btn_valider_effectif_step2",
-            help="Valide définitivement l'attribution des boîtiers GPS et débloque l'accès aux graphiques, podiums et rapports.",
+            help="Valide définitivement l'attribution des boîtiers GPS, l'enregistre en session et dans la configuration persistante.",
         )
         if btn_valider:
             if has_doublons:
@@ -1051,7 +1141,9 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
             else:
                 st.session_state["step2_validated"] = True
                 st.session_state["gps_mapping"] = mapping
-                st.toast("✅ Effectif et association GPS validés avec succès !")
+                st.session_state["mapping_gps_joueurs"] = mapping
+                sauvegarder_mapping_gps_persistant(mapping)
+                st.toast("✅ Effectif et association GPS validés et mémorisés avec succès !")
                 st.rerun()
 
     return mapping, has_doublons
@@ -3079,8 +3171,16 @@ def main() -> None:
         st.session_state["uploaded_file_sig"] = None
     if "step2_validated" not in st.session_state:
         st.session_state["step2_validated"] = False
+    if "mapping_gps_joueurs" not in st.session_state:
+        # Chargement persistant depuis fichier JSON ou dictionnaire officiel
+        persisted = charger_mapping_gps_persistant()
+        if persisted:
+            st.session_state["mapping_gps_joueurs"] = persisted
+        else:
+            st.session_state["mapping_gps_joueurs"] = {str(k): v for k, v in DEFAULT_GPS_MAPPING.items()}
+            sauvegarder_mapping_gps_persistant(st.session_state["mapping_gps_joueurs"])
     if "gps_mapping" not in st.session_state:
-        st.session_state["gps_mapping"] = {}
+        st.session_state["gps_mapping"] = dict(st.session_state["mapping_gps_joueurs"])
 
     is_step1_done = st.session_state.get("df_raw") is not None
     is_step2_done = is_step1_done and bool(st.session_state.get("step2_validated", False))
@@ -3166,6 +3266,10 @@ def main() -> None:
                 })
             st.session_state["df_raw"] = pd.DataFrame(demo_rows)
             st.session_state["uploaded_file_sig"] = "demo_data_rca"
+            st.session_state["step2_validated"] = False
+            for k in list(st.session_state.keys()):
+                if k.startswith("gps_sel_boitier_"):
+                    del st.session_state[k]
             st.toast("Mode démonstration actif avec les données de simulation RCA.")
         else:
             st.session_state["df_raw"] = None
@@ -3179,6 +3283,10 @@ def main() -> None:
         if st.session_state.get("uploaded_file_sig") != file_sig:
             st.session_state["uploaded_file_sig"] = file_sig
             st.session_state["step2_validated"] = False
+            # Réinitialise les clés temporaires des widgets selectbox pour forcer le pré-remplissage avec le mapping mémorisé
+            for k in list(st.session_state.keys()):
+                if k.startswith("gps_sel_boitier_"):
+                    del st.session_state[k]
             with st.spinner("Lecture et analyse de l'export Catapult One..."):
                 try:
                     st.session_state["df_raw"] = load_catapult_file(uploaded_file)
@@ -3224,7 +3332,7 @@ def main() -> None:
         return
 
     # Si l'Étape 2 est validée, afficher le récapitulatif avec possibilité de modification
-    mapping_gps = st.session_state.get("gps_mapping", {})
+    mapping_gps = st.session_state.get("mapping_gps_joueurs") or st.session_state.get("gps_mapping", {})
     with st.container():
         c_val1, c_val2 = st.columns([4, 1.5])
         with c_val1:
@@ -3238,11 +3346,11 @@ def main() -> None:
 
     with st.expander("👀 Voir le détail de l'association GPS validée", expanded=False):
         c_exp1, c_exp2 = st.columns(2)
-        int_keys = sorted([k for k in mapping_gps if isinstance(k, int)])
-        half = (len(int_keys) + 1) // 2
-        for i_idx, k in enumerate(int_keys):
+        unique_keys = sorted(list({int(k) for k in mapping_gps if str(k).isdigit()}))
+        half = (len(unique_keys) + 1) // 2
+        for i_idx, k in enumerate(unique_keys):
             col_target = c_exp1 if i_idx < half else c_exp2
-            nom_j = mapping_gps[k]
+            nom_j = mapping_gps.get(k) or mapping_gps.get(str(k))
             poste_j = joueurs_data.get(nom_j, "")
             grp_j = mapper_poste_vers_groupe_rca(poste_j, nom_j)
             col_target.markdown(f"• **Boîtier {k}** : {nom_j} (*{poste_j}* ➔ `{grp_j}`)")
