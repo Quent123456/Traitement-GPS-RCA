@@ -176,6 +176,131 @@ joueurs_data: Dict[str, str] = {
     "VILAIN Beryl": "Arrière",
 }
 
+# ------------------------------------------------------------------------------
+# 1.1 GESTION DE L'EFFECTIF PERSONNALISÉ & PERSISTANCE DES NOUVEAUX JOUEURS
+# ------------------------------------------------------------------------------
+
+CONFIG_JOUEURS_CUSTOM_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_rca_joueurs_custom.json")
+
+# Cache mémoire pour synchronisation rapide des joueurs personnalisés
+JOUEURS_CUSTOM_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def charger_joueurs_personnalises() -> Dict[str, Dict[str, Any]]:
+    """
+    Charge les joueurs personnalisés créés dans le logiciel depuis config_rca_joueurs_custom.json.
+    Format : { "Nom Prénom": { "poste": "...", "groupe": "...", "date_ajout": "..." } }
+    """
+    global JOUEURS_CUSTOM_CACHE
+    if os.path.exists(CONFIG_JOUEURS_CUSTOM_FILE):
+        try:
+            with open(CONFIG_JOUEURS_CUSTOM_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    JOUEURS_CUSTOM_CACHE = data
+                    return data
+        except Exception:
+            pass
+    JOUEURS_CUSTOM_CACHE = {}
+    return {}
+
+
+def synchroniser_effectif_avec_custom() -> None:
+    """Injecte les joueurs personnalisés dans le dictionnaire global joueurs_data."""
+    custom = charger_joueurs_personnalises()
+    for nom, info in custom.items():
+        if isinstance(info, dict):
+            joueurs_data[nom] = info.get("poste", "Non spécifié")
+        elif isinstance(info, str):
+            joueurs_data[nom] = info
+
+
+# Synchronisation initiale au démarrage du module
+synchroniser_effectif_avec_custom()
+
+
+def sauvegarder_joueur_personnalise(
+    nom: str,
+    poste: str,
+    groupe: Optional[str] = None,
+    photo_bytes: Optional[bytes] = None,
+    photo_ext: str = ".jpg",
+) -> Tuple[bool, str]:
+    """
+    Enregistre un nouveau joueur dans config_rca_joueurs_custom.json,
+    met à jour joueurs_data et enregistre la photo dans photos_joueurs/ si présente.
+    """
+    nom_clean = nom.strip()
+    if not nom_clean:
+        return False, "Le nom du joueur ne peut pas être vide."
+    if nom_clean in ["— Sélectionner un joueur —", "➕ [Créer un nouveau joueur...]", "-", ""]:
+        return False, "Le nom saisi n'est pas valide."
+
+    poste_clean = poste.strip() if poste else "Inconnu"
+    grp_final = (
+        groupe
+        if groupe in ["5 de devant", "3ème Ligne", "Trois-quarts"]
+        else mapper_poste_vers_groupe_rca(poste_clean, nom_clean)
+    )
+
+    # Enregistrement de la photo si fournie
+    if photo_bytes:
+        try:
+            os.makedirs(PHOTOS_DIR, exist_ok=True)
+            ext = photo_ext.lower() if photo_ext.startswith(".") else f".{photo_ext.lower()}"
+            nom_fichier = f"{nom_clean.replace(' ', '_')}{ext}"
+            chemin_photo = os.path.join(PHOTOS_DIR, nom_fichier)
+            with open(chemin_photo, "wb") as f:
+                f.write(photo_bytes)
+        except Exception:
+            pass
+
+    custom = charger_joueurs_personnalises()
+    custom[nom_clean] = {
+        "poste": poste_clean,
+        "groupe": grp_final,
+        "date_ajout": datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+    }
+
+    try:
+        with open(CONFIG_JOUEURS_CUSTOM_FILE, "w", encoding="utf-8") as f:
+            json.dump(custom, f, ensure_ascii=False, indent=2)
+        JOUEURS_CUSTOM_CACHE.clear()
+        JOUEURS_CUSTOM_CACHE.update(custom)
+        joueurs_data[nom_clean] = poste_clean
+        return True, f"Joueur « {nom_clean} » enregistré avec succès !"
+    except Exception as e:
+        return False, f"Erreur lors de l'enregistrement : {str(e)}"
+
+
+def supprimer_joueur_personnalise(nom: str) -> Tuple[bool, str]:
+    """Supprime un joueur personnalisé de la configuration et des mappings GPS."""
+    custom = charger_joueurs_personnalises()
+    if nom in custom:
+        del custom[nom]
+        try:
+            with open(CONFIG_JOUEURS_CUSTOM_FILE, "w", encoding="utf-8") as f:
+                json.dump(custom, f, ensure_ascii=False, indent=2)
+            JOUEURS_CUSTOM_CACHE.clear()
+            JOUEURS_CUSTOM_CACHE.update(custom)
+            if nom in joueurs_data:
+                del joueurs_data[nom]
+
+            # Nettoyage du mapping GPS si ce joueur y était associé
+            current_gps_map = charger_mapping_gps_persistant()
+            changed = False
+            for k, v in list(current_gps_map.items()):
+                if v == nom:
+                    del current_gps_map[k]
+                    changed = True
+            if changed:
+                sauvegarder_mapping_gps_persistant(current_gps_map)
+
+            return True, f"Joueur « {nom} » supprimé de l'effectif avec succès."
+        except Exception as e:
+            return False, f"Erreur lors de la suppression : {str(e)}"
+    return False, "Joueur introuvable dans l'effectif personnalisé."
+
 
 def mapper_poste_vers_groupe_rca(poste_detaille: str, nom_joueur: str = "") -> str:
     """
@@ -192,6 +317,13 @@ def mapper_poste_vers_groupe_rca(poste_detaille: str, nom_joueur: str = "") -> s
     - Jules D. (DELACROIX Jules), Elliot B., Maël C., Victor U., Olivier P., Ope P., Maka S., Arthur M., Octave D., Lucien L. en 'Trois-quarts'.
     """
     nom_clean = str(nom_joueur).strip().lower() if nom_joueur else ""
+
+    # 0. Vérification si joueur personnalisé avec un groupe explicite choisi lors de la création
+    if nom_clean:
+        for c_nom, c_val in JOUEURS_CUSTOM_CACHE.items():
+            if c_nom.strip().lower() == nom_clean:
+                if isinstance(c_val, dict) and c_val.get("groupe") in ["5 de devant", "3ème Ligne", "Trois-quarts"]:
+                    return c_val["groupe"]
 
     # 1. Règle d'alignement prioritaire par joueur spécifique (Staff RCA)
     if nom_clean:
@@ -886,12 +1018,213 @@ def sauvegarder_mapping_gps_persistant(mapping: Dict[Any, str]) -> bool:
         return False
 
 
+# ==============================================================================
+# 4.1 MODAL DE CRÉATION & GESTION D'UN JOUEUR DANS L'EFFECTIF
+# ==============================================================================
+
+POSTES_RUGBY_STANDARDS: List[str] = [
+    "Pilier",
+    "Talonneur",
+    "2ème ligne",
+    "3ème ligne",
+    "Demi de mêlée",
+    "Demi d'ouverture",
+    "Centre",
+    "Ailier",
+    "Arrière",
+    "Autre (saisie libre)",
+]
+
+
+@st.dialog("👤 Créer / Ajouter un joueur dans l'effectif RCA", width="large")
+def dialog_creer_nouveau_joueur(
+    boitier_cible: Optional[Union[int, str]] = None,
+    liste_boitiers: Optional[List[int]] = None,
+) -> None:
+    st.markdown(
+        "<div style='font-size: 0.92rem; color: #475569; margin-bottom: 14px; line-height: 1.4;'>"
+        "Ajoutez un joueur non répertorié à l'effectif officiel du <strong>Rugby Club Amiénois</strong>. "
+        "Il sera immédiatement disponible dans toutes les listes de sélection GPS, graphiques et rapports officiels."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    nb_custom = len(JOUEURS_CUSTOM_CACHE)
+    tab_creer, tab_liste = st.tabs([
+        "➕ Créer un nouveau joueur",
+        f"📋 Joueurs personnalisés ({nb_custom})",
+    ])
+
+    with tab_creer:
+        col_nom, col_poste = st.columns([1.2, 1])
+        with col_nom:
+            nouveau_nom = st.text_input(
+                "Nom et Prénom du joueur * :",
+                placeholder="Ex: DUPONT Antoine",
+                key="dlg_input_nom_joueur",
+                help="Saisissez le Nom de famille suivi du Prénom (ex: DUPONT Antoine).",
+            )
+        with col_poste:
+            choix_poste = st.selectbox(
+                "Poste de rugby * :",
+                options=POSTES_RUGBY_STANDARDS,
+                index=0,
+                key="dlg_input_poste_joueur",
+            )
+
+        poste_final = choix_poste
+        if choix_poste == "Autre (saisie libre)":
+            poste_autre = st.text_input(
+                "Préciser le poste de rugby :",
+                placeholder="Ex: Polyvalent 3/4",
+                key="dlg_input_poste_autre",
+            )
+            poste_final = poste_autre.strip() if poste_autre.strip() else "Trois-quarts"
+
+        # Groupe officiel RCA suggéré
+        groupe_suggere = mapper_poste_vers_groupe_rca(poste_final, nouveau_nom)
+        idx_grp = (
+            ["5 de devant", "3ème Ligne", "Trois-quarts"].index(groupe_suggere)
+            if groupe_suggere in ["5 de devant", "3ème Ligne", "Trois-quarts"]
+            else 2
+        )
+
+        col_grp, col_boitier = st.columns(2)
+        with col_grp:
+            groupe_final = st.selectbox(
+                "Groupe athlétique RCA officiel * :",
+                options=["5 de devant", "3ème Ligne", "Trois-quarts"],
+                index=idx_grp,
+                help="Groupe d'appartenance utilisé pour les analyses collectives et objectifs de la préparatrice physique.",
+                key="dlg_input_groupe_joueur",
+            )
+
+        with col_boitier:
+            # Options d'attribution immédiate à un boîtier GPS
+            opts_boitiers = ["— Ne pas attribuer immédiatement —"]
+            boitier_default_idx = 0
+            if liste_boitiers:
+                for idx_b, b_num in enumerate(liste_boitiers, start=1):
+                    opts_boitiers.append(f"Boîtier GPS n°{b_num}")
+                    if boitier_cible is not None and str(b_num) == str(boitier_cible):
+                        boitier_default_idx = idx_b
+
+            boitier_choisi_str = st.selectbox(
+                "Assigner directement à un boîtier GPS :",
+                options=opts_boitiers,
+                index=boitier_default_idx,
+                help="Si sélectionné, le nouveau joueur sera directement attribué à ce boîtier GPS.",
+                key="dlg_input_boitier_joueur",
+            )
+
+        col_photo, col_preview = st.columns([2, 1])
+        with col_photo:
+            photo_file = st.file_uploader(
+                "Photo du joueur (optionnel) :",
+                type=["jpg", "jpeg", "png", "webp"],
+                help="Photo de profil pour le mapping GPS et les podiums de la séance.",
+                key="dlg_upload_photo_joueur",
+            )
+        with col_preview:
+            st.caption("Aperçu du groupe :")
+            if groupe_final == "5 de devant":
+                b_style = "background-color:#EFF6FF;color:#1D4ED8;border:1px solid #BFDBFE;"
+            elif groupe_final == "3ème Ligne":
+                b_style = "background-color:#F0FDF4;color:#15803D;border:1px solid #BBF7D0;"
+            else:
+                b_style = "background-color:#FEF2F2;color:#B91C1C;border:1px solid #FECACA;"
+            st.markdown(
+                f"<div style='{b_style}padding:6px 10px;border-radius:6px;font-weight:700;font-size:0.80rem;text-align:center;margin-top:2px;'>"
+                f"🏉 {groupe_final}</div>",
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+        col_sub1, col_sub2 = st.columns([2, 1])
+        with col_sub1:
+            if st.button("💾 Enregistrer et créer le joueur", type="primary", use_container_width=True, key="dlg_btn_enregistrer"):
+                nom_clean = nouveau_nom.strip()
+                if not nom_clean:
+                    st.error("⚠️ Veuillez renseigner le Nom et Prénom du joueur.")
+                elif nom_clean in ["— Sélectionner un joueur —", "➕ [Créer un nouveau joueur...]", "-"]:
+                    st.error("⚠️ Le nom saisi n'est pas autorisé.")
+                else:
+                    p_bytes = None
+                    p_ext = ".jpg"
+                    if photo_file is not None:
+                        p_bytes = photo_file.getvalue()
+                        p_ext = os.path.splitext(photo_file.name)[1]
+
+                    ok, msg = sauvegarder_joueur_personnalise(
+                        nom=nom_clean,
+                        poste=poste_final,
+                        groupe=groupe_final,
+                        photo_bytes=p_bytes,
+                        photo_ext=p_ext,
+                    )
+                    if ok:
+                        # Si assignation directe à un boîtier GPS
+                        if boitier_choisi_str and "Boîtier GPS n°" in boitier_choisi_str:
+                            b_num = int(boitier_choisi_str.replace("Boîtier GPS n°", "").strip())
+                            st.session_state[f"gps_sel_boitier_{b_num}"] = nom_clean
+                            if "gps_mapping" in st.session_state:
+                                st.session_state["gps_mapping"][b_num] = nom_clean
+                                st.session_state["gps_mapping"][str(b_num)] = nom_clean
+                            if "mapping_gps_joueurs" in st.session_state:
+                                st.session_state["mapping_gps_joueurs"][b_num] = nom_clean
+                                st.session_state["mapping_gps_joueurs"][str(b_num)] = nom_clean
+
+                            c_map = charger_mapping_gps_persistant()
+                            c_map[str(b_num)] = nom_clean
+                            sauvegarder_mapping_gps_persistant(c_map)
+
+                        st.toast(f"✅ {msg}")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {msg}")
+        with col_sub2:
+            if st.button("Fermer", use_container_width=True, key="dlg_btn_fermer"):
+                st.rerun()
+
+    with tab_liste:
+        custom_players = charger_joueurs_personnalises()
+        if not custom_players:
+            st.info("Aucun joueur personnalisé n'a encore été créé dans le logiciel.")
+        else:
+            st.markdown(f"**{len(custom_players)} joueur(s) personnalisé(s) enregistré(s) :**")
+            for c_nom, c_val in list(custom_players.items()):
+                cj1, cj2, cj3, cj4 = st.columns([3, 2, 2, 0.8])
+                with cj1:
+                    photo_c = obtenir_chemin_photo(c_nom)
+                    if photo_c and os.path.isfile(photo_c):
+                        st.markdown(f"👤 **{c_nom}** *(photo 📸)*")
+                    else:
+                        st.markdown(f"👤 **{c_nom}**")
+                with cj2:
+                    st.caption(f"Poste : *{c_val.get('poste', 'Inconnu')}*")
+                with cj3:
+                    st.caption(f"Groupe : `{c_val.get('groupe', 'Non défini')}`")
+                with cj4:
+                    if st.button("🗑️", key=f"dlg_del_p_{c_nom}", help=f"Supprimer {c_nom}"):
+                        ok_d, msg_d = supprimer_joueur_personnalise(c_nom)
+                        if ok_d:
+                            st.toast(f"✅ {msg_d}")
+                            st.rerun()
+                        else:
+                            st.error(msg_d)
+
+
+# ==============================================================================
+# 4.2 INTERFACE D'ATTRIBUTION GPS DYNAMIQUE & SÉLECTION DES JOUEURS
+# ==============================================================================
+
 def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Union[int, str], str], bool]:
     """
     Interface dynamique d'attribution des boîtiers GPS :
     - Filtre et extrait uniquement les numéros uniques de boîtiers GPS présents dans df_raw.
     - Convertit les identifiants en entiers (int) et les trie par ordre croissant (1, 2, 3...).
     - Mémorisation et pré-remplissage intelligent automatique via st.session_state.mapping_gps_joueurs et config_rca_gps.json.
+    - Permet la création instantanée d'un nouveau joueur depuis la barre d'outils ou directement dans chaque sélecteur.
     - Affiche chaque boîtier avec sélecteur de joueur ('Nom Prénom - Poste'), photo et badge du groupe officiel RCA.
     - Convertit automatiquement le poste détaillé vers l'un des 3 groupes officiels RCA (5 de devant, 3ème Ligne, Trois-quarts).
     - Sécurité anti-doublon bloquante : interdit formellement d'attribuer un même joueur à 2 boîtiers.
@@ -950,7 +1283,10 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
                 col_t.markdown(f"• **{n}** — Poste : *{p}* ➔ `{g}`")
 
             st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-            c_b1, c_b2, c_b3 = st.columns([1, 2, 1])
+            c_b1, c_b_creer, c_b2, c_b3 = st.columns([0.8, 1.4, 2, 0.8])
+            with c_b_creer:
+                if st.button("➕ Nouveau joueur", key="btn_creer_joueur_no_units", use_container_width=True, help="Créer un joueur absent de la base"):
+                    dialog_creer_nouveau_joueur()
             with c_b2:
                 if st.button("✅ Valider l'effectif et l'association GPS", type="primary", use_container_width=True, key="btn_valider_sans_boitiers"):
                     st.session_state["step2_validated"] = True
@@ -965,15 +1301,32 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
             st.warning("⚠️ Aucun joueur ni numéro de boîtier GPS n'a été détecté dans le fichier.")
             return {}, False
 
-    # 2. Liste des joueurs RCA disponibles (tri alphabétique)
+    # 2. Liste des joueurs RCA disponibles (tri alphabétique) avec option d'ajout dynamique
     placeholder = "— Sélectionner un joueur —"
+    TRIGGER_NOUVEAU_JOUEUR = "➕ [Créer un nouveau joueur...]"
+
+    # Détection automatique si l'utilisateur a sélectionné l'option de création dans un selectbox
+    boitier_declencheur: Optional[int] = None
+    for g_id in liste_gps_detectes:
+        k_w = f"gps_sel_boitier_{g_id}"
+        if st.session_state.get(k_w) == TRIGGER_NOUVEAU_JOUEUR:
+            boitier_declencheur = g_id
+            # On réinitialise la clé avant que le widget ne soit ré-instancié
+            st.session_state[k_w] = placeholder
+            break
+
+    if boitier_declencheur is not None:
+        dialog_creer_nouveau_joueur(boitier_cible=boitier_declencheur, liste_boitiers=liste_gps_detectes)
+
     noms_joueurs_tries = sorted(list(joueurs_data.keys()))
-    options = [placeholder] + noms_joueurs_tries
+    options = [placeholder, TRIGGER_NOUVEAU_JOUEUR] + noms_joueurs_tries
 
     def format_affichage_joueur(nom: str) -> str:
         """Affiche 'Nom Prénom - Poste' dans la liste déroulante et la barre de recherche."""
         if nom == placeholder:
             return placeholder
+        if nom == TRIGGER_NOUVEAU_JOUEUR:
+            return "➕ [Créer un nouveau joueur dans l'effectif...]"
         poste = joueurs_data.get(nom, "")
         if poste:
             return f"{nom} - {poste}"
@@ -996,10 +1349,10 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
     # Calcul du nombre de boîtiers pré-remplis
     nb_prefilled = sum(
         1 for g_id in liste_gps_detectes
-        if reference_mapping.get(str(g_id)) in options and reference_mapping.get(str(g_id)) != placeholder
+        if reference_mapping.get(str(g_id)) in options and reference_mapping.get(str(g_id)) not in [placeholder, TRIGGER_NOUVEAU_JOUEUR]
     )
 
-    c_info1, c_info2 = st.columns([3.5, 1.5])
+    c_info1, c_btn_creer, c_info2 = st.columns([3.0, 1.3, 1.4])
     with c_info1:
         if nb_prefilled > 0:
             st.success(
@@ -1011,8 +1364,11 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
                 f"**{len(liste_gps_detectes)} boîtier(s) GPS actif(s) détecté(s)** sur cette séance. "
                 "Associez chaque boîtier à son joueur :"
             )
+    with c_btn_creer:
+        if st.button("➕ Nouveau joueur", type="secondary", help="Créer et ajouter un joueur dans l'effectif RCA", key="btn_add_player_step2_top", use_container_width=True):
+            dialog_creer_nouveau_joueur(liste_boitiers=liste_gps_detectes)
     with c_info2:
-        if st.button("🔄 Rétablir mapping usine", help="Restaure les attributions initiales officielles du club RCA", key="btn_reset_default_factory"):
+        if st.button("🔄 Rétablir usine", help="Restaure les attributions initiales officielles du club RCA", key="btn_reset_default_factory", use_container_width=True):
             default_map = {str(k): v for k, v in DEFAULT_GPS_MAPPING.items()}
             st.session_state["mapping_gps_joueurs"] = default_map
             st.session_state["gps_mapping"] = default_map
@@ -1052,7 +1408,7 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
                     key=f"gps_sel_boitier_{gps_id}",
                 )
 
-                if choix != placeholder:
+                if choix not in [placeholder, TRIGGER_NOUVEAU_JOUEUR]:
                     poste_d = joueurs_data.get(choix, "Inconnu")
                     grp_rca = mapper_poste_vers_groupe_rca(poste_d, choix)
                     if grp_rca == "5 de devant":
@@ -1069,7 +1425,7 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
                     )
 
             with c_photo:
-                if choix != placeholder:
+                if choix not in [placeholder, TRIGGER_NOUVEAU_JOUEUR]:
                     photo = obtenir_chemin_photo(choix)
                     if photo and os.path.isfile(photo):
                         st.image(photo, width=48)
@@ -1083,7 +1439,7 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
                         unsafe_allow_html=True,
                     )
 
-            if choix != placeholder:
+            if choix not in [placeholder, TRIGGER_NOUVEAU_JOUEUR]:
                 mapping[gps_id] = choix
                 mapping[str(gps_id)] = choix
                 st.session_state["gps_mapping"][gps_id] = choix
@@ -1095,7 +1451,7 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
     joueurs_assignes: Dict[str, List[int]] = {}
     for g_id in liste_gps_detectes:
         j_choisi = mapping.get(g_id)
-        if j_choisi and j_choisi != placeholder:
+        if j_choisi and j_choisi not in [placeholder, TRIGGER_NOUVEAU_JOUEUR]:
             joueurs_assignes.setdefault(j_choisi, []).append(g_id)
 
     doublons = {j: ids for j, ids in joueurs_assignes.items() if len(ids) > 1}
@@ -3234,7 +3590,7 @@ def main() -> None:
     )
 
     if uploaded_file is None:
-        col_msg, col_demo = st.columns([4, 1])
+        col_msg, col_demo = st.columns([3.8, 1.2])
         with col_msg:
             st.info(
                 "👋 **Bienvenue sur le portail d'analyse GPS du Rugby Club Amiénois (RCA).**\n\n"
@@ -3243,6 +3599,8 @@ def main() -> None:
             )
         with col_demo:
             use_demo = st.checkbox("🧪 Mode Démo", value=False, help="Active des données de démonstration avec l'effectif réel RCA.", key="chk_mode_demo")
+            if st.button("➕ Créer un joueur", help="Ajouter un joueur à l'effectif RCA", key="btn_create_player_home", use_container_width=True):
+                dialog_creer_nouveau_joueur()
 
         if use_demo:
             demo_rows = []
@@ -3313,8 +3671,9 @@ def main() -> None:
             "1. Associez chaque numéro de boîtier GPS détecté au joueur correspondant.\n"
             "2. Le poste détaillé et sa conversion automatique vers l'un des **3 grands groupes officiels du RCA** "
             "(`5 de devant`, `3ème Ligne`, `Trois-quarts`) sont appliqués en direct.\n"
-            "3. **Sécurité anti-doublon :** Il est strictement interdit d'attribuer un même joueur à plusieurs boîtiers sur la séance.\n"
-            "4. Cliquez sur **« ✅ Valider l'effectif et l'association GPS »** pour débloquer l'Étape 3."
+            "3. **Créer un nouveau joueur :** Utilisez le bouton « ➕ Nouveau joueur » en haut du tableau ou sélectionnez l'option « ➕ [Créer un nouveau joueur...] » directement dans le menu déroulant d'un boîtier.\n"
+            "4. **Sécurité anti-doublon :** Il est strictement interdit d'attribuer un même joueur à plusieurs boîtiers sur la séance.\n"
+            "5. Cliquez sur **« ✅ Valider l'effectif et l'association GPS »** pour débloquer l'Étape 3."
         )
 
         ui_attribution_gps(df_raw=df_raw)
