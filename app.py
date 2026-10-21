@@ -1943,7 +1943,188 @@ def process_catapult_data(
 # 6. MOTEUR DE CALCULS DYNAMIQUES (JAUGES ET PODIUM)
 # ==============================================================================
 
-def calculer_metriques_jauges(df_subset: pd.DataFrame, group_name: str, mode_calc: str = "Moyenne / joueur") -> Dict[str, Tuple[float, float]]:
+def calculer_moyennes_groupes_rca(
+    df_raw: pd.DataFrame,
+    df_indiv: pd.DataFrame,
+    split_mode: str = "splits",
+    split_filter: Optional[Union[str, List[str]]] = None,
+    exclude_warmup: bool = False,
+) -> Dict[str, Dict[str, float]]:
+    """
+    Calcule les moyennes par groupe selon la méthodologie officielle de la préparatrice physique RCA :
+    En mode 'Splits' :
+    1. Filtre les splits inactifs où Distance (km) <= 0 (ou durée <= 0) pour chaque joueur.
+    2. Pour chaque groupe ('5 de devant', '3ème Ligne', 'Trois-quarts') et chaque Split,
+       calcule la moyenne des joueurs actifs sur ce split.
+    3. Additionne ces moyennes sur l'ensemble des splits de la séance pour obtenir :
+       - Distance Moyenne (m)
+       - HSR Moyen (m) (strictement Zone 3)
+       - VHSR Moyen (m) (Zone 4 + Zone 5)
+       - Accel / Decel moyennes (> 3 m/s²)
+       - Moyenne des m/min (Distance Per Min)
+    """
+    GROUPS = ["5 de devant", "3ème Ligne", "Trois-quarts"]
+    res: Dict[str, Dict[str, float]] = {}
+
+    player_col = find_column(df_raw, [
+        "Nom ; Prénom", "Player Name", "Athlete Name", "Player", "Athlete", "Joueur", "Nom", "Name"
+    ])
+    split_col = find_column(df_raw, [
+        "Split Name", "Split", "Period Name", "Period", "Tags", "Tag", "Activity Name", "Session Name", "Session Title", "Segment"
+    ])
+
+    player_group_map = {}
+    if not df_indiv.empty and "Nom ; Prénom" in df_indiv.columns and "Groupe" in df_indiv.columns:
+        player_group_map = dict(zip(
+            df_indiv["Nom ; Prénom"].astype(str).str.strip(),
+            df_indiv["Groupe"].astype(str).str.strip()
+        ))
+
+    norm_mode = str(split_mode).lower().strip()
+    use_splits = ("split" in norm_mode or "atelier" in norm_mode or norm_mode == "default" or norm_mode == "manual") and split_col and split_col in df_raw.columns
+
+    if use_splits:
+        df_w = df_raw.copy()
+
+        # Mapping du groupe pour chaque ligne
+        def _get_group(p_val: Any) -> str:
+            p_str = str(p_val).strip()
+            if p_str in player_group_map:
+                return player_group_map[p_str]
+            for k, v in player_group_map.items():
+                if k.lower() == p_str.lower():
+                    return v
+            return "Non défini"
+
+        df_w["_Groupe"] = df_w[player_col].apply(_get_group) if player_col and player_col in df_w.columns else "Non défini"
+
+        s_series = df_w[split_col].astype(str).str.strip()
+        s_lower = s_series.str.lower()
+
+        # Filtrage manuel ou exclusion de la ligne globale 'all'
+        if split_filter is not None:
+            if isinstance(split_filter, str):
+                mask = s_lower.str.contains(split_filter.strip().lower(), na=False)
+                if mask.any():
+                    df_w = df_w[mask].copy()
+            elif isinstance(split_filter, (list, tuple, set)):
+                targets = [str(x).strip().lower() for x in split_filter]
+                mask = s_lower.isin(targets)
+                if mask.any():
+                    df_w = df_w[mask].copy()
+        else:
+            GLOBAL_TAGS = {
+                "session", "whole session", "full session", "all", "total",
+                "seance", "séance", "globale", "global", "complete", "complète",
+                "session summary", "all session", "overall"
+            }
+            is_global = s_lower.isin(GLOBAL_TAGS) | s_lower.str.startswith("session ") | (s_lower == "session")
+            has_split_rows = (~is_global & (s_series != "") & (s_series != "nan")).any()
+            if has_split_rows:
+                df_w = df_w[~is_global].copy()
+
+        if exclude_warmup:
+            warmup_mask = df_w[split_col].astype(str).str.lower().str.contains("echauff|échauff|warmup|warm-up|warm_up", na=False)
+            if (~warmup_mask).any():
+                df_w = df_w[~warmup_mask].copy()
+
+        dist_col = find_column(df_w, ["Distance (km)", "Total Distance (km)", "Distance"])
+        dist_m_col = find_column(df_w, ["Distance (m)", "Total Distance (m)"])
+        z3_col = find_column(df_w, ["Distance in Speed Zone 3 (km)", "Distance in Speed Zone 3  (km)", "Speed Zone 3", "Zone 3"])
+        z4_col = find_column(df_w, ["Distance in Speed Zone 4 (km)", "Distance in Speed Zone 4  (km)", "Speed Zone 4", "Zone 4"])
+        z5_col = find_column(df_w, ["Distance in Speed Zone 5 (km)", "Distance in Speed Zone 5  (km)", "Speed Zone 5", "Zone 5"])
+        hsr_col = find_column(df_w, ["Distance haute intensité (m)", "High Speed Running (m)", "HSR Distance (m)", "HSR Distance (>5m/s)"])
+        vhsr_col = find_column(df_w, ["Sprint Distance (m)", "VHSR Distance (m)", "Very High Speed Running (m)"])
+        dpm_col = find_column(df_w, ["Distance Per Min (m/min)", "Meterage Per Minute", "m/min", "Distance per min", "Dist/min"])
+
+        acc_34_col = find_column(df_w, ["Accelerations Zone Count: 3 - 4 m/s/s", "Accelerations Zone Count: 3-4 m/s/s", "Accel 3-4", "Accelerations (>3m/s2)"])
+        acc_gt4_col = find_column(df_w, ["Accelerations Zone Count: > 4 m/s/s", "Accelerations Zone Count: >4 m/s/s", "Accel >4"])
+        dec_34_col = find_column(df_w, ["Deceleration Zone Count: 3 - 4 m/s/s", "Deceleration Zone Count: 3-4 m/s/s", "Decel 3-4", "Décélérations (<-3m/s2)"])
+        dec_gt4_col = find_column(df_w, ["Deceleration Zone Count: > 4 m/s/s", "Deceleration Zone Count: >4 m/s/s", "Decel >4"])
+
+        if dist_col and dist_col in df_w.columns:
+            vals = df_w[dist_col].apply(clean_numeric_value)
+            df_w["_Dist_m"] = vals if ("(m)" in dist_col.lower() or vals.median() > 100.0) else vals * 1000.0
+        elif dist_m_col and dist_m_col in df_w.columns:
+            df_w["_Dist_m"] = df_w[dist_m_col].apply(clean_numeric_value)
+        else:
+            df_w["_Dist_m"] = 0.0
+
+        if z3_col and z3_col in df_w.columns:
+            vals = df_w[z3_col].apply(clean_numeric_value)
+            df_w["_Z3_m"] = vals if ("(m)" in z3_col.lower() or vals.median() > 20.0) else vals * 1000.0
+        elif hsr_col and hsr_col in df_w.columns:
+            vals = df_w[hsr_col].apply(clean_numeric_value)
+            df_w["_Z3_m"] = vals if ("(m)" in hsr_col.lower() or vals.median() > 10.0) else vals * 1000.0
+        else:
+            df_w["_Z3_m"] = 0.0
+
+        z4_m = pd.Series(0.0, index=df_w.index)
+        z5_m = pd.Series(0.0, index=df_w.index)
+        if z4_col and z4_col in df_w.columns:
+            v4 = df_w[z4_col].apply(clean_numeric_value)
+            z4_m = v4 if ("(m)" in z4_col.lower() or v4.median() > 20.0) else v4 * 1000.0
+        if z5_col and z5_col in df_w.columns:
+            v5 = df_w[z5_col].apply(clean_numeric_value)
+            z5_m = v5 if ("(m)" in z5_col.lower() or v5.median() > 20.0) else v5 * 1000.0
+
+        if (not z4_col or not z5_col) and vhsr_col and vhsr_col in df_w.columns:
+            v_vhsr = df_w[vhsr_col].apply(clean_numeric_value)
+            df_w["_VHSR_m"] = v_vhsr if ("(m)" in vhsr_col.lower() or v_vhsr.median() > 5.0) else v_vhsr * 1000.0
+        else:
+            df_w["_VHSR_m"] = z4_m + z5_m
+
+        acc_dec = pd.Series(0.0, index=df_w.index)
+        for c in [acc_34_col, acc_gt4_col, dec_34_col, dec_gt4_col]:
+            if c and c in df_w.columns:
+                acc_dec += df_w[c].apply(clean_numeric_value)
+        df_w["_Acc_Dec"] = acc_dec
+
+        if dpm_col and dpm_col in df_w.columns:
+            df_w["_Dpm"] = df_w[dpm_col].apply(clean_numeric_value)
+        else:
+            df_w["_Dpm"] = 0.0
+
+        # RÈGLE D'OR PRÉPARATRICE PHYSIQUE : Filtrer les splits inactifs (Distance <= 0)
+        df_active = df_w[df_w["_Dist_m"] > 0].copy()
+
+        for g in GROUPS:
+            sub = df_active[df_active["_Groupe"] == g]
+            if not sub.empty:
+                split_means = sub.groupby(split_col)[["_Dist_m", "_Z3_m", "_VHSR_m", "_Acc_Dec", "_Dpm"]].mean()
+                tot = split_means.sum()
+                res[g] = {
+                    "Dist_m": float(tot["_Dist_m"]),
+                    "HSR_m": float(tot["_Z3_m"]),
+                    "VHSR_m": float(tot["_VHSR_m"]),
+                    "Acc_Dec": float(tot["_Acc_Dec"]),
+                    "Dpm": float(split_means["_Dpm"].mean()) if not split_means["_Dpm"].empty else 0.0,
+                }
+
+    # Repli pour les groupes manquants ou si mode 'all'
+    for g in GROUPS:
+        if g not in res:
+            sub = df_indiv[df_indiv["Groupe"] == g] if not df_indiv.empty and "Groupe" in df_indiv.columns else pd.DataFrame()
+            if not sub.empty:
+                res[g] = {
+                    "Dist_m": float(sub["Distance (km)"].mean() * 1000.0) if "Distance (km)" in sub.columns else 0.0,
+                    "HSR_m": float(sub[" Distance haute intensité (m)"].mean()) if " Distance haute intensité (m)" in sub.columns else 0.0,
+                    "VHSR_m": float(sub["VHSR (m)"].mean()) if "VHSR (m)" in sub.columns else 0.0,
+                    "Acc_Dec": float(sub["Accel/Dec"].mean()) if "Accel/Dec" in sub.columns else 0.0,
+                    "Dpm": float(sub["Distance Per Min (m/min)"].mean()) if "Distance Per Min (m/min)" in sub.columns else 0.0,
+                }
+            else:
+                res[g] = {"Dist_m": 0.0, "HSR_m": 0.0, "VHSR_m": 0.0, "Acc_Dec": 0.0, "Dpm": 0.0}
+
+    return res
+
+
+def calculer_metriques_jauges(
+    df_subset: pd.DataFrame,
+    group_name: str,
+    mode_calc: str = "Moyenne / joueur",
+    group_split_stats: Optional[Dict[str, float]] = None,
+) -> Dict[str, Tuple[float, float]]:
     """Calcule dynamiquement les 4 métriques des jauges pour le groupe sélectionné."""
     targets = OBJECTIFS_CONFIG.get(group_name, OBJECTIFS_CONFIG["Tous les groupes"])
 
@@ -1952,29 +2133,35 @@ def calculer_metriques_jauges(df_subset: pd.DataFrame, group_name: str, mode_cal
 
     use_mean = (mode_calc == "Moyenne / joueur")
 
-    d_m = df_subset["Distance (km)"] * 1000.0
-    val_dist = d_m.mean() if use_mean else d_m.sum()
-
-    # HSR = Zone 3 (selon méthodologie STAPS RCA)
-    if "Distance in Speed Zone 3  (km)" in df_subset.columns:
-        hsr_m = df_subset["Distance in Speed Zone 3  (km)"] * 1000.0
-    elif " Distance haute intensité (m)" in df_subset.columns:
-        hsr_m = df_subset[" Distance haute intensité (m)"]
+    if use_mean and group_split_stats is not None:
+        val_dist = float(group_split_stats.get("Dist_m", 0.0))
+        val_hsr = float(group_split_stats.get("HSR_m", 0.0))
+        val_vhsr = float(group_split_stats.get("VHSR_m", 0.0))
+        val_acc_dec = float(group_split_stats.get("Acc_Dec", 0.0))
     else:
-        hsr_m = pd.Series([0.0] * len(df_subset))
-    val_hsr = hsr_m.mean() if use_mean else hsr_m.sum()
+        d_m = df_subset["Distance (km)"] * 1000.0
+        val_dist = d_m.mean() if use_mean else d_m.sum()
 
-    # VHSR = Zone 4 + Zone 5
-    if "VHSR (m)" in df_subset.columns:
-        vhsr_m = df_subset["VHSR (m)"]
-    elif "Distance in Speed Zone 4  (km)" in df_subset.columns and "Distance in Speed Zone 5  (km)" in df_subset.columns:
-        vhsr_m = (df_subset["Distance in Speed Zone 4  (km)"] + df_subset["Distance in Speed Zone 5  (km)"]) * 1000.0
-    else:
-        vhsr_m = pd.Series([0.0] * len(df_subset))
-    val_vhsr = vhsr_m.mean() if use_mean else vhsr_m.sum()
+        # HSR = Zone 3 (selon méthodologie STAPS RCA)
+        if "Distance in Speed Zone 3  (km)" in df_subset.columns:
+            hsr_m = df_subset["Distance in Speed Zone 3  (km)"] * 1000.0
+        elif " Distance haute intensité (m)" in df_subset.columns:
+            hsr_m = df_subset[" Distance haute intensité (m)"]
+        else:
+            hsr_m = pd.Series([0.0] * len(df_subset))
+        val_hsr = hsr_m.mean() if use_mean else hsr_m.sum()
 
-    acc_dec = df_subset["Accel/Dec"] if "Accel/Dec" in df_subset.columns else pd.Series([0.0] * len(df_subset))
-    val_acc_dec = acc_dec.mean() if use_mean else acc_dec.sum()
+        # VHSR = Zone 4 + Zone 5
+        if "VHSR (m)" in df_subset.columns:
+            vhsr_m = df_subset["VHSR (m)"]
+        elif "Distance in Speed Zone 4  (km)" in df_subset.columns and "Distance in Speed Zone 5  (km)" in df_subset.columns:
+            vhsr_m = (df_subset["Distance in Speed Zone 4  (km)"] + df_subset["Distance in Speed Zone 5  (km)"]) * 1000.0
+        else:
+            vhsr_m = pd.Series([0.0] * len(df_subset))
+        val_vhsr = vhsr_m.mean() if use_mean else vhsr_m.sum()
+
+        acc_dec = df_subset["Accel/Dec"] if "Accel/Dec" in df_subset.columns else pd.Series([0.0] * len(df_subset))
+        val_acc_dec = acc_dec.mean() if use_mean else acc_dec.sum()
 
     nb_joueurs = len(df_subset)
     multiplier = 1.0 if use_mean else max(float(nb_joueurs), 1.0)
@@ -2021,10 +2208,15 @@ def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any
         "players": players_ts,
     }
 
-    # 2. % DE MARCHE
+    # 2. % DE MARCHE (Les 3 plus bas : ceux qui ont le moins marché, > 0%)
     walk_col = "%Marche "
     if walk_col in df_subset.columns:
-        df_sorted_walk = df_subset.sort_values(by=walk_col, ascending=False)
+        s_walk = pd.to_numeric(df_subset[walk_col], errors="coerce").fillna(0.0)
+        df_valid_walk = df_subset[s_walk > 0.0]
+        if not df_valid_walk.empty:
+            df_sorted_walk = df_valid_walk.sort_values(by=walk_col, ascending=True)
+        else:
+            df_sorted_walk = df_subset.sort_values(by=walk_col, ascending=True)
     else:
         df_sorted_walk = df_subset
     players_walk = []
@@ -2195,10 +2387,14 @@ def formater_date_seance_fr(val_date: Any) -> str:
     return f"{nom_jour} {jour} {nom_mois} {annee} - Semaine {semaine}"
 
 
-def generer_graphique_groupes_matplotlib(df_indiv: pd.DataFrame) -> io.BytesIO:
+def generer_graphique_groupes_matplotlib(
+    df_indiv: pd.DataFrame,
+    moyennes_groupes: Optional[Dict[str, Dict[str, float]]] = None,
+) -> io.BytesIO:
     """
     Génère un diagramme en barres comparant la Distance Moyenne (m)
     et le HSR Moyen (m) par Groupe de joueurs (5 de devant, 3ème Ligne, Trois-quarts).
+    La barre rouge affiche STRICTEMENT la Zone 3 (HSR Z3 = Distance in Speed Zone 3 (km) * 1000).
     """
     fig, ax1 = plt.subplots(figsize=(5.6, 5.6), dpi=180)
     fig.patch.set_facecolor("#FFFFFF")
@@ -2208,31 +2404,40 @@ def generer_graphique_groupes_matplotlib(df_indiv: pd.DataFrame) -> io.BytesIO:
 
     dist_vals: List[float] = []
     hsr_vals: List[float] = []
-    hsr_col = "Haute intensité Podium (m)" if "Haute intensité Podium (m)" in df_indiv.columns else " Distance haute intensité (m)"
-    if hsr_col not in df_indiv.columns and "HSR_m" in df_indiv.columns:
-        hsr_col = "HSR_m"
 
     for g in groupes:
-        sub = df_indiv[df_indiv["Groupe"] == g]
-        if not sub.empty:
-            dist_vals.append(float(sub["Distance (km)"].mean() * 1000.0) if "Distance (km)" in sub.columns else 0.0)
-            hsr_vals.append(float(sub[hsr_col].mean()) if hsr_col in sub.columns else 0.0)
+        if moyennes_groupes and g in moyennes_groupes and "Dist_m" in moyennes_groupes[g]:
+            dist_vals.append(float(moyennes_groupes[g]["Dist_m"]))
+            hsr_vals.append(float(moyennes_groupes[g]["HSR_m"]))
         else:
-            dist_vals.append(0.0)
-            hsr_vals.append(0.0)
+            sub = df_indiv[df_indiv["Groupe"] == g]
+            if not sub.empty:
+                dist_vals.append(float(sub["Distance (km)"].mean() * 1000.0) if "Distance (km)" in sub.columns else 0.0)
+                # Strictement Zone 3 (HSR Z3) - Exclusion formelle du cumul Z3+Z4+Z5
+                if " Distance haute intensité (m)" in sub.columns:
+                    hsr_vals.append(float(sub[" Distance haute intensité (m)"].mean()))
+                elif "Distance in Speed Zone 3  (km)" in sub.columns:
+                    hsr_vals.append(float(sub["Distance in Speed Zone 3  (km)"].mean() * 1000.0))
+                elif "HSR_m" in sub.columns:
+                    hsr_vals.append(float(sub["HSR_m"].mean()))
+                else:
+                    hsr_vals.append(0.0)
+            else:
+                dist_vals.append(0.0)
+                hsr_vals.append(0.0)
 
     x = np.arange(len(groupes))
     width = 0.35
     ax2 = ax1.twinx()
 
     rects1 = ax1.bar(x - width/2, dist_vals, width, label="Distance Moyenne (m)", color="#1F4E79", edgecolor="none")
-    rects2 = ax2.bar(x + width/2, hsr_vals, width, label="HSR Moyen (m)", color="#A30000", edgecolor="none")
+    rects2 = ax2.bar(x + width/2, hsr_vals, width, label="HSR Z3 Moyen (m)", color="#A30000", edgecolor="none")
 
     ax1.set_ylabel("Distance Moyenne (m)", color="#1F4E79", fontweight="bold", fontsize=9)
-    ax2.set_ylabel("HSR Moyen (m)", color="#A30000", fontweight="bold", fontsize=9)
+    ax2.set_ylabel("HSR Z3 Moyen (m)", color="#A30000", fontweight="bold", fontsize=9)
     ax1.set_xticks(x)
     ax1.set_xticklabels(groupes, fontweight="bold", fontsize=9)
-    ax1.set_title("Distance Moyenne & HSR Moyen par Groupe", fontweight="bold", color="#1F4E79", fontsize=10.5, pad=12)
+    ax1.set_title("Distance Moyenne & HSR Z3 Moyen par Groupe", fontweight="bold", color="#1F4E79", fontsize=10.5, pad=12)
 
     # Valeurs écrites directement sur chaque barre
     for rect in rects1:
@@ -2470,6 +2675,7 @@ def generer_rapport_pdf_coachs(
     df_indiv: pd.DataFrame,
     date_seance: Optional[Any] = None,
     synthese_note: Optional[str] = None,
+    moyennes_groupes: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> bytes:
     """
     Génère un rapport PDF optimisé pour les coachs du RCA (format 1 page A4 Paysage)
@@ -2565,11 +2771,15 @@ def generer_rapport_pdf_coachs(
     dist_moy = float(df_indiv["Distance (km)"].mean()) if "Distance (km)" in df_indiv.columns else 0.0
     vmax = float(df_indiv["Top Speed (km/h)"].max()) if "Top Speed (km/h)" in df_indiv.columns else 0.0
 
-    # Haute Intensité / Joueur : cumul Zones 3 + 4 + 5 (> 14.4 km/h) moyen par joueur
-    hsr_col = "Haute intensité Podium (m)" if "Haute intensité Podium (m)" in df_indiv.columns else " Distance haute intensité (m)"
-    if hsr_col not in df_indiv.columns and "HSR_m" in df_indiv.columns:
-        hsr_col = "HSR_m"
-    hsr_moy = float(df_indiv[hsr_col].mean()) if hsr_col in df_indiv.columns and not df_indiv[hsr_col].empty else 0.0
+    # Haute Intensité (Z3) / Joueur : strictement Zone 3 (> 14.4 et <= 19.8 km/h) moyen par joueur
+    if " Distance haute intensité (m)" in df_indiv.columns:
+        hsr_moy = float(df_indiv[" Distance haute intensité (m)"].mean())
+    elif "Distance in Speed Zone 3  (km)" in df_indiv.columns:
+        hsr_moy = float(df_indiv["Distance in Speed Zone 3  (km)"].mean() * 1000.0)
+    elif "HSR_m" in df_indiv.columns:
+        hsr_moy = float(df_indiv["HSR_m"].mean())
+    else:
+        hsr_moy = 0.0
     if pd.isna(hsr_moy):
         hsr_moy = 0.0
 
@@ -2578,7 +2788,7 @@ def generer_rapport_pdf_coachs(
         ("Distance Cumulee", f"{dist_tot:.1f} km"),
         ("Moyenne / Joueur", f"{dist_moy:.2f} km"),
         ("Vitesse Max Seance", f"{vmax:.1f} km/h"),
-        ("Haute Intensite / Joueur", f"{int(round(hsr_moy)):,d} m".replace(",", " ")),
+        ("HSR Z3 / Joueur", f"{int(round(hsr_moy)):,d} m".replace(",", " ")),
     ]
 
     card_w = (273.0 - (len(kpis) - 1) * 2.5) / len(kpis)  # 52.6 mm
@@ -2632,7 +2842,7 @@ def generer_rapport_pdf_coachs(
     pdf.multi_cell(w=w_note - 10, h=3.6, txt=safe_latin1(synthese_note), align="L")
 
     # 3. Colonne de Gauche : Graphique Matplotlib par Groupe (5 de devant, 3ème Ligne, Trois-quarts)
-    buf1 = generer_graphique_groupes_matplotlib(df_indiv)
+    buf1 = generer_graphique_groupes_matplotlib(df_indiv, moyennes_groupes=moyennes_groupes)
     chart_y = 50.5
     chart_w = 133
     chart_h = 142
@@ -2665,7 +2875,7 @@ def generer_rapport_pdf_coachs(
         {
             "key": "% de marche",
             "title": "% DE MARCHE",
-            "subtitle": "Basse Intensite (Zone 1)",
+            "subtitle": "Moins marche (> 0%)",
             "color": (46, 90, 136),  # Bleu ardoise (#2E5A88)
         },
         {
@@ -3787,6 +3997,13 @@ def main() -> None:
             split_filter=selected_splits_val,
             exclude_warmup=excl_warmup_val,
         )
+        moyennes_groupes = calculer_moyennes_groupes_rca(
+            df_raw_mapped,
+            df_indiv,
+            split_mode=split_mode_val,
+            split_filter=selected_splits_val,
+            exclude_warmup=excl_warmup_val,
+        )
 
     st.success(f"✅ Analyse athlétique terminée ! {len(df_indiv)} joueurs traités sur la séance.")
 
@@ -3988,23 +4205,42 @@ def main() -> None:
         ])
         with tab_avants:
             sub = df_indiv[df_indiv["Groupe"] == "5 de devant"]
-            metrics = calculer_metriques_jauges(sub, "5 de devant", mode_calc=mode_calcul)
+            metrics = calculer_metriques_jauges(
+                sub, "5 de devant", mode_calc=mode_calcul,
+                group_split_stats=moyennes_groupes.get("5 de devant") if mode_calcul == "Moyenne / joueur" else None
+            )
             render_dashboard_objectifs("5 de devant", metrics)
             st.caption(f"Effectif analysé : {len(sub)} joueurs dans les 5 de devant.")
 
         with tab_3eme:
             sub = df_indiv[df_indiv["Groupe"] == "3ème Ligne"]
-            metrics = calculer_metriques_jauges(sub, "3ème Ligne", mode_calc=mode_calcul)
+            metrics = calculer_metriques_jauges(
+                sub, "3ème Ligne", mode_calc=mode_calcul,
+                group_split_stats=moyennes_groupes.get("3ème Ligne") if mode_calcul == "Moyenne / joueur" else None
+            )
             render_dashboard_objectifs("3ème Ligne", metrics)
             st.caption(f"Effectif analysé : {len(sub)} joueurs en 3ème Ligne.")
 
         with tab_arrieres:
             sub = df_indiv[df_indiv["Groupe"] == "Trois-quarts"]
-            metrics = calculer_metriques_jauges(sub, "Trois-quarts", mode_calc=mode_calcul)
+            metrics = calculer_metriques_jauges(
+                sub, "Trois-quarts", mode_calc=mode_calcul,
+                group_split_stats=moyennes_groupes.get("Trois-quarts") if mode_calcul == "Moyenne / joueur" else None
+            )
             render_dashboard_objectifs("Trois-quarts", metrics)
             st.caption(f"Effectif analysé : {len(sub)} joueurs chez les Trois-quarts.")
+
+        # Graphique à barres comparatif par groupe (Distance Moyenne & HSR Z3 Moyen)
+        with st.expander("📊 Graphique Comparatif : Distance Moyenne & HSR Z3 Moyen par Groupe", expanded=True):
+            col_c1, col_c2, col_c3 = st.columns([1, 2.5, 1])
+            with col_c2:
+                buf_chart = generer_graphique_groupes_matplotlib(df_indiv, moyennes_groupes=moyennes_groupes)
+                st.image(buf_chart, use_container_width=True)
     else:
-        metrics = calculer_metriques_jauges(df_groupe_actif, groupe_selectionne, mode_calc=mode_calcul)
+        metrics = calculer_metriques_jauges(
+            df_groupe_actif, groupe_selectionne, mode_calc=mode_calcul,
+            group_split_stats=moyennes_groupes.get(groupe_selectionne) if mode_calcul == "Moyenne / joueur" else None
+        )
         render_dashboard_objectifs(groupe_selectionne, metrics)
         st.caption(f"Effectif analysé : {len(df_groupe_actif)} joueur(s) dans le groupe '{groupe_selectionne}'.")
 
@@ -4114,6 +4350,7 @@ def main() -> None:
             df_indiv=df_indiv,
             date_seance=session_date_val,
             synthese_note=synthese_note_active,
+            moyennes_groupes=moyennes_groupes,
         )
         clean_date_tag = re.sub(r"[^0-9a-zA-Z]", "_", str(session_date_val or datetime.date.today().strftime("%d_%m_%Y")))
         pdf_filename = f"Rapport_Seance_GPS_RCA_{clean_date_tag}.pdf"
