@@ -996,19 +996,37 @@ def charger_mapping_gps_persistant() -> Dict[str, str]:
     return {}
 
 
-def sauvegarder_mapping_gps_persistant(mapping: Dict[Any, str]) -> bool:
+def sauvegarder_mapping_gps_persistant(
+    mapping: Dict[Any, str],
+    last_file_sig: Optional[str] = None,
+    overwrite: bool = False,
+) -> bool:
     """
     Sauvegarde le dictionnaire d'association GPS -> Joueur dans config_rca_gps.json.
-    Ne conserve que les clés normalisées uniques et valides.
+    Fusionne intelligemment avec les attributions déjà enregistrées pour ne jamais
+    écraser les boîtiers non présents dans la séance active (sauf si overwrite=True).
+    Mémorise également la signature du fichier validé pour restaurer la session au rafraîchissement.
     """
-    clean_map: Dict[str, str] = {}
+    full_map: Dict[str, str] = {} if overwrite else charger_mapping_gps_persistant()
     for k, v in mapping.items():
         if v and str(v).strip() and str(v).strip() not in ["— Sélectionner un joueur —", "-"]:
-            clean_map[str(k).strip()] = str(v).strip()
+            full_map[str(k).strip()] = str(v).strip()
+
+    existing_sig = None
+    if os.path.exists(CONFIG_GPS_FILE):
+        try:
+            with open(CONFIG_GPS_FILE, "r", encoding="utf-8") as f:
+                d = json.load(f)
+                if isinstance(d, dict):
+                    existing_sig = d.get("last_validated_file_sig")
+        except Exception:
+            pass
+
     payload = {
-        "mapping": clean_map,
+        "mapping": full_map,
         "derniere_mise_a_jour": datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-        "nb_boitiers": len(clean_map),
+        "nb_boitiers": len(full_map),
+        "last_validated_file_sig": last_file_sig or existing_sig,
     }
     try:
         with open(CONFIG_GPS_FILE, "w", encoding="utf-8") as f:
@@ -1372,7 +1390,7 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
             default_map = {str(k): v for k, v in DEFAULT_GPS_MAPPING.items()}
             st.session_state["mapping_gps_joueurs"] = default_map
             st.session_state["gps_mapping"] = default_map
-            sauvegarder_mapping_gps_persistant(default_map)
+            sauvegarder_mapping_gps_persistant(default_map, overwrite=True)
             for k in list(st.session_state.keys()):
                 if k.startswith("gps_sel_boitier_"):
                     del st.session_state[k]
@@ -1399,6 +1417,12 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
             )
             default_idx = options.index(prev) if prev in options else 0
 
+            def _enregistrer_changement_boitier(gps_id_target: int = gps_id):
+                k_w = f"gps_sel_boitier_{gps_id_target}"
+                val_w = st.session_state.get(k_w)
+                if val_w and val_w not in [placeholder, TRIGGER_NOUVEAU_JOUEUR]:
+                    sauvegarder_mapping_gps_persistant({str(gps_id_target): val_w})
+
             with c_select:
                 choix = st.selectbox(
                     f"Boîtier GPS n°{gps_id}",
@@ -1406,6 +1430,7 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
                     index=default_idx,
                     format_func=format_affichage_joueur,
                     key=f"gps_sel_boitier_{gps_id}",
+                    on_change=_enregistrer_changement_boitier,
                 )
 
                 if choix not in [placeholder, TRIGGER_NOUVEAU_JOUEUR]:
@@ -1446,6 +1471,10 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
                 st.session_state["gps_mapping"][str(gps_id)] = choix
                 st.session_state["mapping_gps_joueurs"][gps_id] = choix
                 st.session_state["mapping_gps_joueurs"][str(gps_id)] = choix
+
+    # Synchronisation immédiate des attributions actives dans le stockage persistant
+    if mapping:
+        sauvegarder_mapping_gps_persistant(mapping)
 
     # 4. Sécurité anti-doublon stricte lors de l'attribution des GPS
     joueurs_assignes: Dict[str, List[int]] = {}
@@ -1498,7 +1527,7 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
                 st.session_state["step2_validated"] = True
                 st.session_state["gps_mapping"] = mapping
                 st.session_state["mapping_gps_joueurs"] = mapping
-                sauvegarder_mapping_gps_persistant(mapping)
+                sauvegarder_mapping_gps_persistant(mapping, last_file_sig=st.session_state.get("uploaded_file_sig"))
                 st.toast("✅ Effectif et association GPS validés et mémorisés avec succès !")
                 st.rerun()
 
@@ -2545,14 +2574,14 @@ def generer_graphique_jauges_groupe_matplotlib(
     metrics: Dict[str, Tuple[float, float]],
 ) -> io.BytesIO:
     """
-    Génère une figure 2x2 propre regroupant les 4 duels de barres 'Objectif vs Réalisé'
+    Génère une figure 2x2 propre et aérée regroupant les 4 duels de barres 'Objectif vs Réalisé'
     du module 'Retour Journée' pour un groupe donné :
     1. Objectif Distance (m) vs Réalisé
     2. Obj. HSR (m) vs Réalisé (Z3)
     3. Obj. VHSR (m) vs Réalisé (Z4+Z5)
     4. Obj. ACC/DEC vs Réalisé
     """
-    fig, axes = plt.subplots(2, 2, figsize=(6.2, 7.0), dpi=180)
+    fig, axes = plt.subplots(2, 2, figsize=(10.5, 5.2), dpi=180)
     fig.patch.set_facecolor("#FFFFFF")
 
     cards_def = [
@@ -2574,7 +2603,7 @@ def generer_graphique_jauges_groupe_matplotlib(
         pct = (val_real / val_obj * 100.0) if val_obj > 0 else 0.0
 
         x = np.array([0, 1])
-        width = 0.52
+        width = 0.44
 
         bars = ax.bar(
             x,
@@ -2585,9 +2614,9 @@ def generer_graphique_jauges_groupe_matplotlib(
             zorder=3,
         )
 
-        ax.set_title(title, fontsize=9.2, fontweight="bold", color="#1F4E79", pad=9)
+        ax.set_title(title, fontsize=10.5, fontweight="bold", color="#1F4E79", pad=10)
         ax.set_xticks(x)
-        ax.set_xticklabels(["Objectif", "Réalisé"], fontsize=8.5, fontweight="bold", color="#334155")
+        ax.set_xticklabels(["Objectif", "Réalisé"], fontsize=9.5, fontweight="bold", color="#334155")
 
         max_v = max(val_obj, val_real, 1.0)
         ax.set_ylim(0, max_v * 1.30)
@@ -2606,14 +2635,14 @@ def generer_graphique_jauges_groupe_matplotlib(
             0, val_obj + (max_v * 0.04),
             _fmt(val_obj, unit),
             ha="center", va="bottom",
-            fontsize=8.2, fontweight="bold", color="#1F4E79"
+            fontsize=9.2, fontweight="bold", color="#1F4E79"
         )
 
         ax.text(
             1, val_real + (max_v * 0.04),
             _fmt(val_real, unit),
             ha="center", va="bottom",
-            fontsize=8.2, fontweight="bold", color="#A30000"
+            fontsize=9.2, fontweight="bold", color="#A30000"
         )
 
         # Affichage du % à l'intérieur de la barre rouge ou au-dessus si la barre est très petite
@@ -2622,7 +2651,7 @@ def generer_graphique_jauges_groupe_matplotlib(
                 1, val_real * 0.48,
                 f"{pct:.0f}%",
                 ha="center", va="center",
-                fontsize=11.5, fontweight="bold", color="#FFFFFF",
+                fontsize=12.5, fontweight="bold", color="#FFFFFF",
                 zorder=4
             )
         else:
@@ -2630,7 +2659,7 @@ def generer_graphique_jauges_groupe_matplotlib(
                 1, val_real + (max_v * 0.14),
                 f"({pct:.0f}%)",
                 ha="center", va="bottom",
-                fontsize=8.5, fontweight="bold", color="#A30000",
+                fontsize=9.2, fontweight="bold", color="#A30000",
                 zorder=4
             )
 
@@ -2918,6 +2947,144 @@ def _render_podium_section_pdf(
             pdf.cell(40.0, row_h, safe_latin1(p_stat), align="R")
 
 
+def _render_podium_page_aere(
+    pdf: Any,
+    podium_data: Dict[str, Dict[str, Any]],
+    group_name: str,
+    subtitle_map: Optional[Dict[str, str]] = None,
+) -> None:
+    """
+    Rend une page podium dédiée, ultra-aérée et prestigieuse pour une ligne de poste RCA.
+    Organise les 3 catégories (Top Speed, % Marche, Haute Intensité) en 3 grandes colonnes verticales
+    côte-à-côte avec bandeau supérieur, badges de podium, photos de profil et statistiques en grand format.
+    """
+    categories_config = [
+        {
+            "key": "Top speed (km/h)",
+            "title": "TOP SPEED (km/h)",
+            "def_sub": "Vitesse Maximale",
+            "color": (31, 78, 121),
+        },
+        {
+            "key": "% de marche",
+            "title": "% DE MARCHE",
+            "def_sub": "Moins marche (> 0%)",
+            "color": (46, 90, 136),
+        },
+        {
+            "key": "Haute intensité (m)",
+            "title": "HAUTE INTENSITÉ (m)",
+            "def_sub": "Cumul Z3 + Z4 + Z5 > 14.4 km/h",
+            "color": (163, 0, 0),
+        },
+    ]
+
+    rank_badges = {
+        1: {"label": "1er", "bg": (217, 119, 6), "fg": (255, 255, 255)},
+        2: {"label": "2e", "bg": (100, 116, 139), "fg": (255, 255, 255)},
+        3: {"label": "3e", "bg": (180, 83, 9), "fg": (255, 255, 255)},
+    }
+
+    col_w = 87.0
+    col_gap = 6.0
+    x_start = 12.0
+    y_start = 23.0
+    banner_h = 14.0
+    card_h = 47.0
+    card_gap = 3.5
+
+    for c_idx, cat in enumerate(categories_config):
+        x_c = x_start + c_idx * (col_w + col_gap)
+        accent_color = cat["color"]
+
+        # 1. En-tête de catégorie
+        pdf.set_fill_color(*accent_color)
+        pdf.rect(x_c, y_start, col_w, banner_h, style="F")
+
+        # Liseré doré décoratif
+        pdf.set_fill_color(212, 175, 55)
+        pdf.rect(x_c, y_start + banner_h - 1.0, col_w, 1.0, style="F")
+
+        pdf.set_xy(x_c + 2.0, y_start + 1.2)
+        pdf.set_font("Helvetica", "B", 11.0)
+        pdf.set_text_color(255, 255, 255)
+        pdf.cell(col_w - 4.0, 5.5, safe_latin1(cat["title"]), align="C")
+
+        sub_txt = subtitle_map.get(cat["key"], cat["def_sub"]) if subtitle_map else cat["def_sub"]
+        pdf.set_xy(x_c + 2.0, y_start + 7.2)
+        pdf.set_font("Helvetica", "I", 8.5)
+        pdf.set_text_color(226, 232, 240)
+        pdf.cell(col_w - 4.0, 4.8, safe_latin1(sub_txt), align="C")
+
+        # 2. Les 3 fiches joueurs
+        cat_data = podium_data.get(cat["key"], {})
+        players = cat_data.get("players", [])
+
+        y_cards_start = y_start + banner_h + 3.0
+
+        for r_idx in range(1, 4):
+            y_card = y_cards_start + (r_idx - 1) * (card_h + card_gap)
+            p_entry = players[r_idx - 1] if len(players) >= r_idx else {}
+            p_name = safe_latin1(p_entry.get("name", "-"))
+            p_stat = safe_latin1(p_entry.get("stat", "-"))
+
+            # Carte fond blanc avec contour fin
+            pdf.set_fill_color(255, 255, 255)
+            pdf.set_draw_color(203, 213, 225)
+            pdf.rect(x_c, y_card, col_w, card_h, style="FD")
+
+            # Petit liseré d'accent à gauche de la carte
+            pdf.set_fill_color(*accent_color)
+            pdf.rect(x_c, y_card, 2.5, card_h, style="F")
+
+            # Badge de rang (1er, 2e, 3e) en haut à gauche
+            badge = rank_badges.get(r_idx, {"label": f"{r_idx}e", "bg": (100, 116, 139), "fg": (255, 255, 255)})
+            pdf.set_fill_color(*badge["bg"])
+            pdf.rect(x_c + 5.0, y_card + 3.0, 15.0, 7.5, style="F")
+            pdf.set_xy(x_c + 5.0, y_card + 3.0)
+            pdf.set_font("Helvetica", "B", 8.5)
+            pdf.set_text_color(*badge["fg"])
+            pdf.cell(15.0, 7.5, badge["label"], align="C")
+
+            # Statistique en haut à droite
+            pdf.set_xy(x_c + 22.0, y_card + 3.0)
+            pdf.set_font("Helvetica", "B", 10.0)
+            pdf.set_text_color(*accent_color)
+            pdf.cell(col_w - 26.0, 7.5, safe_latin1(p_stat), align="R")
+
+            # Photo du joueur au centre
+            photo_path = obtenir_chemin_photo(p_name) if p_name and p_name != "-" else None
+            has_photo = bool(photo_path and os.path.isfile(photo_path) and os.path.basename(photo_path) != "avatar_par_defaut.jpg")
+            photo_size = 24.0
+            photo_x = x_c + (col_w - photo_size) / 2.0
+            photo_y = y_card + 11.5
+
+            if has_photo:
+                try:
+                    pdf.image(photo_path, x=photo_x, y=photo_y, w=photo_size, h=photo_size)
+                    pdf.set_draw_color(203, 213, 225)
+                    pdf.rect(photo_x, photo_y, photo_size, photo_size, style="D")
+                except Exception:
+                    has_photo = False
+
+            if not has_photo:
+                # Avatar placeholder propre
+                pdf.set_fill_color(241, 245, 249)
+                pdf.set_draw_color(203, 213, 225)
+                pdf.rect(photo_x, photo_y, photo_size, photo_size, style="FD")
+                pdf.set_xy(photo_x, photo_y + 6.0)
+                pdf.set_font("Helvetica", "B", 12)
+                pdf.set_text_color(148, 163, 184)
+                pdf.cell(photo_size, 10, "?", align="C")
+
+            # Nom du joueur en bas
+            name_disp = p_name if len(p_name) <= 22 else p_name[:20] + ".."
+            pdf.set_xy(x_c + 3.0, y_card + 37.0)
+            pdf.set_font("Helvetica", "B", 9.5)
+            pdf.set_text_color(30, 41, 59)
+            pdf.cell(col_w - 6.0, 7.0, safe_latin1(name_disp), align="C")
+
+
 def generer_rapport_pdf_coachs(
     df_indiv: pd.DataFrame,
     date_seance: Optional[Any] = None,
@@ -2925,7 +3092,7 @@ def generer_rapport_pdf_coachs(
     moyennes_groupes: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> bytes:
     """
-    Génère un rapport PDF multi-pages complet de 4 pages au format Paysage (Landscape),
+    Génère un rapport PDF multi-pages complet et aéré de 7 pages au format Paysage (Landscape),
     calqué fidèlement sur le modèle officiel de la préparatrice physique du RCA :
 
     - PAGE 1 : SYNTHÈSE GLOBALE DE LA SÉANCE
@@ -2934,15 +3101,20 @@ def generer_rapport_pdf_coachs(
       * Note du Préparateur Physique (synthèse narrative IA ou factuelle).
       * Graphique comparatif des 3 groupes (Distance Moyenne & HSR Z3 Moyen).
       * Podium Général de la Séance (Top Speed, % de marche, Haute Intensité cumulée Z3+Z4+Z5).
-      * Pied de page : Document Staff Technique RCA - Page 1/4.
+      * Pied de page : Document Staff Technique RCA - Page 1/7.
 
-    - PAGES 2, 3 et 4 : UNE PAGE DÉDIÉE PAR LIGNE DE POSTE (5 de devant, 3ème Ligne, Trois-quarts)
-      * Bandeau d'en-tête avec sous-titre doré : RETOUR JOURNÉE & PODIUMS — [Nom du Groupe].
-      * Tableau RETOUR JOURNÉE - Données par groupe :
-        Ligne 1 (Objectif) & Ligne 2 (Réalisée avec % d'accomplissement).
-      * 4 Graphiques 'Objectif vs Réalisé' du Groupe (Distance, HSR Z3, VHSR, ACC/DEC).
-      * Podium spécifique à la Ligne de Poste (avec moyenne du groupe affichée dans chaque bandeau).
-      * Pied de page : Page 2/4, Page 3/4, Page 4/4.
+    - PAGES 2, 4 et 6 : RETOUR JOURNÉE PAR LIGNE DE POSTE (5 de devant, 3ème Ligne, Trois-quarts)
+      * Bandeau d'en-tête avec sous-titre doré : RETOUR JOURNÉE — [Nom du Groupe].
+      * Tableau RETOUR JOURNÉE - Données par groupe (Objectif vs Réalisé + % accomplissement).
+      * 4 Graphiques 'Objectif vs Réalisé' du Groupe en pleine largeur 2x2.
+      * Pied de page : Page 2/7, Page 4/7, Page 6/7.
+
+    - PAGES 3, 5 et 7 : PODIUMS DÉDIÉS DE LA LIGNE (5 de devant, 3ème Ligne, Trois-quarts)
+      * Bandeau d'en-tête avec sous-titre doré : PODIUMS DE LA LIGNE — [Nom du Groupe].
+      * 3 grandes colonnes verticales côte-à-côte (Top Speed, % de marche, Haute Intensité).
+      * Bandeau de catégorie avec moyenne officielle du groupe.
+      * Cartes individuelles ultra-aérées avec badge de rang, photo 24x24 mm, nom et stat en grand format.
+      * Pied de page : Page 3/7, Page 5/7, Page 7/7.
     """
     date_texte = safe_latin1(formater_date_seance_fr(date_seance))
 
@@ -3003,7 +3175,7 @@ def generer_rapport_pdf_coachs(
             self.set_y(-10)
             self.set_font("Helvetica", "I", 8)
             self.set_text_color(148, 163, 184)
-            self.cell(0, 8, f"Document Staff Technique RCA - Page {self.page_no()}/4", align="C")
+            self.cell(0, 8, f"Document Staff Technique RCA - Page {self.page_no()}/7", align="C")
 
     pdf = RCACoachPDF(orientation="L", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=False)
@@ -3119,12 +3291,15 @@ def generer_rapport_pdf_coachs(
     )
 
     # =========================================================================
-    # PAGES 2, 3 et 4 : UNE PAGE DÉDIÉE PAR LIGNE DE POSTE
+    # PAGES 2 À 7 : 2 PAGES DÉDIÉES PAR LIGNE DE POSTE (RETOUR JOURNÉE + PODIUMS)
     # =========================================================================
     groupes_pages = ["5 de devant", "3ème Ligne", "Trois-quarts"]
 
     for grp in groupes_pages:
-        pdf.current_subtitle = f"RETOUR JOURNÉE & PODIUMS — {grp.upper()}"
+        # ---------------------------------------------------------------------
+        # PAGE A (Pages 2, 4, 6) : RETOUR JOURNÉE (TABLEAU + 4 GRAPHIQUES WIDE)
+        # ---------------------------------------------------------------------
+        pdf.current_subtitle = f"RETOUR JOURNÉE — {grp.upper()}"
         pdf.add_page()
 
         # Récupération des objectifs et des valeurs réalisées par le groupe
@@ -3162,7 +3337,7 @@ def generer_rapport_pdf_coachs(
 
         # 1. Haut de page : Tableau « RETOUR JOURNÉE - Données par groupe »
         table_x = 12.0
-        table_y = 20.0
+        table_y = 21.0
         col_w_grp = 48.0
         col_w_num = 45.0  # 48.0 + 5 * 45.0 = 273.0 mm
 
@@ -3182,42 +3357,42 @@ def generer_rapport_pdf_coachs(
             (col_w_num, "ACC / DEC n°", "C"),
         ]
         for w, h_title, align in headers:
-            pdf.cell(w, 6.2, safe_latin1(h_title), border=1, align=align, fill=True)
+            pdf.cell(w, 6.5, safe_latin1(h_title), border=1, align=align, fill=True)
 
         # Ligne 1 : Objectif
-        pdf.set_xy(table_x, table_y + 6.2)
+        pdf.set_xy(table_x, table_y + 6.5)
         pdf.set_fill_color(241, 245, 249)
         pdf.set_draw_color(203, 213, 225)
         pdf.set_text_color(71, 85, 105)
         pdf.set_font("Helvetica", "B", 8.0)
-        pdf.cell(col_w_grp, 5.8, "  Objectif", border=1, align="L", fill=True)
+        pdf.cell(col_w_grp, 6.0, "  Objectif", border=1, align="L", fill=True)
 
         pdf.set_font("Helvetica", "", 8.0)
         pdf.set_text_color(31, 78, 121)
-        pdf.cell(col_w_num, 5.8, f"{int(round(obj_dist)):,d} m".replace(",", " "), border=1, align="C", fill=True)
-        pdf.cell(col_w_num, 5.8, f"{int(round(obj_hsr)):,d} m".replace(",", " "), border=1, align="C", fill=True)
-        pdf.cell(col_w_num, 5.8, f"{int(round(obj_vhsr)):,d} m".replace(",", " "), border=1, align="C", fill=True)
+        pdf.cell(col_w_num, 6.0, f"{int(round(obj_dist)):,d} m".replace(",", " "), border=1, align="C", fill=True)
+        pdf.cell(col_w_num, 6.0, f"{int(round(obj_hsr)):,d} m".replace(",", " "), border=1, align="C", fill=True)
+        pdf.cell(col_w_num, 6.0, f"{int(round(obj_vhsr)):,d} m".replace(",", " "), border=1, align="C", fill=True)
         pdf.set_text_color(148, 163, 184)
-        pdf.cell(col_w_num, 5.8, "/", border=1, align="C", fill=True)
+        pdf.cell(col_w_num, 6.0, "/", border=1, align="C", fill=True)
         pdf.set_text_color(31, 78, 121)
-        pdf.cell(col_w_num, 5.8, f"{int(round(obj_acc)):,d}".replace(",", " "), border=1, align="C", fill=True)
+        pdf.cell(col_w_num, 6.0, f"{int(round(obj_acc)):,d}".replace(",", " "), border=1, align="C", fill=True)
 
         # Ligne 2 : Réalisée
-        pdf.set_xy(table_x, table_y + 12.0)
+        pdf.set_xy(table_x, table_y + 12.5)
         pdf.set_fill_color(255, 255, 255)
         pdf.set_draw_color(203, 213, 225)
         pdf.set_text_color(163, 0, 0)
         pdf.set_font("Helvetica", "B", 8.0)
-        pdf.cell(col_w_grp, 6.4, "  Realisee", border=1, align="L", fill=True)
+        pdf.cell(col_w_grp, 6.8, "  Realisee", border=1, align="L", fill=True)
 
         pdf.set_text_color(30, 41, 59)
-        pdf.cell(col_w_num, 6.4, f"{int(round(real_dist)):,d} m ({pct_dist:.0f}%)".replace(",", " "), border=1, align="C", fill=True)
-        pdf.cell(col_w_num, 6.4, f"{int(round(real_hsr)):,d} m ({pct_hsr:.0f}%)".replace(",", " "), border=1, align="C", fill=True)
-        pdf.cell(col_w_num, 6.4, f"{int(round(real_vhsr)):,d} m ({pct_vhsr:.0f}%)".replace(",", " "), border=1, align="C", fill=True)
-        pdf.cell(col_w_num, 6.4, f"{real_dpm:.1f} m/min", border=1, align="C", fill=True)
-        pdf.cell(col_w_num, 6.4, f"{int(round(real_acc)):,d} ({pct_acc:.0f}%)".replace(",", " "), border=1, align="C", fill=True)
+        pdf.cell(col_w_num, 6.8, f"{int(round(real_dist)):,d} m ({pct_dist:.0f}%)".replace(",", " "), border=1, align="C", fill=True)
+        pdf.cell(col_w_num, 6.8, f"{int(round(real_hsr)):,d} m ({pct_hsr:.0f}%)".replace(",", " "), border=1, align="C", fill=True)
+        pdf.cell(col_w_num, 6.8, f"{int(round(real_vhsr)):,d} m ({pct_vhsr:.0f}%)".replace(",", " "), border=1, align="C", fill=True)
+        pdf.cell(col_w_num, 6.8, f"{real_dpm:.1f} m/min", border=1, align="C", fill=True)
+        pdf.cell(col_w_num, 6.8, f"{int(round(real_acc)):,d} ({pct_acc:.0f}%)".replace(",", " "), border=1, align="C", fill=True)
 
-        # 2. Milieu/Gauche : Les 4 Graphiques « Objectif vs Réalisé » du Groupe
+        # 2. Graphiques : 4 barres comparatives en pleine largeur 2x2
         grp_metrics = {
             "Objectif Distance (m)": (obj_dist, real_dist),
             "Obj. HSR": (obj_hsr, real_hsr),
@@ -3225,12 +3400,17 @@ def generer_rapport_pdf_coachs(
             "Obj. ACC/DEC": (obj_acc, real_acc),
         }
         buf_jauges = generer_graphique_jauges_groupe_matplotlib(grp, grp_metrics)
-        content_y = 41.5
-        chart_w = 133
-        chart_h = 151
-        pdf.image(buf_jauges, x=12, y=content_y, w=chart_w, h=chart_h)
+        chart_y = 43.0
+        chart_w = 273.0
+        chart_h = 146.0
+        pdf.image(buf_jauges, x=12.0, y=chart_y, w=chart_w, h=chart_h)
 
-        # 3. Droite : Le Podium spécifique à la Ligne de Poste (avec moyennes du groupe)
+        # ---------------------------------------------------------------------
+        # PAGE B (Pages 3, 5, 7) : PODIUMS DE LA LIGNE DÉDIÉS ET AÉRÉS
+        # ---------------------------------------------------------------------
+        pdf.current_subtitle = f"PODIUMS DE LA LIGNE — {grp.upper()}"
+        pdf.add_page()
+
         df_grp = df_indiv[df_indiv["Groupe"] == grp]
         podium_grp = generer_podium_dynamique(df_grp)
 
@@ -3249,13 +3429,10 @@ def generer_rapport_pdf_coachs(
             "Haute intensité (m)": f"Moyenne : {int(round(hi_grp_moy)):,d} m".replace(",", " "),
         }
 
-        _render_podium_section_pdf(
+        _render_podium_page_aere(
             pdf=pdf,
             podium_data=podium_grp,
-            x_pod=149,
-            y_pod=content_y,
-            w_pod=136,
-            title_header=f"PODIUMS — {grp.upper()}",
+            group_name=grp,
             subtitle_map=sub_map,
         )
 
@@ -4111,13 +4288,26 @@ def main() -> None:
 
     else:
         file_sig = f"{uploaded_file.name}_{uploaded_file.size}"
+        persisted_sig = None
+        if os.path.exists(CONFIG_GPS_FILE):
+            try:
+                with open(CONFIG_GPS_FILE, "r", encoding="utf-8") as f:
+                    d_cfg = json.load(f)
+                    if isinstance(d_cfg, dict):
+                        persisted_sig = d_cfg.get("last_validated_file_sig")
+            except Exception:
+                pass
+
         if st.session_state.get("uploaded_file_sig") != file_sig:
             st.session_state["uploaded_file_sig"] = file_sig
-            st.session_state["step2_validated"] = False
-            # Réinitialise les clés temporaires des widgets selectbox pour forcer le pré-remplissage avec le mapping mémorisé
-            for k in list(st.session_state.keys()):
-                if k.startswith("gps_sel_boitier_"):
-                    del st.session_state[k]
+            # Si le fichier a déjà été validé précédemment, restaurer automatiquement la validation au rafraîchissement
+            if persisted_sig and persisted_sig == file_sig:
+                st.session_state["step2_validated"] = True
+            else:
+                st.session_state["step2_validated"] = False
+                for k in list(st.session_state.keys()):
+                    if k.startswith("gps_sel_boitier_"):
+                        del st.session_state[k]
             with st.spinner("Lecture et analyse de l'export Catapult One..."):
                 try:
                     st.session_state["df_raw"] = load_catapult_file(uploaded_file)
@@ -4619,11 +4809,11 @@ def main() -> None:
         pdf_filename = f"Rapport_Seance_GPS_RCA_{clean_date_tag}.pdf"
 
         st.download_button(
-            label="📄 Télécharger le Rapport PDF Coachs",
+            label="📄 Télécharger le Rapport PDF Coachs (7 pages A4 Paysage)",
             data=pdf_bytes,
             file_name=pdf_filename,
             mime="application/pdf",
-            help="Télécharge le rapport récapitulatif PDF imprimable format paysage (A4) pour le staff technique RCA.",
+            help="Télécharge le rapport récapitulatif PDF imprimable format paysage (A4, 7 pages aérées) pour le staff technique RCA.",
             key="btn_download_pdf",
         )
 
