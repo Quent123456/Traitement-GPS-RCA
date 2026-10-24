@@ -53,6 +53,9 @@ import streamlit as st
 # Module dédié à la gestion des photos de l'effectif sénior RCA (extraction PDF, matching, base64)
 import photo_manager
 
+# Module indépendant de Mémoire sélective & Rapports Hebdomadaires RCA
+import weekly_memory
+
 # ==============================================================================
 # 0. EFFECTIF SÉNIORS RCA & CONFIGURATION ATHLÉTIQUE
 # ==============================================================================
@@ -292,6 +295,12 @@ def supprimer_joueur_personnalise(nom: str) -> Tuple[bool, str]:
 
             # Nettoyage et suppression propre de la photo associée dans assets/players_photos/
             photo_manager.delete_player_photo(nom)
+
+            # Nettoyage de toutes les présences du joueur dans la mémoire hebdomadaire (règle sans orphelin)
+            try:
+                weekly_memory.delete_player_records(nom)
+            except Exception:
+                pass
 
             # Nettoyage du mapping GPS si ce joueur y était associé
             current_gps_map = charger_mapping_gps_persistant()
@@ -693,8 +702,12 @@ def render_podium_section(podium_data: Dict[str, Dict[str, Any]]) -> None:
             category_icon=icon,
             players=players,
         )
+        clean_html = "\n".join([line.lstrip() for line in card_html.splitlines() if line.strip()])
         with cols[idx % 3]:
-            st.markdown(card_html, unsafe_allow_html=True)
+            if hasattr(st, "html"):
+                st.html(clean_html)
+            else:
+                st.markdown(clean_html, unsafe_allow_html=True)
 
 
 # ==============================================================================
@@ -1471,17 +1484,51 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
 
                 if choix not in [placeholder, TRIGGER_NOUVEAU_JOUEUR]:
                     poste_d = joueurs_data.get(choix, "Inconnu")
-                    grp_rca = mapper_poste_vers_groupe_rca(poste_d, choix)
-                    if grp_rca == "5 de devant":
+                    grp_rca_defaut = mapper_poste_vers_groupe_rca(poste_d, choix)
+
+                    # Initialisation de la mémoire de session pour les surcharges de postes
+                    if "session_player_postes" not in st.session_state:
+                        st.session_state["session_player_postes"] = {}
+
+                    groupes_options = ["5 de devant", "3ème Ligne", "Trois-quarts"]
+                    grp_actuel = st.session_state["session_player_postes"].get(choix, grp_rca_defaut)
+                    if grp_actuel not in groupes_options:
+                        grp_actuel = grp_rca_defaut
+
+                    idx_grp = groupes_options.index(grp_actuel) if grp_actuel in groupes_options else 2
+
+                    c_sel_grp, c_chk_persist = st.columns([1.7, 1.3])
+                    with c_sel_grp:
+                        nouveau_grp = st.selectbox(
+                            f"Poste séance ({choix})",
+                            options=groupes_options,
+                            index=idx_grp,
+                            key=f"session_grp_{gps_id}_{choix}",
+                            help="Modifier en temps réel la catégorie de poste de ce joueur pour la séance en cours",
+                            label_visibility="collapsed",
+                        )
+                        st.session_state["session_player_postes"][choix] = nouveau_grp
+                    with c_chk_persist:
+                        sauvegarder_defaut = st.checkbox(
+                            "📌 Mémoriser",
+                            key=f"chk_save_def_{gps_id}_{choix}",
+                            help="Définir également ce groupe comme poste habituel par défaut dans l'effectif",
+                        )
+                        if sauvegarder_defaut and joueurs_data.get(choix) != nouveau_grp:
+                            joueurs_data[choix] = nouveau_grp
+                            sauvegarder_joueur_personnalise(choix, nouveau_grp, groupe=nouveau_grp)
+                            st.toast(f"Poste par défaut de {choix} enregistré : {nouveau_grp}")
+
+                    if nouveau_grp == "5 de devant":
                         badge_html = '<span style="background-color:#EFF6FF;color:#1D4ED8;border:1px solid #BFDBFE;padding:2px 7px;border-radius:5px;font-weight:700;font-size:0.75rem;">🏉 5 de devant</span>'
-                    elif grp_rca == "3ème Ligne":
+                    elif nouveau_grp == "3ème Ligne":
                         badge_html = '<span style="background-color:#F0FDF4;color:#15803D;border:1px solid #BBF7D0;padding:2px 7px;border-radius:5px;font-weight:700;font-size:0.75rem;">🏉 3ème Ligne</span>'
                     else:
                         badge_html = '<span style="background-color:#FEF2F2;color:#B91C1C;border:1px solid #FECACA;padding:2px 7px;border-radius:5px;font-weight:700;font-size:0.75rem;">🏉 Trois-quarts</span>'
 
                     st.markdown(
-                        f"<div style='font-size:0.80rem;color:#475569;margin-top:-6px;margin-bottom:8px;'>"
-                        f"Poste : <strong>{poste_d}</strong> &nbsp;➔&nbsp; {badge_html}</div>",
+                        f"<div style='font-size:0.78rem;color:#475569;margin-top:-4px;margin-bottom:8px;'>"
+                        f"Profil : <em>{poste_d}</em> &nbsp;➔&nbsp; Séance : {badge_html}</div>",
                         unsafe_allow_html=True,
                     )
 
@@ -1680,6 +1727,19 @@ def assign_player_groups(df: pd.DataFrame, df_raw: Optional[pd.DataFrame] = None
     for idx, p in enumerate(df[player_col]):
         p_clean = str(p).strip()
         p_lower = p_clean.lower()
+
+        # 0. Surcharge en temps réel spécifique à la séance (Étape 2 - Attribution GPS)
+        session_overrides = st.session_state.get("session_player_postes", {}) if hasattr(st, "session_state") else {}
+        matched_override = None
+        for s_nom, s_grp in session_overrides.items():
+            if s_nom and (s_nom.lower() == p_lower or s_nom.lower() in p_lower or p_lower in s_nom.lower()):
+                matched_override = s_grp
+                break
+
+        if matched_override:
+            group_list.append(matched_override)
+            poste_detaille_list.append(matched_override)
+            continue
 
         # 1. Correspondance avec la base de données effectif RCA
         matched_poste = None
@@ -3916,6 +3976,283 @@ def appliquer_filtres_copilote(
 
 
 # ==============================================================================
+# MODULE DE VISUALISATION : RAPPORTS HEBDOMADAIRES & BILAN MULTI-SÉANCES (CHANTIER 3)
+# ==============================================================================
+
+def _creer_semaine_test_demo() -> None:
+    """Crée une semaine de démonstration (Semaine actuelle) avec 3 séances réalistes pour tester instantanément."""
+    curr_year, curr_week = weekly_memory.get_current_iso_week()
+    demo_df = pd.DataFrame(MOCK_DEMO_DATA)
+    rename_m = {
+        "Player Name": "Nom ; Prénom",
+        "Position": "Poste_Detaille",
+        "Distance (km)": "Distance (km)",
+        "Top Speed": "Top Speed (km/h)",
+    }
+    for old_c, new_c in rename_m.items():
+        if old_c in demo_df.columns:
+            demo_df[new_c] = demo_df[old_c]
+
+    demo_df = assign_player_groups(demo_df)
+    demo_df["Distance haute intensité (m)"] = 180.0
+    demo_df["Haute intensité Podium (m)"] = 180.0
+    demo_df["Distance Per Min (m/min)"] = 72.0
+    demo_df["%Marche "] = 74.5
+    demo_df["Temps de jeu "] = 75.0
+
+    weekly_memory.save_session_to_memory(
+        demo_df, curr_year, curr_week, "Mardi (Entraînement)", "20/10/2026", "Séance axée aérobie & volume"
+    )
+    weekly_memory.save_session_to_memory(
+        demo_df, curr_year, curr_week, "Mercredi (Entraînement)", "21/10/2026", "Séance haute intensité & vitesse"
+    )
+    weekly_memory.save_session_to_memory(
+        demo_df, curr_year, curr_week, "Vendredi (Entraînement)", "23/10/2026", "Mise en place & lancements de jeu"
+    )
+
+
+def render_weekly_reports_view() -> None:
+    """
+    Rendu de la vue indépendante '📅 Rapports Hebdomadaires' :
+    1. Sélection de la semaine enregistrée.
+    2. Sélection et nettoyage des séances avec cases à cocher et suppression.
+    3. Agrégation instantanée par joueur sur la semaine (sommes, maximums, moyennes, présences).
+    4. Comparatif de charge journalière (Mardi vs Mercredi vs Vendredi) avec graphique Plotly.
+    5. Podiums hebdomadaires avec photos réelles et HTML nettoyé.
+    6. Tableaux récapitulatifs par catégorie de poste.
+    7. Export PDF du rapport hebdomadaire.
+    """
+    st.markdown('<div class="section-header">📅 Mémoire & Rapports Hebdomadaires RCA</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-desc">'
+        'Module de suivi à long terme permettant de consolider plusieurs séances d\'une même semaine '
+        '(ex: Mardi, Mercredi, Vendredi et Match) en un bilan athlétique hebdomadaire complet pour les coachs.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    weeks_list = weekly_memory.list_saved_weeks()
+
+    if not weeks_list:
+        st.info(
+            "📂 **Aucune semaine enregistrée dans la mémoire hebdomadaire.**\n\n"
+            "Pour alimenter ce module :\n"
+            "1. Rendez-vous sur l'onglet **« 🏉 Séance du jour »** ci-dessus.\n"
+            "2. Importez et validez votre séance Catapult.\n"
+            "3. En bas de la page à l'Étape 3, ouvrez l'encart **« 💾 Archiver cette séance dans la mémoire hebdomadaire »** et cliquez sur **« ✅ Enregistrer ce rapport... »**."
+        )
+        if st.button("🧪 Générer un exemple de semaine de test (Semaine 43 — 3 séances)", type="secondary", key="btn_gen_demo_week"):
+            _creer_semaine_test_demo()
+            st.toast("Semaine de démonstration créée avec succès !")
+            st.rerun()
+        return
+
+    # 1. Sélection de la semaine
+    col_sel_w, col_del_w = st.columns([3.8, 1.2])
+    with col_sel_w:
+        week_options = {w["label"]: w for w in weeks_list}
+        selected_label = st.selectbox(
+            "Choisir la semaine à analyser :",
+            options=list(week_options.keys()),
+            key="weekly_view_selected_week",
+        )
+        w_meta = week_options[selected_label]
+        year = w_meta["year"]
+        week_num = w_meta["week_num"]
+
+    with col_del_w:
+        st.write("")
+        st.write("")
+        if st.button("🗑️ Supprimer la semaine", key=f"btn_del_entire_week_{year}_{week_num}", help="Supprime définitivement cette semaine de la mémoire"):
+            fp = w_meta["file_path"]
+            if os.path.exists(fp):
+                os.remove(fp)
+                st.toast(f"Semaine {week_num} supprimée.")
+                st.rerun()
+
+    week_data = weekly_memory.load_week_data(year, week_num)
+    sessions = week_data.get("sessions", {})
+
+    if not sessions:
+        st.warning("Cette semaine ne contient aucune séance.")
+        return
+
+    # 2. Sélection et nettoyage des séances
+    st.markdown("#### 📋 Séances enregistrées pour cette semaine")
+    st.caption("Cochez les séances à inclure dans le calcul du rapport hebdomadaire, ou supprimez celles ajoutées par erreur :")
+
+    selected_sids = []
+    nb_cols = min(len(sessions), 4)
+    col_cards = st.columns(nb_cols if nb_cols > 0 else 1)
+
+    for idx, (s_id, s_info) in enumerate(sessions.items()):
+        target_col = col_cards[idx % len(col_cards)]
+        with target_col:
+            st.markdown(
+                f"""
+                <div style="background:#FFFFFF;border:1.5px solid #CBD5E1;border-radius:10px;padding:12px;margin-bottom:8px;box-shadow:0 2px 6px rgba(0,0,0,0.04);">
+                    <div style="font-weight:800;color:#1F4E79;font-size:0.95rem;">🏉 {s_info.get('day_type', s_id)}</div>
+                    <div style="font-size:0.75rem;color:#64748B;margin-top:2px;">📅 {s_info.get('date', '-')}</div>
+                    <div style="font-size:0.80rem;color:#334155;margin-top:6px;">
+                        👥 <strong>{s_info.get('num_players', 0)}</strong> joueurs<br/>
+                        🏃 <strong>{s_info.get('total_distance_km', 0.0)} km</strong> cumulés<br/>
+                        🔥 <strong>{s_info.get('total_hi_m', 0.0)} m</strong> haute int.
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            c_chk, c_del = st.columns([2.5, 1.5])
+            with c_chk:
+                is_checked = st.checkbox(
+                    "Inclure",
+                    value=True,
+                    key=f"chk_session_{year}_{week_num}_{s_id}",
+                )
+                if is_checked:
+                    selected_sids.append(s_id)
+            with c_del:
+                if st.button("🗑️", key=f"btn_del_session_{year}_{week_num}_{s_id}", help=f"Supprimer {s_info.get('day_type', s_id)}"):
+                    weekly_memory.delete_session_from_memory(year, week_num, s_id)
+                    st.toast(f"Séance {s_info.get('day_type', s_id)} supprimée.")
+                    st.rerun()
+
+    if not selected_sids:
+        st.warning("⚠️ Veuillez cocher au moins une séance pour générer le rapport hebdomadaire.")
+        return
+
+    # 3. Agrégation par joueur sur la semaine
+    df_agg, synthese_jours = weekly_memory.aggregate_weekly_sessions(week_data, selected_session_ids=selected_sids)
+
+    if df_agg.empty:
+        st.warning("Aucune donnée joueur exploitable dans les séances sélectionnées.")
+        return
+
+    st.divider()
+
+    # KPIs Globaux de la semaine
+    tot_dist_semaine = df_agg["Distance Totale (km)"].sum()
+    tot_hi_semaine = df_agg["Haute intensité (m)"].sum()
+    avg_dpm_semaine = df_agg["Distance/min (m/min)"].mean()
+    max_ts_val = df_agg["Top Speed (km/h)"].max()
+    max_ts_player = df_agg.loc[df_agg["Top Speed (km/h)"] == max_ts_val, "Nom ; Prénom"].iloc[0] if not df_agg.empty else "-"
+
+    kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+    with kpi1:
+        st.metric("Séances consolidées", f"{len(selected_sids)}", f"Semaine {week_num}")
+    with kpi2:
+        st.metric("Joueurs uniques", f"{len(df_agg)}", "Effectif mobilisé")
+    with kpi3:
+        st.metric("Volume Total (km)", f"{tot_dist_semaine:.1f} km", "Cumul semaine")
+    with kpi4:
+        st.metric("Haute Intensité (m)", f"{tot_hi_semaine:,.0f} m", "Cumul > 14.4 km/h")
+    with kpi5:
+        st.metric("Top Speed Max", f"{max_ts_val:.1f} km/h", f"{max_ts_player}")
+
+    # Comparatif de charge journalière (Mardi vs Mercredi vs Vendredi)
+    st.markdown("#### 📊 Comparatif de Charge par Séance de la Semaine")
+    jours_labels = [s.get("day_type", s_id) for s_id, s in sessions.items() if s_id in selected_sids]
+    distances_jours = [s.get("total_distance_km", 0.0) for s_id, s in sessions.items() if s_id in selected_sids]
+    hi_jours = [s.get("total_hi_m", 0.0) for s_id, s in sessions.items() if s_id in selected_sids]
+
+    fig_comp = go.Figure()
+    fig_comp.add_trace(go.Bar(
+        x=jours_labels,
+        y=distances_jours,
+        name="Distance Totale Cumulée (km)",
+        marker_color="#1F4E79",
+        yaxis="y",
+    ))
+    fig_comp.add_trace(go.Bar(
+        x=jours_labels,
+        y=hi_jours,
+        name="Haute Intensité Cumulée (m)",
+        marker_color="#A30000",
+        yaxis="y2",
+    ))
+    fig_comp.update_layout(
+        barmode="group",
+        height=320,
+        margin=dict(l=40, r=40, t=30, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        yaxis=dict(title="Distance (km)", side="left"),
+        yaxis2=dict(title="Haute Intensité (m)", overlaying="y", side="right"),
+        plot_bgcolor="#FFFFFF",
+    )
+    st.plotly_chart(fig_comp, use_container_width=True, config={"displayModeBar": False})
+
+    # Podiums Hebdomadaires
+    st.divider()
+    st.markdown('<div class="section-header">🏆 PODIUMS HEBDOMADAIRES (CUMULS DE LA SEMAINE)</div>', unsafe_allow_html=True)
+    podiums_hebdo = weekly_memory.generer_podiums_hebdomadaires(df_agg)
+
+    c_pod1, c_pod2, c_pod3 = st.columns(3)
+    cols_pod = [c_pod1, c_pod2, c_pod3]
+
+    for p_idx, (cat_name, p_data) in enumerate(podiums_hebdo.items()):
+        if p_idx >= 3:
+            break
+        card_html = photo_manager.render_podium_html_markup(
+            category_title=f"HEBDO : {cat_name}",
+            category_icon=p_data.get("icon", "🏉"),
+            players=p_data.get("players", []),
+        )
+        clean_html = "\n".join([line.lstrip() for line in card_html.splitlines() if line.strip()])
+        with cols_pod[p_idx % 3]:
+            if hasattr(st, "html"):
+                st.html(clean_html)
+            else:
+                st.markdown(clean_html, unsafe_allow_html=True)
+
+    # Tableaux récapitulatifs par groupe de poste
+    st.divider()
+    st.markdown("#### 📋 Détail par Catégorie de Poste sur la Semaine")
+
+    tabs_groupes = st.tabs(["🏉 5 de devant", "🏉 3ème Ligne", "🏉 Trois-quarts", "👥 Tous les joueurs"])
+    cols_display = [
+        "Nom ; Prénom", "Poste_Detaille", "Nombre de séances", "Séances",
+        "Distance Totale (km)", "Haute intensité (m)", "Distance Sprint VHSR (m)",
+        "Top Speed (km/h)", "Distance/min (m/min)", "Temps total (min)",
+    ]
+    cols_valid = [c for c in cols_display if c in df_agg.columns]
+
+    for tab_idx, grp_target in enumerate(["5 de devant", "3ème Ligne", "Trois-quarts", "ALL"]):
+        with tabs_groupes[tab_idx]:
+            if grp_target == "ALL":
+                sub_df = df_agg.copy()
+            else:
+                sub_df = df_agg[df_agg["Groupe"] == grp_target].copy()
+
+            if sub_df.empty:
+                st.info(f"Aucun joueur enregistré dans la catégorie {grp_target} cette semaine.")
+            else:
+                st.dataframe(sub_df[cols_valid], use_container_width=True, hide_index=True)
+
+    # Export PDF du Rapport Hebdomadaire
+    st.divider()
+    st.markdown("#### 📥 Télécharger le Rapport Hebdomadaire PDF pour les Coachs")
+
+    selected_meta = [s for s_id, s in sessions.items() if s_id in selected_sids]
+    pdf_hebdo_bytes = weekly_memory.generate_weekly_pdf_report(
+        df_agg=df_agg,
+        year=year,
+        week_num=week_num,
+        selected_sessions_meta=selected_meta,
+        notes=f"Rapport consolidé sur {len(selected_sids)} séance(s) validée(s).",
+    )
+
+    st.download_button(
+        label=f"📄 Télécharger le Bilan Hebdomadaire PDF (Semaine {week_num} — {year})",
+        data=pdf_hebdo_bytes,
+        file_name=f"Rapport_Hebdomadaire_RCA_Semaine_{week_num:02d}_{year}.pdf",
+        mime="application/pdf",
+        help="Télécharge le rapport hebdomadaire PDF complet avec bandeau RCA, KPIs, comparatif journalier, podiums avec photos et tableaux détaillés par poste.",
+        key="btn_download_weekly_pdf",
+        type="primary",
+    )
+
+
+# ==============================================================================
 # 8. APPLICATION STREAMLIT (INTERFACE UTILISATEUR COMPLÈTE)
 # ==============================================================================
 
@@ -4235,6 +4572,19 @@ def main() -> None:
         '<div class="sub-title">Dashboard dynamique d\'analyse athlétique GPS & Injection automatisée dans le classeur de la préparatrice physique</div>',
         unsafe_allow_html=True,
     )
+
+    # Navigation principale : Basculement instantané entre la séance du jour et les rapports hebdomadaires
+    mode_vue = st.radio(
+        "Navigation principale :",
+        options=["🏉 Séance du jour (Workflow 3 étapes)", "📅 Rapports Hebdomadaires"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="nav_mode_principal",
+    )
+
+    if mode_vue == "📅 Rapports Hebdomadaires":
+        render_weekly_reports_view()
+        return
 
     # --------------------------------------------------------------------------
     # GESTION DES ÉTATS DE SESSION (3 ÉTAPES OBLIGATOIRES)
@@ -4884,6 +5234,106 @@ def main() -> None:
             help="Télécharge le rapport récapitulatif PDF imprimable format paysage (A4, 7 pages aérées) pour le staff technique RCA.",
             key="btn_download_pdf",
         )
+
+    st.divider()
+    # ==========================================================================
+    # ARCHIVAGE MANUEL ET VOLONTAIRE DANS LA MÉMOIRE HEBDOMADAIRE (CHANTIER 3)
+    # ==========================================================================
+    with st.expander("💾 Archiver cette séance dans la mémoire hebdomadaire", expanded=True):
+        st.markdown(
+            "<div style='font-size:0.92rem;color:#334155;margin-bottom:12px;'>"
+            "Enregistrez manuellement cette séance validée dans l'historique hebdomadaire pour pouvoir "
+            "la consolider plus tard avec les autres entraînements de la semaine (Mardi, Mercredi, Vendredi, Match). "
+            "<strong>Les séances de test ne sont pas archivées automatiquement.</strong>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        curr_year, curr_week = weekly_memory.get_current_iso_week()
+        c_arch1, c_arch2, c_arch3 = st.columns([1.5, 2.0, 2.5])
+
+        with c_arch1:
+            sel_week_num = st.number_input(
+                "Semaine ISO :",
+                min_value=1,
+                max_value=53,
+                value=int(curr_week),
+                step=1,
+                key="arch_week_num_input",
+                help="Numéro de semaine ISO (1 à 53)",
+            )
+            sel_year = st.number_input(
+                "Année :",
+                min_value=2024,
+                max_value=2035,
+                value=int(curr_year),
+                step=1,
+                key="arch_year_input",
+            )
+
+        with c_arch2:
+            day_idx = datetime.date.today().weekday()
+            # 0=Lundi, 1=Mardi, 2=Mercredi, 3=Jeudi, 4=Vendredi, 5=Samedi, 6=Dimanche
+            default_day_idx = 0
+            if day_idx == 1:
+                default_day_idx = 0  # Mardi
+            elif day_idx == 2:
+                default_day_idx = 1  # Mercredi
+            elif day_idx == 4:
+                default_day_idx = 2  # Vendredi
+            elif day_idx == 6:
+                default_day_idx = 3  # Dimanche
+            else:
+                default_day_idx = 0
+
+            sel_day_type = st.selectbox(
+                "Jour / Type de séance :",
+                options=weekly_memory.JOURS_SEANCE_STANDARDS,
+                index=default_day_idx,
+                key="arch_day_type_sel",
+                help="Identifiant de la séance dans la semaine pour l'agrégation et le comparatif",
+            )
+
+            # Vérifier si une séance existe déjà pour ce jour dans cette semaine
+            current_week_data = weekly_memory.load_week_data(int(sel_year), int(sel_week_num))
+            target_sid = sel_day_type.strip().lower().replace(" ", "_").replace("(", "").replace(")", "").replace("'", "")
+            already_exists = target_sid in current_week_data.get("sessions", {})
+
+            if already_exists:
+                st.warning(f"⚠️ Une séance « {sel_day_type} » est déjà enregistrée en Semaine {sel_week_num}.")
+
+        with c_arch3:
+            arch_notes = st.text_input(
+                "Notes / Contexte (optionnel) :",
+                value="",
+                placeholder="Ex: Séance axée vitesse & lancements de jeu...",
+                key="arch_session_notes",
+            )
+
+            overwrite_choice = True
+            if already_exists:
+                overwrite_choice = st.checkbox(
+                    "Remplacer la séance existante",
+                    value=True,
+                    key="arch_chk_overwrite",
+                    help="Si cochée, écrase les données précédemment enregistrées pour ce jour.",
+                )
+
+            if st.button("✅ Enregistrer ce rapport dans la mémoire de la semaine", type="primary", use_container_width=True, key="btn_save_weekly_memory"):
+                success, msg = weekly_memory.save_session_to_memory(
+                    df_indiv=df_indiv,
+                    year=int(sel_year),
+                    week_num=int(sel_week_num),
+                    day_type=sel_day_type,
+                    date_str=str(session_date_val) if session_date_val else None,
+                    notes=arch_notes,
+                    overwrite=overwrite_choice,
+                )
+                if success:
+                    st.success(f"🎉 {msg}")
+                    st.toast(msg)
+                else:
+                    st.error(f"❌ {msg}")
 
 
 if __name__ == "__main__":

@@ -621,6 +621,7 @@ def render_podium_html_markup(
     - Médaillon circulaire avec photo Base64 (80px au centre, 65px sur les côtés)
     - Ombre portée et bordure officielle
     - Nom, poste de rugby et valeur métrique en gras
+    - Strictement sans commentaires HTML ni retours de ligne intra-style pour éviter le bug code block Markdown.
     """
     p1 = players[0] if len(players) > 0 else {"name": "-", "stat": "-", "poste": ""}
     p2 = players[1] if len(players) > 1 else {"name": "-", "stat": "-", "poste": ""}
@@ -634,239 +635,45 @@ def render_podium_html_markup(
     poste2 = p2.get("poste", "")
     poste3 = p3.get("poste", "")
 
-    html = f"""
-    <div style="
-        background: #FFFFFF;
-        border: 1px solid #E2E8F0;
-        border-radius: 14px;
-        padding: 16px 12px 20px 12px;
-        box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06);
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        margin-bottom: 18px;
-    ">
-        <!-- En-tête Catégorie -->
-        <div style="
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
-            background: linear-gradient(135deg, #0B192C 0%, #1F4E79 100%);
-            color: #FFFFFF;
-            padding: 8px 14px;
-            border-radius: 8px;
-            margin-bottom: 22px;
-            border-bottom: 2px solid #D4AF37;
-        ">
-            <span style="font-size: 1.15rem;">{category_icon}</span>
-            <span style="font-size: 0.90rem; font-weight: 800; letter-spacing: 0.5px; text-transform: uppercase;">
-                {category_title}
-            </span>
-        </div>
+    html = f"""<div style="background:#FFFFFF;border:1px solid #E2E8F0;border-radius:14px;padding:16px 12px 20px 12px;box-shadow:0 4px 16px rgba(15,23,42,0.06);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin-bottom:18px;">
+<div style="display:flex;align-items:center;justify-content:center;gap:8px;background:linear-gradient(135deg,#0B192C 0%,#1F4E79 100%);color:#FFFFFF;padding:8px 14px;border-radius:8px;margin-bottom:22px;border-bottom:2px solid #D4AF37;">
+<span style="font-size:1.15rem;">{category_icon}</span>
+<span style="font-size:0.90rem;font-weight:800;letter-spacing:0.5px;text-transform:uppercase;">{category_title}</span>
+</div>
+<div style="display:flex;align-items:flex-end;justify-content:center;gap:10px;padding:0 4px;">
+<div style="flex:1;text-align:center;display:flex;flex-direction:column;align-items:center;">
+<div style="position:relative;margin-bottom:6px;">
+<img src="{img2}" alt="{p2.get('name')}" style="width:65px;height:65px;border-radius:50%;object-fit:cover;border:3px solid #C0C0C0;box-shadow:0 4px 12px rgba(192,192,192,0.55);background:#F1F5F9;display:block;" />
+<span style="position:absolute;bottom:-6px;left:50%;transform:translateX(-50%);background:#64748B;color:#FFFFFF;font-size:0.68rem;font-weight:800;padding:1px 7px;border-radius:10px;border:1px solid #FFFFFF;">2e</span>
+</div>
+<div style="font-size:0.78rem;font-weight:700;color:#1E293B;line-height:1.15;margin-top:6px;max-width:95px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{p2.get('name')}">{p2.get('name')}</div>
+<div style="font-size:0.68rem;color:#64748B;margin-bottom:4px;">{poste2}</div>
+<div style="font-size:0.88rem;font-weight:800;color:#1F4E79;background:#F8FAFC;padding:3px 6px;border-radius:5px;border:1px solid #E2E8F0;margin-bottom:6px;">{p2.get('stat')}</div>
+<div style="width:100%;height:52px;background:linear-gradient(180deg,#94A3B8 0%,#64748B 100%);border-radius:6px 6px 0 0;display:flex;align-items:center;justify-content:center;color:#FFFFFF;font-size:1.15rem;font-weight:900;box-shadow:inset 0 2px 4px rgba(255,255,255,0.25);">2</div>
+</div>
+<div style="flex:1.15;text-align:center;display:flex;flex-direction:column;align-items:center;">
+<div style="font-size:1.05rem;margin-bottom:-4px;">👑</div>
+<div style="position:relative;margin-bottom:6px;">
+<img src="{img1}" alt="{p1.get('name')}" style="width:80px;height:80px;border-radius:50%;object-fit:cover;border:3.5px solid #FFD700;box-shadow:0 4px 16px rgba(217,119,6,0.45);background:#F1F5F9;display:block;" />
+<span style="position:absolute;bottom:-6px;left:50%;transform:translateX(-50%);background:#D97706;color:#FFFFFF;font-size:0.72rem;font-weight:900;padding:1px 8px;border-radius:10px;border:1.5px solid #FFFFFF;">1er</span>
+</div>
+<div style="font-size:0.86rem;font-weight:800;color:#0F172A;line-height:1.15;margin-top:6px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{p1.get('name')}">{p1.get('name')}</div>
+<div style="font-size:0.70rem;color:#64748B;margin-bottom:4px;">{poste1}</div>
+<div style="font-size:0.96rem;font-weight:900;color:#A30000;background:#FEF2F2;padding:3px 8px;border-radius:5px;border:1px solid #FECACA;margin-bottom:6px;">{p1.get('stat')}</div>
+<div style="width:100%;height:74px;background:linear-gradient(180deg,#D4AF37 0%,#B45309 100%);border-radius:8px 8px 0 0;display:flex;align-items:center;justify-content:center;color:#FFFFFF;font-size:1.45rem;font-weight:900;box-shadow:inset 0 2px 4px rgba(255,255,255,0.35);">1</div>
+</div>
+<div style="flex:1;text-align:center;display:flex;flex-direction:column;align-items:center;">
+<div style="position:relative;margin-bottom:6px;">
+<img src="{img3}" alt="{p3.get('name')}" style="width:65px;height:65px;border-radius:50%;object-fit:cover;border:3px solid #CD7F32;box-shadow:0 4px 12px rgba(205,127,50,0.45);background:#F1F5F9;display:block;" />
+<span style="position:absolute;bottom:-6px;left:50%;transform:translateX(-50%);background:#B45309;color:#FFFFFF;font-size:0.68rem;font-weight:800;padding:1px 7px;border-radius:10px;border:1px solid #FFFFFF;">3e</span>
+</div>
+<div style="font-size:0.78rem;font-weight:700;color:#1E293B;line-height:1.15;margin-top:6px;max-width:95px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{p3.get('name')}">{p3.get('name')}</div>
+<div style="font-size:0.68rem;color:#64748B;margin-bottom:4px;">{poste3}</div>
+<div style="font-size:0.88rem;font-weight:800;color:#1F4E79;background:#F8FAFC;padding:3px 6px;border-radius:5px;border:1px solid #E2E8F0;margin-bottom:6px;">{p3.get('stat')}</div>
+<div style="width:100%;height:38px;background:linear-gradient(180deg,#B45309 0%,#78350F 100%);border-radius:6px 6px 0 0;display:flex;align-items:center;justify-content:center;color:#FFFFFF;font-size:1.05rem;font-weight:900;box-shadow:inset 0 2px 4px rgba(255,255,255,0.25);">3</div>
+</div>
+</div>
+</div>"""
 
-        <!-- Rangée du Podium 3 marches (2e - 1er - 3e) -->
-        <div style="
-            display: flex;
-            align-items: flex-end;
-            justify-content: center;
-            gap: 10px;
-            padding: 0 4px;
-        ">
-            <!-- 2ème PLACE (ARGENT) -->
-            <div style="flex: 1; text-align: center; display: flex; flex-direction: column; align-items: center;">
-                <div style="position: relative; margin-bottom: 6px;">
-                    <img src="{img2}" alt="{p2.get('name')}" style="
-                        width: 65px;
-                        height: 65px;
-                        border-radius: 50%;
-                        object-fit: cover;
-                        border: 3px solid #C0C0C0;
-                        box-shadow: 0 4px 12px rgba(192, 192, 192, 0.55);
-                        background: #F1F5F9;
-                        display: block;
-                    " />
-                    <span style="
-                        position: absolute;
-                        bottom: -6px;
-                        left: 50%;
-                        transform: translateX(-50%);
-                        background: #64748B;
-                        color: #FFFFFF;
-                        font-size: 0.68rem;
-                        font-weight: 800;
-                        padding: 1px 7px;
-                        border-radius: 10px;
-                        border: 1px solid #FFFFFF;
-                    ">2e</span>
-                </div>
-                <div style="
-                    font-size: 0.78rem;
-                    font-weight: 700;
-                    color: #1E293B;
-                    line-height: 1.15;
-                    margin-top: 6px;
-                    max-width: 95px;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                    white-space: nowrap;
-                " title="{p2.get('name')}">{p2.get('name')}</div>
-                <div style="font-size: 0.68rem; color: #64748B; margin-bottom: 4px;">{poste2}</div>
-                <div style="
-                    font-size: 0.88rem;
-                    font-weight: 800;
-                    color: #1F4E79;
-                    background: #F8FAFC;
-                    padding: 3px 6px;
-                    border-radius: 5px;
-                    border: 1px solid #E2E8F0;
-                    margin-bottom: 6px;
-                ">{p2.get('stat')}</div>
-                <!-- Socle 2e -->
-                <div style="
-                    width: 100%;
-                    height: 52px;
-                    background: linear-gradient(180deg, #94A3B8 0%, #64748B 100%);
-                    border-radius: 6px 6px 0 0;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    color: #FFFFFF;
-                    font-size: 1.15rem;
-                    font-weight: 900;
-                    box-shadow: inset 0 2px 4px rgba(255, 255, 255, 0.25);
-                ">2</div>
-            </div>
-
-            <!-- 1ère PLACE (OR - SURÉLEVÉE) -->
-            <div style="flex: 1.15; text-align: center; display: flex; flex-direction: column; align-items: center;">
-                <div style="font-size: 1.05rem; margin-bottom: -4px;">👑</div>
-                <div style="position: relative; margin-bottom: 6px;">
-                    <img src="{img1}" alt="{p1.get('name')}" style="
-                        width: 80px;
-                        height: 80px;
-                        border-radius: 50%;
-                        object-fit: cover;
-                        border: 3.5px solid #FFD700;
-                        box-shadow: 0 4px 16px rgba(217, 119, 6, 0.45);
-                        background: #F1F5F9;
-                        display: block;
-                    " />
-                    <span style="
-                        position: absolute;
-                        bottom: -6px;
-                        left: 50%;
-                        transform: translateX(-50%);
-                        background: #D97706;
-                        color: #FFFFFF;
-                        font-size: 0.72rem;
-                        font-weight: 900;
-                        padding: 1px 8px;
-                        border-radius: 10px;
-                        border: 1.5px solid #FFFFFF;
-                    ">1er</span>
-                </div>
-                <div style="
-                    font-size: 0.86rem;
-                    font-weight: 800;
-                    color: #0F172A;
-                    line-height: 1.15;
-                    margin-top: 6px;
-                    max-width: 110px;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                    white-space: nowrap;
-                " title="{p1.get('name')}">{p1.get('name')}</div>
-                <div style="font-size: 0.70rem; color: #64748B; margin-bottom: 4px;">{poste1}</div>
-                <div style="
-                    font-size: 0.96rem;
-                    font-weight: 900;
-                    color: #A30000;
-                    background: #FEF2F2;
-                    padding: 3px 8px;
-                    border-radius: 5px;
-                    border: 1px solid #FECACA;
-                    margin-bottom: 6px;
-                ">{p1.get('stat')}</div>
-                <!-- Socle 1er -->
-                <div style="
-                    width: 100%;
-                    height: 74px;
-                    background: linear-gradient(180deg, #D4AF37 0%, #B45309 100%);
-                    border-radius: 8px 8px 0 0;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    color: #FFFFFF;
-                    font-size: 1.45rem;
-                    font-weight: 900;
-                    box-shadow: inset 0 2px 4px rgba(255, 255, 255, 0.35);
-                ">1</div>
-            </div>
-
-            <!-- 3ème PLACE (BRONZE) -->
-            <div style="flex: 1; text-align: center; display: flex; flex-direction: column; align-items: center;">
-                <div style="position: relative; margin-bottom: 6px;">
-                    <img src="{img3}" alt="{p3.get('name')}" style="
-                        width: 65px;
-                        height: 65px;
-                        border-radius: 50%;
-                        object-fit: cover;
-                        border: 3px solid #CD7F32;
-                        box-shadow: 0 4px 12px rgba(205, 127, 50, 0.45);
-                        background: #F1F5F9;
-                        display: block;
-                    " />
-                    <span style="
-                        position: absolute;
-                        bottom: -6px;
-                        left: 50%;
-                        transform: translateX(-50%);
-                        background: #B45309;
-                        color: #FFFFFF;
-                        font-size: 0.68rem;
-                        font-weight: 800;
-                        padding: 1px 7px;
-                        border-radius: 10px;
-                        border: 1px solid #FFFFFF;
-                    ">3e</span>
-                </div>
-                <div style="
-                    font-size: 0.78rem;
-                    font-weight: 700;
-                    color: #1E293B;
-                    line-height: 1.15;
-                    margin-top: 6px;
-                    max-width: 95px;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                    white-space: nowrap;
-                " title="{p3.get('name')}">{p3.get('name')}</div>
-                <div style="font-size: 0.68rem; color: #64748B; margin-bottom: 4px;">{poste3}</div>
-                <div style="
-                    font-size: 0.88rem;
-                    font-weight: 800;
-                    color: #1F4E79;
-                    background: #F8FAFC;
-                    padding: 3px 6px;
-                    border-radius: 5px;
-                    border: 1px solid #E2E8F0;
-                    margin-bottom: 6px;
-                ">{p3.get('stat')}</div>
-                <!-- Socle 3e -->
-                <div style="
-                    width: 100%;
-                    height: 38px;
-                    background: linear-gradient(180deg, #B45309 0%, #78350F 100%);
-                    border-radius: 6px 6px 0 0;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    color: #FFFFFF;
-                    font-size: 1.05rem;
-                    font-weight: 900;
-                    box-shadow: inset 0 2px 4px rgba(255, 255, 255, 0.25);
-                ">3</div>
-            </div>
-        </div>
-    </div>
-    """
-    return html
+    clean_html = "\n".join([line.lstrip() for line in html.splitlines() if line.strip()])
+    return clean_html
