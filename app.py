@@ -50,6 +50,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+# Module dédié à la gestion des photos de l'effectif sénior RCA (extraction PDF, matching, base64)
+import photo_manager
+
 # ==============================================================================
 # 0. EFFECTIF SÉNIORS RCA & CONFIGURATION ATHLÉTIQUE
 # ==============================================================================
@@ -57,9 +60,18 @@ import streamlit as st
 TEMPLATE_FILENAME = "Modele_Vierge_STAPS.xlsx"
 OUTPUT_DOWNLOAD_FILENAME = "Synthese_Complete_Seance.xlsx"
 
-# Dossier contenant les photos des joueurs (ex: DUPONT_Antoine.jpg)
-PHOTOS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "photos_joueurs")
-DEFAULT_AVATAR = os.path.join(PHOTOS_DIR, "avatar_par_defaut.jpg")
+# Dossiers contenant les photos des joueurs (assets/players_photos/ normalisé)
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+PLAYERS_PHOTOS_DIR = os.path.join(ASSETS_DIR, "players_photos")
+os.makedirs(PLAYERS_PHOTOS_DIR, exist_ok=True)
+PHOTOS_DIR = PLAYERS_PHOTOS_DIR
+DEFAULT_AVATAR = os.path.join(PLAYERS_PHOTOS_DIR, "avatar_par_defaut.png")
+
+# Vérification et extraction automatique des photos depuis le trombinoscope PDF si besoin
+try:
+    photo_manager.ensure_photos_extracted()
+except Exception:
+    pass
 
 # Palette de couleurs officielles Rugby Club Amiénois / Style Canva
 COLOR_OBJECTIF = "#2E5A88"  # Bleu roi / marine RCA
@@ -243,17 +255,9 @@ def sauvegarder_joueur_personnalise(
         else mapper_poste_vers_groupe_rca(poste_clean, nom_clean)
     )
 
-    # Enregistrement de la photo si fournie
+    # Enregistrement de la photo si fournie dans assets/players_photos/
     if photo_bytes:
-        try:
-            os.makedirs(PHOTOS_DIR, exist_ok=True)
-            ext = photo_ext.lower() if photo_ext.startswith(".") else f".{photo_ext.lower()}"
-            nom_fichier = f"{nom_clean.replace(' ', '_')}{ext}"
-            chemin_photo = os.path.join(PHOTOS_DIR, nom_fichier)
-            with open(chemin_photo, "wb") as f:
-                f.write(photo_bytes)
-        except Exception:
-            pass
+        photo_manager.save_manual_player_photo(nom_clean, photo_bytes, ext=photo_ext)
 
     custom = charger_joueurs_personnalises()
     custom[nom_clean] = {
@@ -274,7 +278,7 @@ def sauvegarder_joueur_personnalise(
 
 
 def supprimer_joueur_personnalise(nom: str) -> Tuple[bool, str]:
-    """Supprime un joueur personnalisé de la configuration et des mappings GPS."""
+    """Supprime un joueur personnalisé de la configuration, des mappings GPS et nettoie sa photo."""
     custom = charger_joueurs_personnalises()
     if nom in custom:
         del custom[nom]
@@ -285,6 +289,9 @@ def supprimer_joueur_personnalise(nom: str) -> Tuple[bool, str]:
             JOUEURS_CUSTOM_CACHE.update(custom)
             if nom in joueurs_data:
                 del joueurs_data[nom]
+
+            # Nettoyage et suppression propre de la photo associée dans assets/players_photos/
+            photo_manager.delete_player_photo(nom)
 
             # Nettoyage du mapping GPS si ce joueur y était associé
             current_gps_map = charger_mapping_gps_persistant()
@@ -530,65 +537,34 @@ def get_template_path() -> Optional[str]:
 
 
 # ==============================================================================
-# 1. GESTION DES PHOTOS JOUEURS & ENCODAGE BASE64
+# 1. GESTION DES PHOTOS JOUEURS & ENCODAGE BASE64 (RCA AMIENS)
 # ==============================================================================
 
 def obtenir_chemin_photo(nom_joueur: str) -> Optional[str]:
     """
-    Retourne le chemin de la photo du joueur dans photos_joueurs/.
-    Gère les variantes de nommage (underscores, casse, tirets).
+    Retourne le chemin absolu de la photo du joueur dans assets/players_photos/
+    en s'appuyant sur l'algorithme robuste de photo_manager (normalisation,
+    alias RCA, nom inversé et fuzzy matching).
     """
-    if not nom_joueur or nom_joueur.strip() == "":
-        return DEFAULT_AVATAR if os.path.isfile(DEFAULT_AVATAR) else None
+    if not nom_joueur or nom_joueur.strip() in ["", "-", "— Sélectionner un joueur —"]:
+        return None
+    return photo_manager.get_player_photo_path(nom_joueur)
 
-    nom = nom_joueur.strip()
-    variantes = [
-        nom.replace(" ", "_"),            # DUPONT_Antoine
-        nom.replace(" ", "_").lower(),    # dupont_antoine
-        nom.replace(" ", "_").title(),    # Dupont_Antoine
-        nom.replace(" ", "-"),            # DUPONT-Antoine
-        nom,                              # DUPONT Antoine
-    ]
 
-    extensions = [".jpg", ".jpeg", ".png", ".webp"]
-
-    for v in variantes:
-        for ext in extensions:
-            chemin = os.path.join(PHOTOS_DIR, f"{v}{ext}")
-            if os.path.isfile(chemin):
-                return chemin
-
-    # Recherche par nom de famille si le fichier contient le premier mot
-    nom_famille = nom.split()[0].lower() if " " in nom else nom.lower()
-    try:
-        for f in os.listdir(PHOTOS_DIR):
-            if nom_famille in f.lower() and os.path.splitext(f)[1].lower() in extensions:
-                return os.path.join(PHOTOS_DIR, f)
-    except FileNotFoundError:
-        pass
-
-    return DEFAULT_AVATAR if os.path.isfile(DEFAULT_AVATAR) else None
+def get_player_image_b64(player_name: str, size: int = 80) -> str:
+    """
+    Convertit la photo du joueur en Data URI Base64 (data:image/png;base64,...)
+    pour injection directe dans le HTML/CSS des podiums et composants Streamlit.
+    Si le joueur n'a pas de photo dans assets/players_photos/, génère un avatar SVG
+    propre aux couleurs officielles du RCA Amiens (Bleu #003399 et Jaune/Or #FFD700)
+    avec les initiales du joueur.
+    """
+    return photo_manager.get_player_image_b64(player_name, size=size)
 
 
 def photo_to_base64_data_uri(nom_joueur: str) -> str:
-    """
-    Convertit la photo du joueur en Data URI Base64 pour le HTML.
-    Si absente, retourne un avatar SVG Dicebear dynamique.
-    """
-    chemin = obtenir_chemin_photo(nom_joueur)
-    if chemin and os.path.isfile(chemin):
-        ext = os.path.splitext(chemin)[1].lower()
-        mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
-        mime_type = mime_map.get(ext, "image/jpeg")
-        try:
-            with open(chemin, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode("utf-8")
-            return f"data:{mime_type};base64,{b64}"
-        except Exception:
-            pass
-
-    seed = urllib.parse.quote(nom_joueur.strip()) if nom_joueur else "RCA"
-    return f"https://api.dicebear.com/7.x/initials/svg?seed={seed}&backgroundColor=2E5A88"
+    """Alias rétro-compatible pour get_player_image_b64."""
+    return get_player_image_b64(nom_joueur)
 
 
 # ==============================================================================
@@ -696,10 +672,12 @@ def render_podium_section(podium_data: Dict[str, Dict[str, Any]]) -> None:
     """
     Affiche la section Podium avec les Tops de la séance :
     - 3 catégories : Top speed, % marche, Haute intensité.
-    - Avatars réels des joueurs encodés en Base64.
+    - Design 3 marches conforme aux exigences : 2e à gauche (Argent), 1er au centre surélevé (Or), 3e à droite (Bronze).
+    - Médaillons circulaires avec photos réelles Base64 (80px 1er, 65px 2e/3e) ou avatar SVG officiel RCA.
+    - Nom du joueur, Poste de rugby et valeur métrique en gras.
     """
     st.divider()
-    st.markdown('<div class="section-header">🏆 PODIUM</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">🏆 PODIUMS DE LA SÉANCE</div>', unsafe_allow_html=True)
 
     col1, col2, col3 = st.columns(3)
     cols = [col1, col2, col3]
@@ -707,49 +685,15 @@ def render_podium_section(podium_data: Dict[str, Dict[str, Any]]) -> None:
 
     for idx, cat_name in enumerate(categories):
         cat_info = podium_data[cat_name]
-        players = cat_info["players"]
-        p1, p2, p3 = players[0], players[1], players[2]
+        players = cat_info.get("players", [])
+        icon = cat_info.get("icon", "🏉")
 
-        raw_html = textwrap.dedent(f"""
-            <div class="podium-card-container">
-                <div class="podium-category-header">
-                    <span class="podium-cat-icon">{cat_info.get('icon', '🏉')}</span>
-                    <span class="podium-cat-title">{cat_name}</span>
-                </div>
-                <div class="podium-winner-box">
-                    <div class="podium-rank-badge rank-1">🥇 1er</div>
-                    <div class="avatar-wrapper">
-                        <img src="{p1['avatar_src']}"
-                             alt="{p1['name']}" class="podium-avatar img-winner" />
-                    </div>
-                    <div class="podium-player-name name-winner">{p1['name']}</div>
-                    <div class="podium-player-stat stat-winner">{p1['stat']}</div>
-                </div>
-                <div class="podium-runners-row">
-                    <div class="podium-runner-box">
-                        <div class="podium-rank-badge rank-2">🥈 2ème</div>
-                        <div class="avatar-wrapper">
-                            <img src="{p2['avatar_src']}"
-                                 alt="{p2['name']}" class="podium-avatar img-runner" />
-                        </div>
-                        <div class="podium-player-name">{p2['name']}</div>
-                        <div class="podium-player-stat">{p2['stat']}</div>
-                    </div>
-                    <div class="podium-runner-box">
-                        <div class="podium-rank-badge rank-3">🥉 3ème</div>
-                        <div class="avatar-wrapper">
-                            <img src="{p3['avatar_src']}"
-                                 alt="{p3['name']}" class="podium-avatar img-runner" />
-                        </div>
-                        <div class="podium-player-name">{p3['name']}</div>
-                        <div class="podium-player-stat">{p3['stat']}</div>
-                    </div>
-                </div>
-            </div>
-        """)
-
-        card_html = "\n".join(line.strip() for line in raw_html.splitlines() if line.strip())
-        with cols[idx]:
+        card_html = photo_manager.render_podium_html_markup(
+            category_title=cat_name,
+            category_icon=icon,
+            players=players,
+        )
+        with cols[idx % 3]:
             st.markdown(card_html, unsafe_allow_html=True)
 
 
@@ -1068,9 +1012,13 @@ def dialog_creer_nouveau_joueur(
     )
 
     nb_custom = len(JOUEURS_CUSTOM_CACHE)
-    tab_creer, tab_liste = st.tabs([
+    existing_photos = photo_manager.list_existing_player_photos()
+    nb_photos = len(existing_photos)
+
+    tab_creer, tab_liste, tab_trombi = st.tabs([
         "➕ Créer un nouveau joueur",
         f"📋 Joueurs personnalisés ({nb_custom})",
+        f"📸 Trombinoscope & Photos ({nb_photos})",
     ])
 
     with tab_creer:
@@ -1231,6 +1179,91 @@ def dialog_creer_nouveau_joueur(
                         else:
                             st.error(msg_d)
 
+    with tab_trombi:
+        st.markdown(
+            "<div style='font-size: 0.90rem; color: #334155; margin-bottom: 12px;'>"
+            "Gestion officielle du trombinoscope et des portraits de l'effectif sénior du <strong>RCA Amiens</strong>. "
+            "Les photos sont enregistrées dans <code>assets/players_photos/</code> sous la forme normalisée <code>prenom_nom.png</code>."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        col_sync1, col_sync2 = st.columns([2.5, 1.5])
+        with col_sync1:
+            st.caption(f"📁 Dossier local : `assets/players_photos/` ({nb_photos} photo(s) chargée(s))")
+        with col_sync2:
+            if st.button("🔄 Ré-extraire depuis PDF", help="Extrait à nouveau les photos depuis EFFECTIF SÉNIORS (1).pdf", key="dlg_btn_reextract_trombi", use_container_width=True):
+                with st.spinner("Extraction et appariement géométrique des photos depuis le trombinoscope PDF..."):
+                    res_ext = photo_manager.extract_all_photos_from_pdf()
+                    if res_ext.get("success"):
+                        st.toast(f"✅ {res_ext.get('saved_count', 0)} photos extraites et synchronisées !")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ Échec de l'extraction : {res_ext.get('error', 'Erreur')}")
+
+        st.divider()
+
+        # Liste complète de tous les joueurs (PDF + Personnalisés)
+        tous_les_joueurs = sorted(list(set(list(joueurs_data.keys()) + list(JOUEURS_CUSTOM_CACHE.keys()))))
+        joueur_choisi_trombi = st.selectbox(
+            "Sélectionner un joueur de l'effectif pour inspecter ou modifier sa photo :",
+            options=tous_les_joueurs,
+            key="dlg_select_joueur_trombi",
+        )
+
+        if joueur_choisi_trombi:
+            col_t_photo, col_t_actions = st.columns([1.2, 2.8])
+            photo_existante = photo_manager.get_player_photo_path(joueur_choisi_trombi)
+            has_real_photo = bool(photo_existante and os.path.isfile(photo_existante))
+
+            with col_t_photo:
+                img_b64 = get_player_image_b64(joueur_choisi_trombi, size=90)
+                statut_badge = (
+                    "<span style='background:#DCFCE7;color:#166534;font-size:0.75rem;padding:2px 8px;border-radius:12px;font-weight:700;'>Photo officielle ✔</span>"
+                    if has_real_photo
+                    else "<span style='background:#FEF3C7;color:#92400E;font-size:0.75rem;padding:2px 8px;border-radius:12px;font-weight:700;'>Avatar par défaut</span>"
+                )
+                st.markdown(
+                    f"""
+                    <div style="text-align: center; background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 10px; padding: 12px;">
+                        <img src="{img_b64}" style="width: 85px; height: 85px; border-radius: 50%; object-fit: cover; border: 2.5px solid #003399; margin-bottom: 8px;" />
+                        <div>{statut_badge}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+            with col_t_actions:
+                poste_actuel = joueurs_data.get(joueur_choisi_trombi) or JOUEURS_CUSTOM_CACHE.get(joueur_choisi_trombi, {}).get("poste", "Inconnu")
+                groupe_actuel = mapper_poste_vers_groupe_rca(poste_actuel, joueur_choisi_trombi)
+                st.markdown(f"**Joueur :** {joueur_choisi_trombi} | **Poste :** `{poste_actuel}` | **Groupe :** `{groupe_actuel}`")
+
+                new_photo_file = st.file_uploader(
+                    "Uploader / Remplacer la photo de ce joueur :",
+                    type=["png", "jpg", "jpeg", "webp"],
+                    key=f"upload_photo_perso_{joueur_choisi_trombi}",
+                    help="La photo sera enregistrée au format prenom_nom.png et apparaîtra instantanément sur les podiums et le mapping GPS.",
+                )
+
+                col_btn_sav, col_btn_del = st.columns(2)
+                with col_btn_sav:
+                    if new_photo_file is not None:
+                        if st.button("💾 Enregistrer cette photo", type="primary", use_container_width=True, key=f"btn_save_photo_{joueur_choisi_trombi}"):
+                            p_ext = os.path.splitext(new_photo_file.name)[1]
+                            saved = photo_manager.save_manual_player_photo(joueur_choisi_trombi, new_photo_file.getvalue(), ext=p_ext)
+                            if saved:
+                                st.toast(f"✅ Photo enregistrée pour {joueur_choisi_trombi} !")
+                                st.rerun()
+                            else:
+                                st.error("❌ Erreur lors de la sauvegarde de la photo.")
+                with col_btn_del:
+                    if has_real_photo:
+                        if st.button("🗑️ Supprimer la photo", use_container_width=True, key=f"btn_del_photo_{joueur_choisi_trombi}"):
+                            deleted = photo_manager.delete_player_photo(joueur_choisi_trombi)
+                            if deleted:
+                                st.toast(f"🗑️ Photo supprimée pour {joueur_choisi_trombi}.")
+                                st.rerun()
+
 
 # ==============================================================================
 # 4.2 INTERFACE D'ATTRIBUTION GPS DYNAMIQUE & SÉLECTION DES JOUEURS
@@ -1370,7 +1403,7 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
         if reference_mapping.get(str(g_id)) in options and reference_mapping.get(str(g_id)) not in [placeholder, TRIGGER_NOUVEAU_JOUEUR]
     )
 
-    c_info1, c_btn_creer, c_info2 = st.columns([3.0, 1.3, 1.4])
+    c_info1, c_btn_creer, c_btn_trombi, c_info2 = st.columns([2.6, 1.3, 1.4, 1.2])
     with c_info1:
         if nb_prefilled > 0:
             st.success(
@@ -1384,6 +1417,9 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
             )
     with c_btn_creer:
         if st.button("➕ Nouveau joueur", type="secondary", help="Créer et ajouter un joueur dans l'effectif RCA", key="btn_add_player_step2_top", use_container_width=True):
+            dialog_creer_nouveau_joueur(liste_boitiers=liste_gps_detectes)
+    with c_btn_trombi:
+        if st.button("📸 Trombinoscope", type="secondary", help="Consulter et administrer les photos des joueurs", key="btn_trombi_step2_top", use_container_width=True):
             dialog_creer_nouveau_joueur(liste_boitiers=liste_gps_detectes)
     with c_info2:
         if st.button("🔄 Rétablir usine", help="Restaure les attributions initiales officielles du club RCA", key="btn_reset_default_factory", use_container_width=True):
@@ -1455,7 +1491,12 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
                     if photo and os.path.isfile(photo):
                         st.image(photo, width=48)
                     else:
-                        st.markdown("👤", help=choix)
+                        avatar_b64 = get_player_image_b64(choix, size=48)
+                        st.markdown(
+                            f"<div style='width:48px;height:48px;border-radius:50%;overflow:hidden;border:2px solid #003399;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,51,153,0.15);'>"
+                            f"<img src='{avatar_b64}' style='width:48px;height:48px;object-fit:cover;' /></div>",
+                            unsafe_allow_html=True,
+                        )
                 else:
                     st.markdown(
                         "<div style='width:48px;height:48px;border-radius:50%;"
@@ -2206,17 +2247,38 @@ def calculer_metriques_jauges(
 
 
 def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
-    """Génère le Podium des 3 tops à partir des données réelles avec photo Base64."""
-    def _make_player_entry(rank: int, name: str, stat_str: str) -> Dict[str, Any]:
+    """Génère le Podium des 3 tops à partir des données réelles avec photos Base64 et postes."""
+    def _make_player_entry(rank: int, name: str, stat_str: str, poste: str = "") -> Dict[str, Any]:
+        p_name = name.strip() if name else ""
+        p_poste = poste.strip() if poste and str(poste) not in ["nan", "None"] else ""
+        if not p_poste and p_name:
+            p_poste = joueurs_data.get(p_name, "")
+            if not p_poste:
+                p_poste = JOUEURS_CUSTOM_CACHE.get(p_name, {}).get("poste", "")
+            if not p_poste:
+                parts = p_name.split()
+                if len(parts) >= 2:
+                    inv1 = f"{parts[-1]} {' '.join(parts[:-1])}"
+                    p_poste = joueurs_data.get(inv1, "")
+                    if not p_poste:
+                        inv2 = f"{' '.join(parts[1:])} {parts[0]}"
+                        p_poste = joueurs_data.get(inv2, "")
         return {
             "rank": rank,
-            "name": name,
+            "name": p_name,
+            "poste": p_poste if p_poste else "RCA",
             "stat": stat_str,
-            "avatar_src": photo_to_base64_data_uri(name),
+            "avatar_src": get_player_image_b64(p_name, size=80 if rank == 1 else 65),
         }
 
     def _placeholder(rank: int) -> Dict[str, Any]:
-        return {"rank": rank, "name": "-", "stat": "-", "avatar_src": photo_to_base64_data_uri("")}
+        return {
+            "rank": rank,
+            "name": "-",
+            "poste": "",
+            "stat": "-",
+            "avatar_src": get_player_image_b64("", size=80 if rank == 1 else 65),
+        }
 
     if len(df_subset) == 0:
         return {
@@ -2229,12 +2291,16 @@ def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any
 
     # 1. TOP SPEED
     ts_col = "Top Speed (km/h)"
-    df_sorted_ts = df_subset.sort_values(by=ts_col, ascending=False).dropna(subset=[ts_col])
+    if ts_col in df_subset.columns:
+        df_sorted_ts = df_subset.sort_values(by=ts_col, ascending=False).dropna(subset=[ts_col])
+    else:
+        df_sorted_ts = df_subset
     players_ts = []
     for rank, (_, row) in enumerate(df_sorted_ts.head(3).iterrows(), start=1):
         name = str(row["Nom ; Prénom"]).strip()
-        val = float(row[ts_col])
-        players_ts.append(_make_player_entry(rank, name, f"{val:.1f} km/h"))
+        val = float(row[ts_col]) if ts_col in row and pd.notna(row[ts_col]) else 0.0
+        poste = str(row.get("Poste_Detaille", row.get("Poste", "")))
+        players_ts.append(_make_player_entry(rank, name, f"{val:.1f} km/h", poste))
     while len(players_ts) < 3:
         players_ts.append(_placeholder(len(players_ts) + 1))
 
@@ -2259,7 +2325,8 @@ def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any
         name = str(row["Nom ; Prénom"]).strip()
         val_raw = float(row.get(walk_col, 0.0))
         val_pct = val_raw * 100.0 if val_raw <= 1.0 else val_raw
-        players_walk.append(_make_player_entry(rank, name, f"{val_pct:.1f} %"))
+        poste = str(row.get("Poste_Detaille", row.get("Poste", "")))
+        players_walk.append(_make_player_entry(rank, name, f"{val_pct:.1f} %", poste))
     while len(players_walk) < 3:
         players_walk.append(_placeholder(len(players_walk) + 1))
 
@@ -2278,7 +2345,8 @@ def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any
     for rank, (_, row) in enumerate(df_sorted_hi.head(3).iterrows(), start=1):
         name = str(row["Nom ; Prénom"]).strip()
         val_m = float(row.get(hi_col, 0.0))
-        players_hi.append(_make_player_entry(rank, name, f"{int(round(val_m)):,d} m".replace(",", " ")))
+        poste = str(row.get("Poste_Detaille", row.get("Poste", "")))
+        players_hi.append(_make_player_entry(rank, name, f"{int(round(val_m)):,d} m".replace(",", " "), poste))
     while len(players_hi) < 3:
         players_hi.append(_placeholder(len(players_hi) + 1))
 
