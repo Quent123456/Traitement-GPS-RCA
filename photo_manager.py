@@ -612,6 +612,7 @@ def render_podium_html_markup(
     category_icon: str,
     players: List[Dict[str, Any]],
     unit_label: str = "",
+    subtitle: str = "",
 ) -> str:
     """
     Génère le markup HTML/CSS premium du podium 3 marches :
@@ -635,10 +636,15 @@ def render_podium_html_markup(
     poste2 = p2.get("poste", "")
     poste3 = p3.get("poste", "")
 
+    sub_html = f'<div style="font-size:0.75rem;color:#FFD700;font-weight:700;letter-spacing:0.3px;margin-top:2px;">{subtitle}</div>' if subtitle else ""
+
     html = f"""<div style="background:#FFFFFF;border:1px solid #E2E8F0;border-radius:14px;padding:16px 12px 20px 12px;box-shadow:0 4px 16px rgba(15,23,42,0.06);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin-bottom:18px;">
-<div style="display:flex;align-items:center;justify-content:center;gap:8px;background:linear-gradient(135deg,#0B192C 0%,#1F4E79 100%);color:#FFFFFF;padding:8px 14px;border-radius:8px;margin-bottom:22px;border-bottom:2px solid #D4AF37;">
+<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(135deg,#0B192C 0%,#1F4E79 100%);color:#FFFFFF;padding:8px 14px;border-radius:8px;margin-bottom:22px;border-bottom:2px solid #D4AF37;">
+<div style="display:flex;align-items:center;justify-content:center;gap:8px;">
 <span style="font-size:1.15rem;">{category_icon}</span>
 <span style="font-size:0.90rem;font-weight:800;letter-spacing:0.5px;text-transform:uppercase;">{category_title}</span>
+</div>
+{sub_html}
 </div>
 <div style="display:flex;align-items:flex-end;justify-content:center;gap:10px;padding:0 4px;">
 <div style="flex:1;text-align:center;display:flex;flex-direction:column;align-items:center;">

@@ -677,13 +677,17 @@ def render_dashboard_objectifs(group_name: str, metrics: Dict[str, Tuple[float, 
             )
 
 
-def render_podium_section(podium_data: Dict[str, Dict[str, Any]]) -> None:
+def render_podium_section(
+    podium_data: Dict[str, Dict[str, Any]],
+    subtitle_map: Optional[Dict[str, str]] = None,
+) -> None:
     """
     Affiche la section Podium avec les Tops de la séance :
     - 3 catégories : Top speed, % marche, Haute intensité.
     - Design 3 marches conforme aux exigences : 2e à gauche (Argent), 1er au centre surélevé (Or), 3e à droite (Bronze).
     - Médaillons circulaires avec photos réelles Base64 (80px 1er, 65px 2e/3e) ou avatar SVG officiel RCA.
     - Nom du joueur, Poste de rugby et valeur métrique en gras.
+    - En-tête enrichi avec la moyenne exacte du groupe (subtitle_map).
     """
     st.divider()
     st.markdown('<div class="section-header">🏆 PODIUMS DE LA SÉANCE</div>', unsafe_allow_html=True)
@@ -696,11 +700,13 @@ def render_podium_section(podium_data: Dict[str, Dict[str, Any]]) -> None:
         cat_info = podium_data[cat_name]
         players = cat_info.get("players", [])
         icon = cat_info.get("icon", "🏉")
+        sub_title = subtitle_map.get(cat_name, "") if subtitle_map else ""
 
         card_html = photo_manager.render_podium_html_markup(
             category_title=cat_name,
             category_icon=icon,
             players=players,
+            subtitle=sub_title,
         )
         clean_html = "\n".join([line.lstrip() for line in card_html.splitlines() if line.strip()])
         with cols[idx % 3]:
@@ -957,12 +963,14 @@ def sauvegarder_mapping_gps_persistant(
     mapping: Dict[Any, str],
     last_file_sig: Optional[str] = None,
     overwrite: bool = False,
+    splits_cache: Optional[Dict[Any, bool]] = None,
 ) -> bool:
     """
     Sauvegarde le dictionnaire d'association GPS -> Joueur dans config_rca_gps.json.
     Fusionne intelligemment avec les attributions déjà enregistrées pour ne jamais
     écraser les boîtiers non présents dans la séance active (sauf si overwrite=True).
-    Mémorise également la signature du fichier validé pour restaurer la session au rafraîchissement.
+    Mémorise également la signature du fichier validé et le cache de participation aux splits
+    pour restaurer intégralement la session au rafraîchissement.
     """
     full_map: Dict[str, str] = {} if overwrite else charger_mapping_gps_persistant()
     for k, v in mapping.items():
@@ -970,20 +978,33 @@ def sauvegarder_mapping_gps_persistant(
             full_map[str(k).strip()] = str(v).strip()
 
     existing_sig = None
+    existing_splits = {}
     if os.path.exists(CONFIG_GPS_FILE):
         try:
             with open(CONFIG_GPS_FILE, "r", encoding="utf-8") as f:
                 d = json.load(f)
                 if isinstance(d, dict):
                     existing_sig = d.get("last_validated_file_sig")
+                    existing_splits = d.get("splits_participation", {})
         except Exception:
             pass
+
+    # Conversion propre du cache de participation aux splits
+    splits_dict_to_save = dict(existing_splits) if isinstance(existing_splits, dict) else {}
+    if splits_cache:
+        for k_sp, v_sp in splits_cache.items():
+            if isinstance(k_sp, (tuple, list)) and len(k_sp) == 2:
+                key_str = f"{k_sp[0]}:::{k_sp[1]}"
+            else:
+                key_str = str(k_sp)
+            splits_dict_to_save[key_str] = bool(v_sp)
 
     payload = {
         "mapping": full_map,
         "derniere_mise_a_jour": datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
         "nb_boitiers": len(full_map),
         "last_validated_file_sig": last_file_sig or existing_sig,
+        "splits_participation": splits_dict_to_save,
     }
     try:
         with open(CONFIG_GPS_FILE, "w", encoding="utf-8") as f:
@@ -1276,6 +1297,236 @@ def dialog_creer_nouveau_joueur(
                             if deleted:
                                 st.toast(f"🗑️ Photo supprimée pour {joueur_choisi_trombi}.")
                                 st.rerun()
+
+
+# ==============================================================================
+# 4.1b GESTION DES SPLITS D'ENTRAÎNEMENT & MATRICE DE PARTICIPATION
+# ==============================================================================
+
+GLOBAL_SPLIT_TAGS = {
+    "session", "whole session", "full session", "all", "total",
+    "seance", "séance", "globale", "global", "complete", "complète",
+    "session summary", "all session", "overall", "nan"
+}
+
+
+def _natural_split_sort_key(s: str) -> List[Union[int, str]]:
+    """Clé de tri naturel pour ordonner Split 1, Split 2 ... Split 10 proprement."""
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r"(\d+)", str(s).strip())]
+
+
+def extraire_splits_entrainement(df_raw: Optional[pd.DataFrame]) -> Tuple[Optional[str], List[str]]:
+    """
+    Extrait et ordonne naturellement tous les splits d'entraînement uniques présents dans le fichier,
+    en excluant la ligne globale 'all', 'session' et autres récapitulatifs globaux.
+    Retourne (split_col, training_splits).
+    """
+    if df_raw is None or df_raw.empty:
+        return None, []
+
+    split_col = find_column(df_raw, [
+        "Split Name", "Split", "Period Name", "Period", "Tags", "Tag", "Activity Name", "Session Name", "Session Title", "Segment"
+    ])
+    if not split_col or split_col not in df_raw.columns:
+        return None, []
+
+    raw_splits = df_raw[split_col].dropna().astype(str).str.strip().unique().tolist()
+    training_splits = [
+        s for s in raw_splits
+        if s and s.lower() not in GLOBAL_SPLIT_TAGS and not s.lower().startswith("session ")
+    ]
+
+    sorted_splits = sorted(training_splits, key=_natural_split_sort_key)
+    return split_col, sorted_splits
+
+
+def detecter_anomalies_splits(
+    df_raw: pd.DataFrame,
+    mapping_gps: Dict[Union[int, str], str],
+    split_col: str,
+    training_splits: List[str],
+) -> List[Dict[str, Any]]:
+    """
+    Détecte les anomalies de participation aux splits :
+    Identifie si un joueur assigné a Distance == 0 (ou Durée == 0 ou split manquant) sur l'un des splits d'entraînement.
+    Retourne une liste de dictionnaires décrivant chaque anomalie.
+    """
+    anomalies: List[Dict[str, Any]] = []
+    if df_raw is None or df_raw.empty or not split_col or not training_splits:
+        return anomalies
+
+    player_col = find_column(df_raw, [
+        "Nom ; Prénom", "Player Name", "Athlete Name", "Player", "Athlete", "Joueur", "Nom", "Name"
+    ])
+    if not player_col:
+        return anomalies
+
+    dist_col = find_column(df_raw, ["Distance (km)", "Total Distance (km)", "Distance (m)", "Total Distance (m)", "Distance"])
+    dur_col = find_column(df_raw, ["Duration", "Temps de jeu", "Duration (mins)", "Duration (s)", "Durée", "Time"])
+
+    df_mapped = appliquer_mapping(df_raw, mapping_gps)
+
+    placeholder = "— Sélectionner un joueur —"
+    trigger_new = "➕ [Créer un nouveau joueur...]"
+
+    player_to_gps: Dict[str, Union[int, str]] = {}
+    for g_id, p_name in mapping_gps.items():
+        if p_name and p_name not in [placeholder, trigger_new, "-"]:
+            player_to_gps[p_name] = g_id
+
+    for p_name, g_id in player_to_gps.items():
+        sub_p = df_mapped[df_mapped[player_col].astype(str).str.strip().str.lower() == p_name.strip().lower()]
+        for sp in training_splits:
+            sub_sp = sub_p[sub_p[split_col].astype(str).str.strip().str.lower() == sp.strip().lower()]
+            if sub_sp.empty:
+                anomalies.append({
+                    "player": p_name,
+                    "gps_id": g_id,
+                    "split": sp,
+                    "dist_m": 0.0,
+                    "message": f"**{p_name}** (GPS {g_id}) n'a aucune donnée enregistrée sur le **{sp}**",
+                })
+            else:
+                d_val = clean_numeric_value(sub_sp[dist_col].iloc[0]) if dist_col and dist_col in sub_sp.columns else 0.0
+                if dist_col and "(km)" in dist_col.lower() and d_val < 100.0:
+                    d_m = d_val * 1000.0
+                else:
+                    d_m = d_val
+
+                dur_min = parse_duration_to_minutes(sub_sp[dur_col].iloc[0]) if dur_col and dur_col in sub_sp.columns else 1.0
+
+                if d_m <= 0.0 or dur_min <= 0.0:
+                    anomalies.append({
+                        "player": p_name,
+                        "gps_id": g_id,
+                        "split": sp,
+                        "dist_m": d_m,
+                        "message": f"**{p_name}** (GPS {g_id}) a **0 m** enregistré sur le **{sp}**",
+                    })
+
+    return anomalies
+
+
+def construire_matrice_splits(
+    df_raw: pd.DataFrame,
+    mapping_gps: Dict[Union[int, str], str],
+    split_col: str,
+    training_splits: List[str],
+) -> pd.DataFrame:
+    """
+    Construit le DataFrame pour la matrice interactive Joueurs × Splits (st.data_editor) :
+    - Colonnes fixes : GPS, Joueur, Groupe / Poste, Distance brute (m)
+    - Colonnes dynamiques : une colonne booléenne par split d'entraînement (True par défaut)
+    """
+    rows = []
+    if df_raw is None or df_raw.empty or not training_splits:
+        return pd.DataFrame()
+
+    player_col = find_column(df_raw, [
+        "Nom ; Prénom", "Player Name", "Athlete Name", "Player", "Athlete", "Joueur", "Nom", "Name"
+    ])
+    dist_col = find_column(df_raw, ["Distance (km)", "Total Distance (km)", "Distance (m)", "Total Distance (m)", "Distance"])
+
+    df_mapped = appliquer_mapping(df_raw, mapping_gps)
+
+    placeholder = "— Sélectionner un joueur —"
+    trigger_new = "➕ [Créer un nouveau joueur...]"
+
+    assigned_items = []
+    for g_id, p_name in mapping_gps.items():
+        if p_name and p_name not in [placeholder, trigger_new, "-"]:
+            try:
+                g_num = int(g_id)
+            except (ValueError, TypeError):
+                g_num = 999
+            assigned_items.append((g_num, g_id, p_name))
+
+    seen_players = set()
+    unique_assigned = []
+    for g_num, g_id, p_name in sorted(assigned_items, key=lambda x: (x[0], str(x[1]))):
+        if p_name not in seen_players:
+            seen_players.add(p_name)
+            unique_assigned.append((g_num, g_id, p_name))
+
+    cache_choix = st.session_state.get("splits_participation_cache", {})
+
+    for g_num, g_id, p_name in unique_assigned:
+        poste_j = joueurs_data.get(p_name, "")
+        if not poste_j:
+            poste_j = st.session_state.get("session_player_postes", {}).get(p_name, "")
+        grp_j = mapper_poste_vers_groupe_rca(poste_j, p_name)
+
+        sub_p = df_mapped[df_mapped[player_col].astype(str).str.strip().str.lower() == p_name.strip().lower()] if player_col else pd.DataFrame()
+        sub_training = sub_p[sub_p[split_col].astype(str).str.strip().isin(training_splits)] if not sub_p.empty and split_col else pd.DataFrame()
+
+        dist_brute_m = 0.0
+        if not sub_training.empty and dist_col and dist_col in sub_training.columns:
+            v_dist = sub_training[dist_col].apply(clean_numeric_value)
+            if "(km)" in dist_col.lower() and v_dist.median() < 100.0:
+                dist_brute_m = float(v_dist.sum() * 1000.0)
+            else:
+                dist_brute_m = float(v_dist.sum())
+
+        row_dict: Dict[str, Any] = {
+            "GPS": g_num if g_num != 999 else str(g_id),
+            "Joueur": p_name,
+            "Groupe": f"{grp_j} ({poste_j})" if poste_j else grp_j,
+            "Distance brute (m)": int(round(dist_brute_m)),
+        }
+
+        # Pour chaque split, cocher True par défaut, ou restaurer l'état utilisateur
+        for sp in training_splits:
+            default_val = cache_choix.get((p_name, sp), True)
+            row_dict[sp] = bool(default_val)
+
+        rows.append(row_dict)
+
+    return pd.DataFrame(rows)
+
+
+def filtrer_splits_selon_matrice(
+    df_raw_mapped: pd.DataFrame,
+    df_matrix: pd.DataFrame,
+    split_col: str,
+    training_splits: List[str],
+) -> pd.DataFrame:
+    """
+    Filtre le DataFrame brut mappé pour ne conserver strictement que les lignes (Joueur, Split)
+    qui sont cochées True dans la matrice de participation.
+    Les lignes de métadonnées hors splits d'entraînement (ex: 'all') sont conservées intactes.
+    """
+    if df_raw_mapped is None or df_raw_mapped.empty:
+        return df_raw_mapped
+    if df_matrix is None or df_matrix.empty or not split_col or not training_splits:
+        return df_raw_mapped.copy()
+
+    player_col = find_column(df_raw_mapped, [
+        "Nom ; Prénom", "Player Name", "Athlete Name", "Player", "Athlete", "Joueur", "Nom", "Name"
+    ])
+    if not player_col:
+        return df_raw_mapped.copy()
+
+    valid_pairs = set()
+    for _, r in df_matrix.iterrows():
+        p_name = str(r["Joueur"]).strip().lower()
+        for sp in training_splits:
+            if sp in r and bool(r[sp]):
+                valid_pairs.add((p_name, str(sp).strip().lower()))
+
+    training_splits_lower = {str(sp).strip().lower() for sp in training_splits}
+
+    def _keep_row(row: pd.Series) -> bool:
+        s_val = str(row[split_col]).strip() if pd.notna(row[split_col]) else ""
+        s_lower = s_val.lower()
+
+        if s_lower in training_splits_lower:
+            p_val = str(row[player_col]).strip().lower() if pd.notna(row[player_col]) else ""
+            return (p_val, s_lower) in valid_pairs
+
+        return True
+
+    mask = df_raw_mapped.apply(_keep_row, axis=1)
+    return df_raw_mapped[mask].copy()
 
 
 # ==============================================================================
@@ -1594,17 +1845,138 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
     elif not has_doublons and nb_assignes > 0:
         st.success(f"✅ Tous les {nb_assignes} boîtiers GPS détectés sont attribués sans aucun doublon.")
 
+    # --------------------------------------------------------------------------
+    # 4.3 MATRICE INTERACTIVE DE PARTICIPATION AUX SPLITS (JOUEURS × ATELIERS)
+    # --------------------------------------------------------------------------
+    df_matrix_validated = None
+    has_splits_detected = False
+    training_splits_list: List[str] = []
+
+    if not has_doublons and nb_assignes > 0 and df_raw is not None and not df_raw.empty:
+        split_col_m, training_splits_list = extraire_splits_entrainement(df_raw)
+        if training_splits_list:
+            has_splits_detected = True
+            st.markdown("<div style='height: 18px;'></div>", unsafe_allow_html=True)
+            st.markdown(
+                '<div style="background: linear-gradient(135deg, #0B192C 0%, #1F4E79 100%); padding: 12px 18px; border-radius: 10px; margin-bottom: 12px; border-left: 5px solid #D4AF37;">'
+                '<div style="font-size: 1.12rem; font-weight: 800; color: #FFFFFF; display: flex; align-items: center; gap: 8px;">'
+                '<span>⏱️</span> <span>Matrice de Participation aux Splits (Joueurs × Ateliers)</span>'
+                '</div>'
+                '<div style="font-size: 0.84rem; color: #E2E8F0; margin-top: 4px;">'
+                'Par défaut, tous les joueurs assignés sont considérés comme participants à tous les ateliers (<strong>100% cochés</strong>). '
+                'Si un joueur est sorti blessé, est arrivé en retard ou était ménagé sur un atelier, décochez sa case afin d\'aligner les calculs collectifs et individuels.'
+                '</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+            # A. Système de détection automatique d'anomalies (0 m ou 0 s sur un split)
+            anomalies = detecter_anomalies_splits(df_raw, mapping, split_col_m, training_splits_list)
+            if anomalies:
+                items_str = "\n".join([f"• {a['message']}. Décochez la case correspondante s'il n'a pas participé à cet exercice." for a in anomalies])
+                st.warning(
+                    f"⚠️ **Attention — Anomalie(s) de participation détectée(s) ({len(anomalies)}) :**\n\n"
+                    f"{items_str}\n\n"
+                    "💡 *Conseil : Vous pouvez utiliser le bouton « ⚡ Décocher automatiquement les splits à 0 m » ci-dessous pour ajuster la matrice en un clic.*"
+                )
+            else:
+                st.success("✅ **Participation nominale :** Tous les joueurs assignés ont enregistré de la distance (> 0 m) sur chaque split d'entraînement.")
+
+            # B. Barre d'outils et actions rapides
+            c_btn_a, c_btn_b, c_info = st.columns([2.5, 2.5, 3])
+            with c_btn_a:
+                if st.button(
+                    "⚡ Décocher automatiquement les splits à 0 m",
+                    use_container_width=True,
+                    key="btn_auto_uncheck_zero_splits",
+                    help="Décoche automatiquement les splits où le joueur a 0 m ou n'a pas couru (anomalies).",
+                ):
+                    cache_choix = st.session_state.setdefault("splits_participation_cache", {})
+                    ano_set = {(a["player"].strip().lower(), a["split"].strip().lower()) for a in anomalies}
+                    for g_id, p_name in mapping.items():
+                        if p_name and p_name not in [placeholder, TRIGGER_NOUVEAU_JOUEUR, "-"]:
+                            for sp in training_splits_list:
+                                if (p_name.strip().lower(), sp.strip().lower()) in ano_set:
+                                    cache_choix[(p_name, sp)] = False
+                                elif (p_name, sp) not in cache_choix:
+                                    cache_choix[(p_name, sp)] = True
+                    st.session_state["splits_matrix_version"] = st.session_state.get("splits_matrix_version", 0) + 1
+                    st.toast("⚡ Splits à 0 m décochés automatiquement !")
+                    st.rerun()
+
+            with c_btn_b:
+                if st.button(
+                    "🔄 Tout cocher (100% de participation)",
+                    use_container_width=True,
+                    key="btn_check_all_splits",
+                    help="Réinitialise toutes les cases à Vrai (100% de participation sur tous les exercices).",
+                ):
+                    cache_choix = st.session_state.setdefault("splits_participation_cache", {})
+                    for g_id, p_name in mapping.items():
+                        if p_name and p_name not in [placeholder, TRIGGER_NOUVEAU_JOUEUR, "-"]:
+                            for sp in training_splits_list:
+                                cache_choix[(p_name, sp)] = True
+                    st.session_state["splits_matrix_version"] = st.session_state.get("splits_matrix_version", 0) + 1
+                    st.toast("🔄 Tous les splits ont été cochés (100% de participation) !")
+                    st.rerun()
+
+            with c_info:
+                st.markdown(
+                    f"<div style='background:#F1F5F9;border:1px solid #CBD5E1;border-radius:8px;padding:8px 12px;text-align:center;font-size:0.85rem;font-weight:700;color:#1E293B;'>"
+                    f"📊 {nb_assignes} joueur(s) • {len(training_splits_list)} splits détectés"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # C. Construction du DataFrame de la matrice et affichage avec st.data_editor
+            df_mat = construire_matrice_splits(df_raw, mapping, split_col_m, training_splits_list)
+
+            col_cfg = {
+                "GPS": st.column_config.NumberColumn("Boîtier GPS", disabled=True, format="%d", help="Numéro du boîtier GPS"),
+                "Joueur": st.column_config.TextColumn("Joueur", disabled=True, help="Nom du joueur officiel"),
+                "Groupe": st.column_config.TextColumn("Groupe / Poste", disabled=True, help="Ligne officielle RCA"),
+                "Distance brute (m)": st.column_config.NumberColumn("Distance brute (m)", disabled=True, format="%d m", help="Cumul brut enregistré sur les splits d'entraînement"),
+            }
+            for sp in training_splits_list:
+                col_cfg[sp] = st.column_config.CheckboxColumn(
+                    label=sp,
+                    help=f"Participation de ce joueur au {sp}",
+                    default=True,
+                )
+
+            mat_version = st.session_state.get("splits_matrix_version", 0)
+            edited_mat = st.data_editor(
+                df_mat,
+                key=f"splits_data_editor_{mat_version}",
+                column_config=col_cfg,
+                disabled=["GPS", "Joueur", "Groupe", "Distance brute (m)"],
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            # Synchronisation continue du cache de choix
+            cache_choix = st.session_state.setdefault("splits_participation_cache", {})
+            for _, r in edited_mat.iterrows():
+                p_n = str(r["Joueur"])
+                for sp in training_splits_list:
+                    if sp in r:
+                        cache_choix[(p_n, sp)] = bool(r[sp])
+
+            df_matrix_validated = edited_mat
+            st.session_state["splits_matrix_validated"] = edited_mat
+
     # 5. Bouton de validation explicite de l'Étape 2 (Sauvegarde dans st.session_state et fichier JSON)
-    st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
-    c_btn1, c_btn2, c_btn3 = st.columns([1, 2, 1])
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    c_btn1, c_btn2, c_btn3 = st.columns([1, 2.5, 1])
     with c_btn2:
+        btn_label = "✅ Valider l'effectif et la participation aux Splits" if has_splits_detected else "✅ Valider l'effectif et l'association GPS"
         btn_valider = st.button(
-            "✅ Valider l'effectif et l'association GPS",
+            btn_label,
             type="primary",
             disabled=has_doublons or nb_assignes == 0,
             use_container_width=True,
             key="btn_valider_effectif_step2",
-            help="Valide définitivement l'attribution des boîtiers GPS, l'enregistre en session et dans la configuration persistante.",
+            help="Valide définitivement l'attribution des boîtiers GPS et la matrice de participation aux splits, les enregistre en session et dans la configuration persistante.",
         )
         if btn_valider:
             if has_doublons:
@@ -1615,8 +1987,15 @@ def ui_attribution_gps(df_raw: Optional[pd.DataFrame] = None) -> Tuple[Dict[Unio
                 st.session_state["step2_validated"] = True
                 st.session_state["gps_mapping"] = mapping
                 st.session_state["mapping_gps_joueurs"] = mapping
-                sauvegarder_mapping_gps_persistant(mapping, last_file_sig=st.session_state.get("uploaded_file_sig"))
-                st.toast("✅ Effectif et association GPS validés et mémorisés avec succès !")
+                if df_matrix_validated is not None:
+                    st.session_state["splits_matrix_validated"] = df_matrix_validated
+                cache_splits = st.session_state.get("splits_participation_cache", {})
+                sauvegarder_mapping_gps_persistant(
+                    mapping,
+                    last_file_sig=st.session_state.get("uploaded_file_sig"),
+                    splits_cache=cache_splits,
+                )
+                st.toast("✅ Effectif et participation aux splits validés avec succès !")
                 st.rerun()
 
     return mapping, has_doublons
@@ -2217,8 +2596,9 @@ def calculer_moyennes_groupes_rca(
         else:
             df_w["_Dpm"] = 0.0
 
-        # RÈGLE D'OR PRÉPARATRICE PHYSIQUE : Filtrer les splits inactifs (Distance <= 0)
-        df_active = df_w[df_w["_Dist_m"] > 0].copy()
+        # RÈGLE STAFF RCA & MATRICE DES SPLITS :
+        # Le DataFrame df_w contient strictement les participations validées dans la matrice des splits
+        df_active = df_w.copy()
 
         for g in GROUPS:
             sub = df_active[df_active["_Groupe"] == g]
@@ -3408,6 +3788,20 @@ def generer_rapport_pdf_coachs(
 
     # 4. Colonne de Droite : Podium Général de la Séance (Top 3 tous postes confondus)
     podium_general = generer_podium_dynamique(df_indiv)
+    vmax_all_s = df_indiv["Top Speed (km/h)"][df_indiv["Top Speed (km/h)"] > 0] if "Top Speed (km/h)" in df_indiv.columns else pd.Series(dtype=float)
+    vmax_all_moy = float(vmax_all_s.mean()) if not vmax_all_s.empty else 0.0
+    s_w_all = pd.to_numeric(df_indiv["%Marche "], errors="coerce").fillna(0.0) if "%Marche " in df_indiv.columns else pd.Series(dtype=float)
+    s_w_all_pos = s_w_all[s_w_all > 0.0]
+    walk_all_moy = float(s_w_all_pos.mean()) if not s_w_all_pos.empty else 0.0
+    walk_all_pct = walk_all_moy * 100.0 if walk_all_moy <= 1.0 else walk_all_moy
+    hi_col_all = "Haute intensité Podium (m)" if "Haute intensité Podium (m)" in df_indiv.columns else " Distance haute intensité (m)"
+    hi_all_moy = float(df_indiv[hi_col_all].mean()) if hi_col_all in df_indiv.columns and not df_indiv.empty else 0.0
+
+    sub_map_gen = {
+        "Top speed (km/h)": f"Moy. séance : {vmax_all_moy:.1f} km/h",
+        "% de marche": f"Moy. séance : {walk_all_pct:.1f} %",
+        "Haute intensité (m)": f"Moy. séance : {int(round(hi_all_moy)):,d} m".replace(",", " "),
+    }
     _render_podium_section_pdf(
         pdf=pdf,
         podium_data=podium_general,
@@ -3415,7 +3809,7 @@ def generer_rapport_pdf_coachs(
         y_pod=chart_y,
         w_pod=136,
         title_header="PODIUMS DE LA SÉANCE",
-        subtitle_map=None,
+        subtitle_map=sub_map_gen,
     )
 
     # =========================================================================
@@ -3542,7 +3936,8 @@ def generer_rapport_pdf_coachs(
         df_grp = df_indiv[df_indiv["Groupe"] == grp]
         podium_grp = generer_podium_dynamique(df_grp)
 
-        vmax_grp_moy = float(df_grp["Top Speed (km/h)"].mean()) if "Top Speed (km/h)" in df_grp.columns and not df_grp.empty else 0.0
+        vmax_s = df_grp["Top Speed (km/h)"][df_grp["Top Speed (km/h)"] > 0] if "Top Speed (km/h)" in df_grp.columns else pd.Series(dtype=float)
+        vmax_grp_moy = float(vmax_s.mean()) if not vmax_s.empty else (float(df_grp["Top Speed (km/h)"].mean()) if "Top Speed (km/h)" in df_grp.columns and not df_grp.empty else 0.0)
         s_w = pd.to_numeric(df_grp["%Marche "], errors="coerce").fillna(0.0) if "%Marche " in df_grp.columns else pd.Series(dtype=float)
         s_w_pos = s_w[s_w > 0.0]
         walk_grp_moy = float(s_w_pos.mean()) if not s_w_pos.empty else 0.0
@@ -4713,6 +5108,12 @@ def main() -> None:
                     d_cfg = json.load(f)
                     if isinstance(d_cfg, dict):
                         persisted_sig = d_cfg.get("last_validated_file_sig")
+                        if "splits_participation" in d_cfg and isinstance(d_cfg["splits_participation"], dict):
+                            sp_c = st.session_state.setdefault("splits_participation_cache", {})
+                            for k_sp, v_sp in d_cfg["splits_participation"].items():
+                                if ":::" in k_sp:
+                                    p_sp, s_sp = k_sp.split(":::", 1)
+                                    sp_c[(p_sp, s_sp)] = bool(v_sp)
             except Exception:
                 pass
 
@@ -4810,10 +5211,14 @@ def main() -> None:
     # 1. Application de l'attribution GPS validée
     df_raw_mapped = appliquer_mapping(df_raw, mapping_gps)
 
-    # 2. Gestion des Splits (Par défaut : Somme des Splits ateliers, sans la ligne "all")
-    split_col_detected = find_column(df_raw_mapped, [
-        "Split Name", "Split", "Period Name", "Period", "Tags", "Tag", "Activity Name", "Session Name", "Session Title", "Segment"
-    ])
+    # 2. Gestion et Filtrage des Splits selon la Matrice de Participation
+    split_col_detected, training_splits_detected = extraire_splits_entrainement(df_raw_mapped)
+    df_matrix_validee = st.session_state.get("splits_matrix_validated")
+    if df_matrix_validee is not None and not df_matrix_validee.empty and split_col_detected and training_splits_detected:
+        df_splits_valides = filtrer_splits_selon_matrice(df_raw_mapped, df_matrix_validee, split_col_detected, training_splits_detected)
+    else:
+        df_splits_valides = df_raw_mapped.copy()
+
     selected_splits_val = None
     excl_warmup_val = False
     split_mode_val = "splits"
@@ -4824,7 +5229,7 @@ def main() -> None:
             if s and s.lower() != "nan"
         ]
         if len(all_splits) > 1:
-            with st.expander("⏱️ Gestion des Séquences & Splits de Séance (Catapult)", expanded=False):
+            with st.expander("⏱️ Gestion des Séquences & Participation aux Splits", expanded=False):
                 st.info("💡 **Méthode Staff RCA (par défaut) :** Les volumes sont calculés en additionnant uniquement les séquences d'ateliers réelles (`Split 1..N`), excluant ainsi la marche des temps morts et transitions de la ligne globale 'all'.")
                 c_sp1, c_sp2 = st.columns([3, 2])
                 with c_sp1:
@@ -4861,15 +5266,52 @@ def main() -> None:
                         key="ms_splits_selected",
                     )
 
+                if df_matrix_validee is not None and not df_matrix_validee.empty and training_splits_detected:
+                    st.markdown("---")
+                    st.markdown("##### ⏱️ Ajustement direct de la Matrice de Participation (Étape 2)")
+                    st.caption("Vous pouvez ajuster les coches ci-dessous pour recalculer instantanément l'analyse sans réinitialiser l'Étape 2.")
+                    col_cfg_step3 = {
+                        "GPS": st.column_config.NumberColumn("Boîtier GPS", disabled=True, format="%d"),
+                        "Joueur": st.column_config.TextColumn("Joueur", disabled=True),
+                        "Groupe": st.column_config.TextColumn("Groupe / Poste", disabled=True),
+                        "Distance brute (m)": st.column_config.NumberColumn("Distance brute (m)", disabled=True, format="%d m"),
+                    }
+                    for sp_i in training_splits_detected:
+                        col_cfg_step3[sp_i] = st.column_config.CheckboxColumn(label=sp_i, default=True)
+
+                    v_step3 = st.session_state.get("splits_matrix_version", 0)
+                    edited_step3 = st.data_editor(
+                        df_matrix_validee,
+                        key=f"splits_data_editor_step3_{v_step3}",
+                        column_config=col_cfg_step3,
+                        disabled=["GPS", "Joueur", "Groupe", "Distance brute (m)"],
+                        hide_index=True,
+                        use_container_width=True,
+                    )
+                    if not edited_step3.equals(df_matrix_validee):
+                        st.session_state["splits_matrix_validated"] = edited_step3
+                        cache_choix = st.session_state.setdefault("splits_participation_cache", {})
+                        for _, r in edited_step3.iterrows():
+                            p_n = str(r["Joueur"])
+                            for sp_k in training_splits_detected:
+                                if sp_k in r:
+                                    cache_choix[(p_n, sp_k)] = bool(r[sp_k])
+                        sauvegarder_mapping_gps_persistant(
+                            mapping_gps,
+                            last_file_sig=st.session_state.get("uploaded_file_sig"),
+                            splits_cache=cache_choix,
+                        )
+                        st.rerun()
+
     with st.spinner("Calcul des métriques consolidées STAPS RCA..."):
         df_indiv = process_catapult_data(
-            df_raw_mapped,
+            df_splits_valides,
             split_mode=split_mode_val,
             split_filter=selected_splits_val,
             exclude_warmup=excl_warmup_val,
         )
         moyennes_groupes = calculer_moyennes_groupes_rca(
-            df_raw_mapped,
+            df_splits_valides,
             df_indiv,
             split_mode=split_mode_val,
             split_filter=selected_splits_val,
@@ -5119,7 +5561,26 @@ def main() -> None:
     # 3.3. SECTION PODIUM (CLASSEMENT BASÉ SUR LES VRAIES DONNÉES)
     # --------------------------------------------------------------------------
     podium_dynamique = generer_podium_dynamique(df_groupe_actif)
-    render_podium_section(podium_dynamique)
+
+    # Calcul des moyennes exactes du groupe actif pour les en-têtes de podium
+    vmax_s = df_groupe_actif["Top Speed (km/h)"][df_groupe_actif["Top Speed (km/h)"] > 0] if "Top Speed (km/h)" in df_groupe_actif.columns else pd.Series(dtype=float)
+    vmax_act_moy = float(vmax_s.mean()) if not vmax_s.empty else (float(df_groupe_actif["Top Speed (km/h)"].mean()) if "Top Speed (km/h)" in df_groupe_actif.columns and not df_groupe_actif.empty else 0.0)
+
+    s_w = pd.to_numeric(df_groupe_actif["%Marche "], errors="coerce").fillna(0.0) if "%Marche " in df_groupe_actif.columns else pd.Series(dtype=float)
+    s_w_pos = s_w[s_w > 0.0]
+    walk_act_moy = float(s_w_pos.mean()) if not s_w_pos.empty else 0.0
+    walk_pct = walk_act_moy * 100.0 if walk_act_moy <= 1.0 else walk_act_moy
+
+    hi_col_act = "Haute intensité Podium (m)" if "Haute intensité Podium (m)" in df_groupe_actif.columns else " Distance haute intensité (m)"
+    hi_act_moy = float(df_groupe_actif[hi_col_act].mean()) if hi_col_act in df_groupe_actif.columns and not df_groupe_actif.empty else 0.0
+
+    label_grp = f"({groupe_selectionne})" if groupe_selectionne != "Tous les groupes" else "collectif"
+    sub_map_dash = {
+        "Top speed (km/h)": f"Moyenne {label_grp} : {vmax_act_moy:.1f} km/h",
+        "% de marche": f"Moyenne {label_grp} : {walk_pct:.1f} %",
+        "Haute intensité (m)": f"Moyenne {label_grp} : {int(round(hi_act_moy)):,d} m".replace(",", " "),
+    }
+    render_podium_section(podium_dynamique, subtitle_map=sub_map_dash)
 
     st.markdown("---")
 
@@ -5162,7 +5623,7 @@ def main() -> None:
     with col_excel:
         st.markdown("#### 📊 Classeur Excel Complet")
         if template_path:
-            excel_buffer = populate_template_excel(df_indiv=df_indiv, df_raw=df_raw_mapped)
+            excel_buffer = populate_template_excel(df_indiv=df_indiv, df_raw=df_splits_valides)
             st.download_button(
                 label=f"📥 Télécharger {OUTPUT_DOWNLOAD_FILENAME}",
                 data=excel_buffer.getvalue(),
@@ -5186,10 +5647,10 @@ def main() -> None:
         st.markdown("#### 🏉 Rapport PDF pour les Coachs")
         # Récupération de la date de séance si disponible
         session_date_val = None
-        if df_raw_mapped is not None:
-            c_date = find_column(df_raw_mapped, ["Date", "Session Date", "Date de séance", "Date de seance"])
-            if c_date and c_date in df_raw_mapped.columns:
-                s_d = df_raw_mapped[c_date].dropna().astype(str).str.strip()
+        if df_splits_valides is not None:
+            c_date = find_column(df_splits_valides, ["Date", "Session Date", "Date de séance", "Date de seance"])
+            if c_date and c_date in df_splits_valides.columns:
+                s_d = df_splits_valides[c_date].dropna().astype(str).str.strip()
                 if not s_d.empty:
                     session_date_val = s_d.iloc[0]
 
