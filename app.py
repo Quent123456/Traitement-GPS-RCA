@@ -692,23 +692,54 @@ def render_podium_section(
     st.divider()
     st.markdown('<div class="section-header">🏆 PODIUMS DE LA SÉANCE</div>', unsafe_allow_html=True)
 
+    if not podium_data or not isinstance(podium_data, dict):
+        st.info("Aucune donnée disponible pour le podium.")
+        return
+
     col1, col2, col3 = st.columns(3)
     cols = [col1, col2, col3]
     categories = list(podium_data.keys())
 
     for idx, cat_name in enumerate(categories):
-        cat_info = podium_data[cat_name]
+        cat_info = podium_data.get(cat_name) or {}
+        if not isinstance(cat_info, dict):
+            continue
         players = cat_info.get("players", [])
-        icon = cat_info.get("icon", "🏉")
-        sub_title = subtitle_map.get(cat_name, "") if subtitle_map else ""
+        if not isinstance(players, list):
+            players = []
+        icon = str(cat_info.get("icon", "🏉"))
+        
+        # Sécurisation du sous-titre
+        sub_title = ""
+        if isinstance(subtitle_map, dict):
+            raw_sub = subtitle_map.get(cat_name)
+            if raw_sub is not None:
+                sub_title = str(raw_sub).strip()
 
-        card_html = photo_manager.render_podium_html_markup(
-            category_title=cat_name,
-            category_icon=icon,
-            players=players,
-            subtitle=sub_title,
-        )
-        clean_html = "\n".join([line.lstrip() for line in card_html.splitlines() if line.strip()])
+        # Appel avec try/except fallback au cas où une ancienne signature serait en cache Streamlit Cloud
+        try:
+            card_html = photo_manager.render_podium_html_markup(
+                category_title=str(cat_name),
+                category_icon=icon,
+                players=players,
+                subtitle=sub_title,
+            )
+        except TypeError:
+            try:
+                card_html = photo_manager.render_podium_html_markup(
+                    category_title=str(cat_name),
+                    category_icon=icon,
+                    players=players,
+                )
+            except Exception as e:
+                st.error(f"Erreur d'affichage du podium {cat_name}: {e}")
+                continue
+        except Exception as e:
+            st.error(f"Erreur d'affichage du podium {cat_name}: {e}")
+            continue
+
+        card_html_str = str(card_html) if card_html else ""
+        clean_html = "\n".join([line.lstrip() for line in card_html_str.splitlines() if line.strip()])
         with cols[idx % 3]:
             if hasattr(st, "html"):
                 st.html(clean_html)
@@ -2688,10 +2719,14 @@ def calculer_metriques_jauges(
 
 def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
     """Génère le Podium des 3 tops à partir des données réelles avec photos Base64 et postes."""
-    def _make_player_entry(rank: int, name: str, stat_str: str, poste: str = "") -> Dict[str, Any]:
-        p_name = name.strip() if name else ""
-        p_poste = poste.strip() if poste and str(poste) not in ["nan", "None"] else ""
-        if not p_poste and p_name:
+    def _make_player_entry(rank: int, name: Any, stat_str: Any, poste: Any = "") -> Dict[str, Any]:
+        p_name = str(name).strip() if pd.notna(name) and name is not None else "-"
+        if p_name in ["nan", "None", ""]:
+            p_name = "-"
+        p_poste = str(poste).strip() if pd.notna(poste) and poste is not None else ""
+        if p_poste in ["nan", "None"]:
+            p_poste = ""
+        if not p_poste and p_name and p_name != "-":
             p_poste = joueurs_data.get(p_name, "")
             if not p_poste:
                 p_poste = JOUEURS_CUSTOM_CACHE.get(p_name, {}).get("poste", "")
@@ -2707,8 +2742,8 @@ def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any
             "rank": rank,
             "name": p_name,
             "poste": p_poste if p_poste else "RCA",
-            "stat": stat_str,
-            "avatar_src": get_player_image_b64(p_name, size=80 if rank == 1 else 65),
+            "stat": str(stat_str) if stat_str is not None else "-",
+            "avatar_src": get_player_image_b64(p_name, size=80 if rank == 1 else 65) if p_name != "-" else get_player_image_b64("", size=80 if rank == 1 else 65),
         }
 
     def _placeholder(rank: int) -> Dict[str, Any]:
@@ -2720,7 +2755,7 @@ def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any
             "avatar_src": get_player_image_b64("", size=80 if rank == 1 else 65),
         }
 
-    if len(df_subset) == 0:
+    if df_subset is None or not isinstance(df_subset, pd.DataFrame) or len(df_subset) == 0:
         return {
             "Top speed (km/h)": {"icon": "⚡", "players": [_placeholder(1), _placeholder(2), _placeholder(3)]},
             "% de marche": {"icon": "🚶", "players": [_placeholder(1), _placeholder(2), _placeholder(3)]},
@@ -2732,13 +2767,17 @@ def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any
     # 1. TOP SPEED
     ts_col = "Top Speed (km/h)"
     if ts_col in df_subset.columns:
-        df_sorted_ts = df_subset.sort_values(by=ts_col, ascending=False).dropna(subset=[ts_col])
+        s_ts = pd.to_numeric(df_subset[ts_col], errors="coerce").fillna(0.0)
+        df_sorted_ts = df_subset.assign(_ts_sort=s_ts).sort_values(by="_ts_sort", ascending=False)
     else:
         df_sorted_ts = df_subset
     players_ts = []
     for rank, (_, row) in enumerate(df_sorted_ts.head(3).iterrows(), start=1):
-        name = str(row["Nom ; Prénom"]).strip()
-        val = float(row[ts_col]) if ts_col in row and pd.notna(row[ts_col]) else 0.0
+        name = str(row.get("Nom ; Prénom", "-")).strip()
+        val_raw = row.get(ts_col, 0.0)
+        val = float(val_raw) if pd.notna(val_raw) else 0.0
+        if np.isnan(val):
+            val = 0.0
         poste = str(row.get("Poste_Detaille", row.get("Poste", "")))
         players_ts.append(_make_player_entry(rank, name, f"{val:.1f} km/h", poste))
     while len(players_ts) < 3:
@@ -2762,9 +2801,12 @@ def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any
         df_sorted_walk = df_subset
     players_walk = []
     for rank, (_, row) in enumerate(df_sorted_walk.head(3).iterrows(), start=1):
-        name = str(row["Nom ; Prénom"]).strip()
-        val_raw = float(row.get(walk_col, 0.0))
-        val_pct = val_raw * 100.0 if val_raw <= 1.0 else val_raw
+        name = str(row.get("Nom ; Prénom", "-")).strip()
+        val_raw = row.get(walk_col, 0.0)
+        val_float = float(val_raw) if pd.notna(val_raw) else 0.0
+        if np.isnan(val_float):
+            val_float = 0.0
+        val_pct = val_float * 100.0 if val_float <= 1.0 else val_float
         poste = str(row.get("Poste_Detaille", row.get("Poste", "")))
         players_walk.append(_make_player_entry(rank, name, f"{val_pct:.1f} %", poste))
     while len(players_walk) < 3:
@@ -2778,15 +2820,20 @@ def generer_podium_dynamique(df_subset: pd.DataFrame) -> Dict[str, Dict[str, Any
     # 3. HAUTE INTENSITÉ (m) - ALIGNEMENT SUR LA MÉTHODE STAFF RCA (Cumul Zones 3, 4 et 5 > 14.4 km/h)
     hi_col = "Haute intensité Podium (m)" if "Haute intensité Podium (m)" in df_subset.columns else " Distance haute intensité (m)"
     if hi_col in df_subset.columns:
-        df_sorted_hi = df_subset.sort_values(by=hi_col, ascending=False)
+        s_hi = pd.to_numeric(df_subset[hi_col], errors="coerce").fillna(0.0)
+        df_sorted_hi = df_subset.assign(_hi_sort=s_hi).sort_values(by="_hi_sort", ascending=False)
     else:
         df_sorted_hi = df_subset
     players_hi = []
     for rank, (_, row) in enumerate(df_sorted_hi.head(3).iterrows(), start=1):
-        name = str(row["Nom ; Prénom"]).strip()
-        val_m = float(row.get(hi_col, 0.0))
+        name = str(row.get("Nom ; Prénom", "-")).strip()
+        val_raw = row.get(hi_col, 0.0)
+        val_m = float(val_raw) if pd.notna(val_raw) else 0.0
+        if np.isnan(val_m):
+            val_m = 0.0
+        hi_int = int(round(val_m))
         poste = str(row.get("Poste_Detaille", row.get("Poste", "")))
-        players_hi.append(_make_player_entry(rank, name, f"{int(round(val_m)):,d} m".replace(",", " "), poste))
+        players_hi.append(_make_player_entry(rank, name, f"{hi_int:,d} m".replace(",", " "), poste))
     while len(players_hi) < 3:
         players_hi.append(_placeholder(len(players_hi) + 1))
 
@@ -3385,7 +3432,8 @@ def _render_podium_section_pdf(
         pdf.set_text_color(255, 255, 255)
         pdf.cell(65, 5.8, safe_latin1(cat_cfg["title"]), align="L")
 
-        sub_txt = subtitle_map.get(cat_cfg["key"], cat_cfg["def_sub"]) if subtitle_map else cat_cfg["def_sub"]
+        sub_val = subtitle_map.get(cat_cfg["key"]) if isinstance(subtitle_map, dict) else None
+        sub_txt = str(sub_val).strip() if sub_val is not None else cat_cfg["def_sub"]
         pdf.set_xy(x_pod + 65, y_card)
         pdf.set_font("Helvetica", "I", 7.5)
         pdf.set_text_color(226, 232, 240)
@@ -3518,7 +3566,8 @@ def _render_podium_page_aere(
         pdf.set_text_color(255, 255, 255)
         pdf.cell(col_w - 4.0, 5.5, safe_latin1(cat["title"]), align="C")
 
-        sub_txt = subtitle_map.get(cat["key"], cat["def_sub"]) if subtitle_map else cat["def_sub"]
+        sub_val = subtitle_map.get(cat["key"]) if isinstance(subtitle_map, dict) else None
+        sub_txt = str(sub_val).strip() if sub_val is not None else cat["def_sub"]
         pdf.set_xy(x_c + 2.0, y_start + 7.2)
         pdf.set_font("Helvetica", "I", 8.5)
         pdf.set_text_color(226, 232, 240)
@@ -3788,19 +3837,39 @@ def generer_rapport_pdf_coachs(
 
     # 4. Colonne de Droite : Podium Général de la Séance (Top 3 tous postes confondus)
     podium_general = generer_podium_dynamique(df_indiv)
-    vmax_all_s = df_indiv["Top Speed (km/h)"][df_indiv["Top Speed (km/h)"] > 0] if "Top Speed (km/h)" in df_indiv.columns else pd.Series(dtype=float)
-    vmax_all_moy = float(vmax_all_s.mean()) if not vmax_all_s.empty else 0.0
-    s_w_all = pd.to_numeric(df_indiv["%Marche "], errors="coerce").fillna(0.0) if "%Marche " in df_indiv.columns else pd.Series(dtype=float)
-    s_w_all_pos = s_w_all[s_w_all > 0.0]
-    walk_all_moy = float(s_w_all_pos.mean()) if not s_w_all_pos.empty else 0.0
+    if "Top Speed (km/h)" in df_indiv.columns and not df_indiv.empty:
+        s_ts_all = pd.to_numeric(df_indiv["Top Speed (km/h)"], errors="coerce")
+        s_ts_all_pos = s_ts_all[s_ts_all > 0]
+        vmax_all_moy = float(s_ts_all_pos.mean()) if not s_ts_all_pos.empty else 0.0
+    else:
+        vmax_all_moy = 0.0
+    if pd.isna(vmax_all_moy) or np.isnan(vmax_all_moy):
+        vmax_all_moy = 0.0
+
+    if "%Marche " in df_indiv.columns and not df_indiv.empty:
+        s_w_all = pd.to_numeric(df_indiv["%Marche "], errors="coerce")
+        s_w_all_pos = s_w_all[s_w_all > 0.0]
+        walk_all_moy = float(s_w_all_pos.mean()) if not s_w_all_pos.empty else 0.0
+    else:
+        walk_all_moy = 0.0
+    if pd.isna(walk_all_moy) or np.isnan(walk_all_moy):
+        walk_all_moy = 0.0
     walk_all_pct = walk_all_moy * 100.0 if walk_all_moy <= 1.0 else walk_all_moy
+
     hi_col_all = "Haute intensité Podium (m)" if "Haute intensité Podium (m)" in df_indiv.columns else " Distance haute intensité (m)"
-    hi_all_moy = float(df_indiv[hi_col_all].mean()) if hi_col_all in df_indiv.columns and not df_indiv.empty else 0.0
+    if hi_col_all in df_indiv.columns and not df_indiv.empty:
+        s_hi_all = pd.to_numeric(df_indiv[hi_col_all], errors="coerce")
+        hi_all_moy = float(s_hi_all.mean()) if not s_hi_all.empty else 0.0
+    else:
+        hi_all_moy = 0.0
+    if pd.isna(hi_all_moy) or np.isnan(hi_all_moy):
+        hi_all_moy = 0.0
+    hi_all_int = int(round(hi_all_moy))
 
     sub_map_gen = {
         "Top speed (km/h)": f"Moy. séance : {vmax_all_moy:.1f} km/h",
         "% de marche": f"Moy. séance : {walk_all_pct:.1f} %",
-        "Haute intensité (m)": f"Moy. séance : {int(round(hi_all_moy)):,d} m".replace(",", " "),
+        "Haute intensité (m)": f"Moy. séance : {hi_all_int:,d} m".replace(",", " "),
     }
     _render_podium_section_pdf(
         pdf=pdf,
@@ -3936,20 +4005,39 @@ def generer_rapport_pdf_coachs(
         df_grp = df_indiv[df_indiv["Groupe"] == grp]
         podium_grp = generer_podium_dynamique(df_grp)
 
-        vmax_s = df_grp["Top Speed (km/h)"][df_grp["Top Speed (km/h)"] > 0] if "Top Speed (km/h)" in df_grp.columns else pd.Series(dtype=float)
-        vmax_grp_moy = float(vmax_s.mean()) if not vmax_s.empty else (float(df_grp["Top Speed (km/h)"].mean()) if "Top Speed (km/h)" in df_grp.columns and not df_grp.empty else 0.0)
-        s_w = pd.to_numeric(df_grp["%Marche "], errors="coerce").fillna(0.0) if "%Marche " in df_grp.columns else pd.Series(dtype=float)
-        s_w_pos = s_w[s_w > 0.0]
-        walk_grp_moy = float(s_w_pos.mean()) if not s_w_pos.empty else 0.0
+        if "Top Speed (km/h)" in df_grp.columns and not df_grp.empty:
+            s_ts_g = pd.to_numeric(df_grp["Top Speed (km/h)"], errors="coerce")
+            s_ts_g_pos = s_ts_g[s_ts_g > 0]
+            vmax_grp_moy = float(s_ts_g_pos.mean()) if not s_ts_g_pos.empty else 0.0
+        else:
+            vmax_grp_moy = 0.0
+        if pd.isna(vmax_grp_moy) or np.isnan(vmax_grp_moy):
+            vmax_grp_moy = 0.0
+
+        if "%Marche " in df_grp.columns and not df_grp.empty:
+            s_w_g = pd.to_numeric(df_grp["%Marche "], errors="coerce")
+            s_w_g_pos = s_w_g[s_w_g > 0.0]
+            walk_grp_moy = float(s_w_g_pos.mean()) if not s_w_g_pos.empty else 0.0
+        else:
+            walk_grp_moy = 0.0
+        if pd.isna(walk_grp_moy) or np.isnan(walk_grp_moy):
+            walk_grp_moy = 0.0
         walk_pct = walk_grp_moy * 100.0 if walk_grp_moy <= 1.0 else walk_grp_moy
 
         hi_col_grp = "Haute intensité Podium (m)" if "Haute intensité Podium (m)" in df_grp.columns else " Distance haute intensité (m)"
-        hi_grp_moy = float(df_grp[hi_col_grp].mean()) if hi_col_grp in df_grp.columns and not df_grp.empty else 0.0
+        if hi_col_grp in df_grp.columns and not df_grp.empty:
+            s_hi_g = pd.to_numeric(df_grp[hi_col_grp], errors="coerce")
+            hi_grp_moy = float(s_hi_g.mean()) if not s_hi_g.empty else 0.0
+        else:
+            hi_grp_moy = 0.0
+        if pd.isna(hi_grp_moy) or np.isnan(hi_grp_moy):
+            hi_grp_moy = 0.0
+        hi_grp_int = int(round(hi_grp_moy))
 
         sub_map = {
             "Top speed (km/h)": f"Moyenne : {vmax_grp_moy:.1f} km/h",
             "% de marche": f"Moyenne : {walk_pct:.1f} %",
-            "Haute intensité (m)": f"Moyenne : {int(round(hi_grp_moy)):,d} m".replace(",", " "),
+            "Haute intensité (m)": f"Moyenne : {hi_grp_int:,d} m".replace(",", " "),
         }
 
         _render_podium_page_aere(
@@ -5563,22 +5651,40 @@ def main() -> None:
     podium_dynamique = generer_podium_dynamique(df_groupe_actif)
 
     # Calcul des moyennes exactes du groupe actif pour les en-têtes de podium
-    vmax_s = df_groupe_actif["Top Speed (km/h)"][df_groupe_actif["Top Speed (km/h)"] > 0] if "Top Speed (km/h)" in df_groupe_actif.columns else pd.Series(dtype=float)
-    vmax_act_moy = float(vmax_s.mean()) if not vmax_s.empty else (float(df_groupe_actif["Top Speed (km/h)"].mean()) if "Top Speed (km/h)" in df_groupe_actif.columns and not df_groupe_actif.empty else 0.0)
+    if "Top Speed (km/h)" in df_groupe_actif.columns and not df_groupe_actif.empty:
+        s_ts = pd.to_numeric(df_groupe_actif["Top Speed (km/h)"], errors="coerce")
+        s_ts_pos = s_ts[s_ts > 0]
+        vmax_act_moy = float(s_ts_pos.mean()) if not s_ts_pos.empty else 0.0
+    else:
+        vmax_act_moy = 0.0
+    if pd.isna(vmax_act_moy) or np.isnan(vmax_act_moy):
+        vmax_act_moy = 0.0
 
-    s_w = pd.to_numeric(df_groupe_actif["%Marche "], errors="coerce").fillna(0.0) if "%Marche " in df_groupe_actif.columns else pd.Series(dtype=float)
-    s_w_pos = s_w[s_w > 0.0]
-    walk_act_moy = float(s_w_pos.mean()) if not s_w_pos.empty else 0.0
+    if "%Marche " in df_groupe_actif.columns and not df_groupe_actif.empty:
+        s_w = pd.to_numeric(df_groupe_actif["%Marche "], errors="coerce")
+        s_w_pos = s_w[s_w > 0.0]
+        walk_act_moy = float(s_w_pos.mean()) if not s_w_pos.empty else 0.0
+    else:
+        walk_act_moy = 0.0
+    if pd.isna(walk_act_moy) or np.isnan(walk_act_moy):
+        walk_act_moy = 0.0
     walk_pct = walk_act_moy * 100.0 if walk_act_moy <= 1.0 else walk_act_moy
 
     hi_col_act = "Haute intensité Podium (m)" if "Haute intensité Podium (m)" in df_groupe_actif.columns else " Distance haute intensité (m)"
-    hi_act_moy = float(df_groupe_actif[hi_col_act].mean()) if hi_col_act in df_groupe_actif.columns and not df_groupe_actif.empty else 0.0
+    if hi_col_act in df_groupe_actif.columns and not df_groupe_actif.empty:
+        s_hi = pd.to_numeric(df_groupe_actif[hi_col_act], errors="coerce")
+        hi_act_moy = float(s_hi.mean()) if not s_hi.empty else 0.0
+    else:
+        hi_act_moy = 0.0
+    if pd.isna(hi_act_moy) or np.isnan(hi_act_moy):
+        hi_act_moy = 0.0
+    hi_act_int = int(round(hi_act_moy))
 
     label_grp = f"({groupe_selectionne})" if groupe_selectionne != "Tous les groupes" else "collectif"
     sub_map_dash = {
         "Top speed (km/h)": f"Moyenne {label_grp} : {vmax_act_moy:.1f} km/h",
         "% de marche": f"Moyenne {label_grp} : {walk_pct:.1f} %",
-        "Haute intensité (m)": f"Moyenne {label_grp} : {int(round(hi_act_moy)):,d} m".replace(",", " "),
+        "Haute intensité (m)": f"Moyenne {label_grp} : {hi_act_int:,d} m".replace(",", " "),
     }
     render_podium_section(podium_dynamique, subtitle_map=sub_map_dash)
 
