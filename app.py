@@ -55,6 +55,67 @@ import photo_manager
 
 # Module indépendant de Mémoire sélective & Rapports Hebdomadaires RCA
 import weekly_memory
+import importlib
+
+# Forcer le rechargement de weekly_memory pour éliminer tout cache stale sous Streamlit Cloud
+try:
+    importlib.reload(weekly_memory)
+except Exception:
+    pass
+
+
+def format_readable_date(val: Any) -> str:
+    """
+    Convertit n'importe quelle valeur de date (numéro de série Excel ex: 46315, 46316, 46318,
+    timestamp, chaîne ISO, ou datetime) en date lisible au format français JJ/MM/AAAA.
+    Définie directement dans app.py pour immuniser l'application contre les problèmes de cache de modules Streamlit Cloud.
+    """
+    if val is None or pd.isna(val):
+        return ""
+    if isinstance(val, (datetime.datetime, datetime.date, pd.Timestamp)):
+        return val.strftime("%d/%m/%Y")
+
+    val_str = str(val).strip()
+    if not val_str or val_str.lower() in ["nan", "none", "nat"]:
+        return ""
+
+    # Test si c'est un numéro de série Excel (ex: 46315 ou "46315.0")
+    try:
+        val_clean_num = val_str.replace(",", ".")
+        val_float = float(val_clean_num)
+        if 30000 <= val_float <= 80000:
+            dt = pd.to_datetime(val_float, unit="D", origin="1899-12-30")
+            return dt.strftime("%d/%m/%Y")
+    except (ValueError, TypeError):
+        pass
+
+    # Si c'est déjà JJ/MM/AAAA
+    if re.match(r"^\d{1,2}/\d{1,2}/\d{4}$", val_str):
+        parts = val_str.split("/")
+        return f"{int(parts[0]):02d}/{int(parts[1]):02d}/{parts[2]}"
+
+    # Si format ISO YYYY-MM-DD
+    if re.match(r"^\d{4}-\d{2}-\d{2}", val_str):
+        try:
+            dt = pd.to_datetime(val_str)
+            return dt.strftime("%d/%m/%Y")
+        except Exception:
+            pass
+
+    try:
+        dt = pd.to_datetime(val_str, errors="coerce", dayfirst=True)
+        if pd.notna(dt):
+            return dt.strftime("%d/%m/%Y")
+    except Exception:
+        pass
+
+    return val_str
+
+
+# Rétro-compatibilité : s'assurer que weekly_memory expose aussi format_readable_date
+if not hasattr(weekly_memory, "format_readable_date"):
+    weekly_memory.format_readable_date = format_readable_date
+
 
 # ==============================================================================
 # 0. EFFECTIF SÉNIORS RCA & CONFIGURATION ATHLÉTIQUE
@@ -4600,7 +4661,7 @@ def render_weekly_reports_view() -> None:
 
     for idx, (s_id, s_info) in enumerate(sessions.items()):
         target_col = col_cards[idx % len(col_cards)]
-        date_clean_card = weekly_memory.format_readable_date(s_info.get("date", "-"))
+        date_clean_card = format_readable_date(s_info.get("date", "-"))
         with target_col:
             st.markdown(
                 f"""
@@ -4633,7 +4694,8 @@ def render_weekly_reports_view() -> None:
 
             c_pdf, c_exp = st.columns([1.9, 2.1])
             with c_pdf:
-                pdf_seance_b = weekly_memory.get_session_pdf_bytes(year, week_num, s_id, generate_if_missing=True)
+                get_pdf_func = getattr(weekly_memory, "get_session_pdf_bytes", None)
+                pdf_seance_b = get_pdf_func(year, week_num, s_id, generate_if_missing=True) if get_pdf_func else None
                 clean_tag = date_clean_card.replace("/", "_").replace(" ", "_")
                 if pdf_seance_b:
                     st.download_button(
@@ -4665,7 +4727,7 @@ def render_weekly_reports_view() -> None:
     if explored_key and explored_key[0] == year and explored_key[1] == week_num and explored_key[2] in sessions:
         exp_sid = explored_key[2]
         exp_sinfo = sessions[exp_sid]
-        exp_date_str = weekly_memory.format_readable_date(exp_sinfo.get("date", "-"))
+        exp_date_str = format_readable_date(exp_sinfo.get("date", "-"))
         exp_day_type = exp_sinfo.get("day_type", exp_sid)
         players_data = exp_sinfo.get("players_data", [])
         df_exp_session = pd.DataFrame(players_data) if players_data else pd.DataFrame()
@@ -6024,7 +6086,7 @@ def main() -> None:
                 )
 
             if st.button("✅ Enregistrer ce rapport dans la mémoire de la semaine", type="primary", use_container_width=True, key="btn_save_weekly_memory"):
-                clean_date_val = weekly_memory.format_readable_date(session_date_val) if session_date_val else datetime.date.today().strftime("%d/%m/%Y")
+                clean_date_val = format_readable_date(session_date_val) if session_date_val else datetime.date.today().strftime("%d/%m/%Y")
                 success, msg = weekly_memory.save_session_to_memory(
                     df_indiv=df_indiv,
                     year=int(sel_year),
