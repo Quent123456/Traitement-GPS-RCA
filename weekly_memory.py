@@ -35,7 +35,57 @@ import photo_manager
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 WEEKLY_MEMORY_DIR = os.path.join(PROJECT_ROOT, "data", "weekly_memory")
+WEEKLY_PDFS_DIR = os.path.join(PROJECT_ROOT, "data", "weekly_pdfs")
 os.makedirs(WEEKLY_MEMORY_DIR, exist_ok=True)
+os.makedirs(WEEKLY_PDFS_DIR, exist_ok=True)
+
+
+def format_readable_date(val: Any) -> str:
+    """
+    Convertit n'importe quelle valeur de date (numéro de série Excel ex: 46315, 46316, 46318,
+    timestamp, chaîne ISO, ou datetime) en date lisible au format français JJ/MM/AAAA.
+    """
+    if val is None or pd.isna(val):
+        return ""
+    if isinstance(val, (datetime.datetime, datetime.date, pd.Timestamp)):
+        return val.strftime("%d/%m/%Y")
+    
+    val_str = str(val).strip()
+    if not val_str or val_str.lower() in ["nan", "none", "nat"]:
+        return ""
+
+    # Test si c'est un numéro de série Excel (ex: 46315 ou "46315.0")
+    try:
+        val_clean_num = val_str.replace(",", ".")
+        val_float = float(val_clean_num)
+        if 30000 <= val_float <= 80000:
+            dt = pd.to_datetime(val_float, unit="D", origin="1899-12-30")
+            return dt.strftime("%d/%m/%Y")
+    except (ValueError, TypeError):
+        pass
+
+    # Si c'est déjà JJ/MM/AAAA
+    if re.match(r"^\d{1,2}/\d{1,2}/\d{4}$", val_str):
+        parts = val_str.split("/")
+        return f"{int(parts[0]):02d}/{int(parts[1]):02d}/{parts[2]}"
+
+    # Si format ISO YYYY-MM-DD
+    if re.match(r"^\d{4}-\d{2}-\d{2}", val_str):
+        try:
+            dt = pd.to_datetime(val_str)
+            return dt.strftime("%d/%m/%Y")
+        except Exception:
+            pass
+
+    try:
+        dt = pd.to_datetime(val_str, errors="coerce", dayfirst=True)
+        if pd.notna(dt):
+            return dt.strftime("%d/%m/%Y")
+    except Exception:
+        pass
+
+    return val_str
+
 
 JOURS_SEANCE_STANDARDS = [
     "Mardi (Entraînement)",
@@ -117,6 +167,76 @@ def load_week_data(year: int, week_num: int) -> Dict[str, Any]:
         }
 
 
+def get_session_pdf_path(year: int, week_num: int, session_id: str) -> str:
+    """Retourne le chemin absolu du fichier PDF archivé pour une séance spécifique."""
+    os.makedirs(WEEKLY_PDFS_DIR, exist_ok=True)
+    return os.path.join(WEEKLY_PDFS_DIR, f"week_{year}_W{week_num:02d}_{session_id}.pdf")
+
+
+def get_session_pdf_bytes(
+    year: int,
+    week_num: int,
+    session_id: str,
+    generate_if_missing: bool = True,
+) -> Optional[bytes]:
+    """
+    Récupère les octets (bytes) du PDF archivé de la séance.
+    Si le fichier physique n'est pas encore présent sur disque mais que la séance existe en mémoire,
+    il régénère le PDF à la volée à partir des données de joueurs sauvegardées.
+    """
+    pdf_path = get_session_pdf_path(year, week_num, session_id)
+    if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 1000:
+        try:
+            with open(pdf_path, "rb") as f:
+                return f.read()
+        except Exception:
+            pass
+
+    if not generate_if_missing:
+        return None
+
+    # Régénération dynamique à la volée
+    week_data = load_week_data(year, week_num)
+    sessions = week_data.get("sessions", {})
+    if session_id not in sessions:
+        return None
+
+    s_info = sessions[session_id]
+    p_data = s_info.get("players_data", [])
+    if not p_data:
+        return None
+
+    df_indiv = pd.DataFrame(p_data)
+    date_val = format_readable_date(s_info.get("date", ""))
+    day_val = s_info.get("day_type", "")
+
+    try:
+        import app
+        pdf_bytes = app.generer_rapport_pdf_coachs(
+            df_indiv=df_indiv,
+            date_seance=date_val or day_val,
+            synthese_note=s_info.get("notes", ""),
+            moyennes_groupes=s_info.get("group_stats"),
+        )
+        if pdf_bytes and len(pdf_bytes) > 1000:
+            try:
+                os.makedirs(WEEKLY_PDFS_DIR, exist_ok=True)
+                with open(pdf_path, "wb") as f_out:
+                    f_out.write(pdf_bytes)
+                s_info["has_pdf"] = True
+                s_info["pdf_filename"] = os.path.basename(pdf_path)
+                fp = get_week_file_path(year, week_num)
+                with open(fp, "w", encoding="utf-8") as f_w:
+                    json.dump(week_data, f_w, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+            return pdf_bytes
+    except Exception as e:
+        print(f"Erreur lors de la régénération du PDF journalier pour {session_id} : {e}")
+
+    return None
+
+
 def save_session_to_memory(
     df_indiv: pd.DataFrame,
     year: int,
@@ -125,17 +245,21 @@ def save_session_to_memory(
     date_str: Optional[str] = None,
     notes: str = "",
     overwrite: bool = True,
+    pdf_bytes: Optional[bytes] = None,
+    group_stats: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str]:
     """
     Sauvegarde manuellement une séance validée dans la mémoire hebdomadaire.
-    Gère la persistance sous format JSON structuré avec typage nettoyé.
+    Archivage simultané des données structurées et du fichier PDF journalier dans data/weekly_pdfs/.
     """
     if df_indiv is None or df_indiv.empty:
         return False, "Le tableau des données joueurs est vide."
 
     clean_day = day_type.strip()
     session_id = clean_day.lower().replace(" ", "_").replace("(", "").replace(")", "").replace("'", "")
-    clean_date = date_str.strip() if date_str else datetime.date.today().strftime("%d/%m/%Y")
+    clean_date = format_readable_date(date_str) if date_str else datetime.date.today().strftime("%d/%m/%Y")
+    if not clean_date:
+        clean_date = datetime.date.today().strftime("%d/%m/%Y")
 
     week_data = load_week_data(year, week_num)
     existing_sessions = week_data.setdefault("sessions", {})
@@ -145,8 +269,6 @@ def save_session_to_memory(
 
     # Sérialisation propre des enregistrements joueurs
     serialized_players: List[Dict[str, Any]] = []
-    col_player = "Nom ; Prénom" if "Nom ; Prénom" in df_indiv.columns else df_indiv.columns[0]
-
     for _, row in df_indiv.iterrows():
         p_dict: Dict[str, Any] = {}
         for col in df_indiv.columns:
@@ -175,6 +297,21 @@ def save_session_to_memory(
     if "Distance Per Min (m/min)" in df_indiv.columns:
         avg_dpm = float(pd.to_numeric(df_indiv["Distance Per Min (m/min)"], errors="coerce").fillna(0).mean())
 
+    # Archivage automatique du fichier PDF si fourni
+    pdf_filename = f"week_{year}_W{week_num:02d}_{session_id}.pdf"
+    pdf_path = get_session_pdf_path(year, week_num, session_id)
+    has_pdf = False
+    if pdf_bytes and len(pdf_bytes) > 1000:
+        try:
+            os.makedirs(WEEKLY_PDFS_DIR, exist_ok=True)
+            with open(pdf_path, "wb") as f_pdf:
+                f_pdf.write(pdf_bytes)
+            has_pdf = True
+        except Exception as e:
+            print(f"Avertissement : Impossible d'écrire le PDF journalier sur disque : {e}")
+    elif os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 1000:
+        has_pdf = True
+
     existing_sessions[session_id] = {
         "session_id": session_id,
         "day_type": clean_day,
@@ -185,6 +322,9 @@ def save_session_to_memory(
         "total_distance_km": round(total_dist_km, 2),
         "total_hi_m": round(total_hi_m, 1),
         "avg_dpm": round(avg_dpm, 1),
+        "has_pdf": has_pdf,
+        "pdf_filename": pdf_filename,
+        "group_stats": group_stats or {},
         "players_data": serialized_players,
     }
 
@@ -200,16 +340,24 @@ def save_session_to_memory(
 
 
 def delete_session_from_memory(year: int, week_num: int, session_id: str) -> Tuple[bool, str]:
-    """Supprime une séance spécifique d'une semaine archivée."""
+    """Supprime une séance spécifique d'une semaine archivée ainsi que son PDF associé."""
     week_data = load_week_data(year, week_num)
     sessions = week_data.get("sessions", {})
     if session_id in sessions:
         day_label = sessions[session_id].get("day_type", session_id)
         del sessions[session_id]
+
+        # Suppression du fichier PDF archivé s'il existe
+        pdf_path = get_session_pdf_path(year, week_num, session_id)
+        if os.path.exists(pdf_path):
+            try:
+                os.remove(pdf_path)
+            except Exception:
+                pass
+
         fp = get_week_file_path(year, week_num)
         try:
             if not sessions:
-                # Si plus aucune séance dans la semaine, supprimer le fichier
                 if os.path.exists(fp):
                     os.remove(fp)
                 return True, f"Séance « {day_label} » supprimée. Semaine {week_num} vide nettoyée."
@@ -461,6 +609,311 @@ def generer_podiums_hebdomadaires(df_hebdo: pd.DataFrame) -> Dict[str, Dict[str,
 
 
 # ==============================================================================
+# GRAPHIQUES MATPLOTLIB POUR LE RAPPORT HEBDOMADAIRE (PDF & STREAMLIT)
+# ==============================================================================
+
+DEFAULT_OBJECTIFS_CONFIG: Dict[str, Dict[str, float]] = {
+    "5 de devant": {
+        "Objectif Distance (m)": 4500.0,
+        "Obj. HSR": 200.0,
+        "Obj. VHSR": 40.0,
+        "Obj. ACC/DEC": 30.0,
+    },
+    "3ème Ligne": {
+        "Objectif Distance (m)": 5500.0,
+        "Obj. HSR": 400.0,
+        "Obj. VHSR": 80.0,
+        "Obj. ACC/DEC": 40.0,
+    },
+    "Trois-quarts": {
+        "Objectif Distance (m)": 6000.0,
+        "Obj. HSR": 550.0,
+        "Obj. VHSR": 150.0,
+        "Obj. ACC/DEC": 45.0,
+    },
+    "Tous les groupes": {
+        "Objectif Distance (m)": 5000.0,
+        "Obj. HSR": 350.0,
+        "Obj. VHSR": 80.0,
+        "Obj. ACC/DEC": 35.0,
+    },
+}
+
+
+def generer_graphique_hebdo_groupes_matplotlib(df_agg: pd.DataFrame) -> io.BytesIO:
+    """
+    Génère le diagramme combiné à barres comparatif de la semaine pour la Page 1 du PDF et le Dashboard :
+    - Distance Moyenne (m) par Groupe (barres bleu marine #1F4E79)
+    - HSR Z3 Moyen (m) par Groupe (barres rouge #A30000)
+    sur les 3 groupes officiels du RCA : 5 de devant, 3ème Ligne, Trois-quarts.
+    """
+    fig, ax1 = plt.subplots(figsize=(6.2, 3.6), dpi=180)
+    fig.patch.set_facecolor("#FFFFFF")
+    ax1.set_facecolor("#FFFFFF")
+
+    groupes = ["5 de devant", "3ème Ligne", "Trois-quarts"]
+    dist_vals: List[float] = []
+    hsr_vals: List[float] = []
+
+    for g in groupes:
+        sub = df_agg[df_agg["Groupe"] == g] if not df_agg.empty and "Groupe" in df_agg.columns else pd.DataFrame()
+        if not sub.empty:
+            d_val = float(sub["Distance Totale (m)"].mean()) if "Distance Totale (m)" in sub.columns else (float(sub["Distance Totale (km)"].mean()) * 1000.0 if "Distance Totale (km)" in sub.columns else 0.0)
+            h_val = float(sub["HSR Z3 (m)"].mean()) if "HSR Z3 (m)" in sub.columns else (float(sub["Haute intensité (m)"].mean()) if "Haute intensité (m)" in sub.columns else 0.0)
+        else:
+            d_val = 0.0
+            h_val = 0.0
+        dist_vals.append(d_val)
+        hsr_vals.append(h_val)
+
+    x = np.arange(len(groupes))
+    width = 0.35
+
+    rects1 = ax1.bar(x - width/2, dist_vals, width, label="Distance Moyenne (m)", color="#1F4E79", edgecolor="none", zorder=3)
+    ax2 = ax1.twinx()
+    rects2 = ax2.bar(x + width/2, hsr_vals, width, label="HSR Z3 Moyen (m)", color="#A30000", edgecolor="none", zorder=3)
+
+    ax1.set_ylabel("Distance Moyenne (m)", color="#1F4E79", fontweight="bold", fontsize=8.5)
+    ax2.set_ylabel("HSR Z3 Moyen (m)", color="#A30000", fontweight="bold", fontsize=8.5)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(groupes, fontweight="bold", fontsize=9.0, color="#1E293B")
+    ax1.set_title("Charge Moyenne Hebdomadaire par Ligne", fontweight="bold", color="#1F4E79", fontsize=10.0, pad=8)
+
+    # Annotations au-dessus des barres
+    for rect in rects1:
+        h = rect.get_height()
+        if h > 0:
+            ax1.annotate(f"{int(round(h)):,d} m".replace(",", " "),
+                         xy=(rect.get_x() + rect.get_width() / 2, h),
+                         xytext=(0, 2), textcoords="offset points",
+                         ha="center", va="bottom", fontsize=7.5, fontweight="bold", color="#1F4E79")
+
+    for rect in rects2:
+        h = rect.get_height()
+        if h > 0:
+            ax2.annotate(f"{int(round(h)):,d} m".replace(",", " "),
+                         xy=(rect.get_x() + rect.get_width() / 2, h),
+                         xytext=(0, 2), textcoords="offset points",
+                         ha="center", va="bottom", fontsize=7.5, fontweight="bold", color="#A30000")
+
+    max_dist = max(dist_vals) if dist_vals and max(dist_vals) > 0 else 1000.0
+    max_hsr = max(hsr_vals) if hsr_vals and max(hsr_vals) > 0 else 100.0
+    ax1.set_ylim(0, max_dist * 1.25)
+    ax2.set_ylim(0, max_hsr * 1.25)
+    ax1.grid(axis="y", linestyle="--", alpha=0.3, zorder=1)
+    ax1.tick_params(axis="y", labelcolor="#1F4E79", labelsize=8)
+    ax2.tick_params(axis="y", labelcolor="#A30000", labelsize=8)
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=2, frameon=False, fontsize=8.0)
+
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def generer_graphique_hebdo_repartition_jours_matplotlib(synthese_jours: Dict[str, Any]) -> io.BytesIO:
+    """
+    Génère le graphique comparatif de la répartition de la charge par séance (Mardi vs Mercredi vs Vendredi...)
+    pour la Page 1 du PDF et le Dashboard.
+    """
+    fig, ax1 = plt.subplots(figsize=(6.2, 2.6), dpi=180)
+    fig.patch.set_facecolor("#FFFFFF")
+    ax1.set_facecolor("#FFFFFF")
+
+    days_labels: List[str] = []
+    dist_vals: List[float] = []
+    hi_vals: List[float] = []
+
+    for s_id, s in synthese_jours.items():
+        if not isinstance(s, dict):
+            continue
+        raw_day = s.get("day_type", s_id)
+        short_day = raw_day.split("(")[0].strip()
+        date_clean = format_readable_date(s.get("date", ""))
+        label = f"{short_day} ({date_clean})" if date_clean else short_day
+        days_labels.append(label)
+        dist_vals.append(float(s.get("total_distance_km", 0.0)))
+        hi_vals.append(float(s.get("total_hi_m", 0.0)))
+
+    if not days_labels:
+        days_labels = ["Séance 1"]
+        dist_vals = [0.0]
+        hi_vals = [0.0]
+
+    x = np.arange(len(days_labels))
+    width = 0.35
+
+    rects1 = ax1.bar(x - width/2, dist_vals, width, label="Distance Totale (km)", color="#1F4E79", edgecolor="none", zorder=3)
+    ax2 = ax1.twinx()
+    rects2 = ax2.bar(x + width/2, hi_vals, width, label="Haute Intensité (m)", color="#A30000", edgecolor="none", zorder=3)
+
+    ax1.set_ylabel("Distance (km)", color="#1F4E79", fontweight="bold", fontsize=8.2)
+    ax2.set_ylabel("H.I. (m)", color="#A30000", fontweight="bold", fontsize=8.2)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(days_labels, fontweight="bold", fontsize=8.2, color="#1E293B")
+    ax1.set_title("Volume Journalier par Séance", fontweight="bold", color="#1F4E79", fontsize=9.5, pad=6)
+
+    for rect in rects1:
+        h = rect.get_height()
+        if h > 0:
+            ax1.annotate(f"{h:.1f} km",
+                         xy=(rect.get_x() + rect.get_width() / 2, h),
+                         xytext=(0, 2), textcoords="offset points",
+                         ha="center", va="bottom", fontsize=7.2, fontweight="bold", color="#1F4E79")
+
+    for rect in rects2:
+        h = rect.get_height()
+        if h > 0:
+            ax2.annotate(f"{int(round(h)):,d} m".replace(",", " "),
+                         xy=(rect.get_x() + rect.get_width() / 2, h),
+                         xytext=(0, 2), textcoords="offset points",
+                         ha="center", va="bottom", fontsize=7.2, fontweight="bold", color="#A30000")
+
+    max_dist = max(dist_vals) if dist_vals and max(dist_vals) > 0 else 5.0
+    max_hi = max(hi_vals) if hi_vals and max(hi_vals) > 0 else 500.0
+    ax1.set_ylim(0, max_dist * 1.25)
+    ax2.set_ylim(0, max_hi * 1.25)
+    ax1.grid(axis="y", linestyle="--", alpha=0.3, zorder=1)
+    ax1.tick_params(axis="y", labelcolor="#1F4E79", labelsize=7.5)
+    ax2.tick_params(axis="y", labelcolor="#A30000", labelsize=7.5)
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=2, frameon=False, fontsize=7.5)
+
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def generer_graphique_hebdo_jauges_matplotlib(
+    group_name: str,
+    df_grp: pd.DataFrame,
+    nb_seances: int = 3,
+) -> io.BytesIO:
+    """
+    Génère une figure 2x2 propre regroupant les 4 duels de barres 'Objectif Hebdomadaire vs Réalisé Cumulé'
+    pour une ligne de poste RCA (5 de devant, 3ème Ligne, Trois-quarts) :
+    1. Distance Totale (km ou m)
+    2. HSR Z3 (m)
+    3. VHSR Sprint (m)
+    4. ACC / DEC (> 3 m/s²)
+    """
+    targets_daily = DEFAULT_OBJECTIFS_CONFIG.get(group_name, DEFAULT_OBJECTIFS_CONFIG["Tous les groupes"])
+    try:
+        from app import OBJECTIFS_CONFIG
+        targets_daily = OBJECTIFS_CONFIG.get(group_name, targets_daily)
+    except Exception:
+        pass
+
+    multiplier = max(nb_seances, 1)
+
+    # Calcul des réalisés moyens par joueur du groupe sur la semaine
+    if not df_grp.empty:
+        val_dist = float(df_grp["Distance Totale (m)"].mean()) if "Distance Totale (m)" in df_grp.columns else (float(df_grp["Distance Totale (km)"].mean()) * 1000.0 if "Distance Totale (km)" in df_grp.columns else 0.0)
+        val_hsr = float(df_grp["HSR Z3 (m)"].mean()) if "HSR Z3 (m)" in df_grp.columns else (float(df_grp["Haute intensité (m)"].mean()) if "Haute intensité (m)" in df_grp.columns else 0.0)
+        val_vhsr = float(df_grp["Distance Sprint VHSR (m)"].mean()) if "Distance Sprint VHSR (m)" in df_grp.columns else (float(df_grp["VHSR (m)"].mean()) if "VHSR (m)" in df_grp.columns else 0.0)
+        val_acc = float(df_grp["Accel/Dec total"].mean()) if "Accel/Dec total" in df_grp.columns else (float(df_grp["Accel/Dec"].mean()) if "Accel/Dec" in df_grp.columns else 0.0)
+    else:
+        val_dist = 0.0
+        val_hsr = 0.0
+        val_vhsr = 0.0
+        val_acc = 0.0
+
+    cards_def = [
+        ("Distance Totale (m)", targets_daily["Objectif Distance (m)"] * multiplier, val_dist, "m"),
+        ("HSR Z3 (m)", targets_daily["Obj. HSR"] * multiplier, val_hsr, "m"),
+        ("VHSR Sprint (m)", targets_daily["Obj. VHSR"] * multiplier, val_vhsr, "m"),
+        ("ACC / DEC (> 3 m/s²)", targets_daily["Obj. ACC/DEC"] * multiplier, val_acc, ""),
+    ]
+
+    fig, axes = plt.subplots(1, 4, figsize=(11.5, 2.5), dpi=180)
+    fig.patch.set_facecolor("#FFFFFF")
+
+    for idx, (title, obj_val, real_val, unit) in enumerate(cards_def):
+        ax = axes[idx]
+        ax.set_facecolor("#F8FAFC")
+        for spine in ax.spines.values():
+            spine.set_color("#CBD5E1")
+            spine.set_linewidth(0.8)
+
+        pct = (real_val / obj_val * 100.0) if obj_val > 0 else 0.0
+
+        x = np.array([0, 1])
+        width = 0.44
+
+        ax.bar(
+            x,
+            [obj_val, real_val],
+            width=width,
+            color=["#1F4E79", "#A30000"],
+            edgecolor="none",
+            zorder=3,
+        )
+
+        ax.set_title(title, fontsize=9.2, fontweight="bold", color="#1F4E79", pad=6)
+        ax.set_xticks(x)
+        ax.set_xticklabels(["Obj.", "Réalisé"], fontsize=8.5, fontweight="bold", color="#334155")
+
+        max_v = max(obj_val, real_val, 1.0)
+        ax.set_ylim(0, max_v * 1.35)
+        ax.grid(axis="y", linestyle="--", alpha=0.35, color="#94A3B8", zorder=1)
+        ax.set_yticklabels([])
+        ax.tick_params(axis="both", which="both", length=0)
+
+        def _fmt(v: float, u: str) -> str:
+            if abs(v - round(v)) < 0.05:
+                s = f"{int(round(v)):,d}".replace(",", " ")
+            else:
+                s = f"{v:.1f}"
+            return f"{s} {u}".strip()
+
+        ax.text(
+            0, obj_val + (max_v * 0.03),
+            _fmt(obj_val, unit),
+            ha="center", va="bottom",
+            fontsize=8.0, fontweight="bold", color="#1F4E79"
+        )
+
+        ax.text(
+            1, real_val + (max_v * 0.03),
+            _fmt(real_val, unit),
+            ha="center", va="bottom",
+            fontsize=8.0, fontweight="bold", color="#A30000"
+        )
+
+        # Badge % d'atteinte
+        badge_bg = "#DCFCE7" if pct >= 95.0 else ("#FEF3C7" if pct >= 75.0 else "#FEE2E2")
+        badge_fg = "#166534" if pct >= 95.0 else ("#92400E" if pct >= 75.0 else "#991B1B")
+
+        ax.text(
+            0.5, 0.88,
+            f"{pct:.0f}%",
+            transform=ax.transAxes,
+            ha="center", va="center",
+            fontsize=8.0, fontweight="bold",
+            color=badge_fg,
+            bbox=dict(boxstyle="round,pad=0.25", facecolor=badge_bg, edgecolor="none", alpha=0.95),
+            zorder=4,
+        )
+
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+# ==============================================================================
 # EXPORT PDF MULTI-PAGES RAPPORT HEBDOMADAIRE (FORMAT PAYSAGE COACHS)
 # ==============================================================================
 
@@ -500,7 +953,9 @@ class RCAWeeklyPDFReport(FPDF):
         super().__init__(orientation="L", unit="mm", format="A4")
         self.week_label = week_label
         self.dates_label = dates_label
-        self.set_auto_page_break(auto=True, margin=10)
+        self.current_subtitle = ""
+        self.set_auto_page_break(auto=False)
+        self.set_margins(left=12, top=20, right=12)
 
     def header(self):
         # Bandeau officiel RCA
@@ -510,10 +965,16 @@ class RCAWeeklyPDFReport(FPDF):
         self.rect(0, 18, 297, 1.2, "F")
 
         # Titre
-        self.set_font("Helvetica", "B", 13)
+        self.set_font("Helvetica", "B", 12)
         self.set_text_color(255, 255, 255)
-        self.set_xy(12, 4)
+        self.set_xy(12, 3)
         self.cell(160, 6, safe_latin1("RUGBY CLUB AMIÉNOIS  |  RAPPORT HEBDOMADAIRE DE CHARGE GPS"), align="L")
+
+        if self.current_subtitle:
+            self.set_xy(12, 9)
+            self.set_font("Helvetica", "B", 9)
+            self.set_text_color(212, 175, 55)
+            self.cell(160, 5, safe_latin1(self.current_subtitle), align="L")
 
         self.set_font("Helvetica", "B", 10)
         self.set_text_color(212, 175, 55)
@@ -526,7 +987,7 @@ class RCAWeeklyPDFReport(FPDF):
         self.set_font("Helvetica", "I", 8)
         self.set_text_color(100, 116, 139)
         self.cell(140, 6, safe_latin1("Cellule Performance & Préparation Physique RCA Amiens - Confidentiel Staff"), align="L")
-        self.cell(147, 6, safe_latin1(f"Page {self.page_no()}"), align="R")
+        self.cell(133, 6, safe_latin1(f"Page {self.page_no()}/4"), align="R")
 
 
 def generate_weekly_pdf_report(
@@ -537,7 +998,7 @@ def generate_weekly_pdf_report(
     notes_coach: str = "",
     **kwargs: Any,
 ) -> bytes:
-    """Génère un rapport PDF multi-pages consolidé de la semaine pour le staff."""
+    """Génère un rapport PDF multi-pages enrichi de graphiques de performance sur 4 pages au format Paysage."""
     if df_hebdo is None:
         df_hebdo = kwargs.get("df_agg", pd.DataFrame())
 
@@ -551,25 +1012,25 @@ def generate_weekly_pdf_report(
     else:
         synthese_dict = {}
 
-    notes_final = notes_coach or kwargs.get("notes", "")
-
     week_label = f"Semaine {week_num:02d} - {year}"
-    dates = [s.get("date", "") for s in synthese_dict.values() if isinstance(s, dict) and s.get("date")]
-    dates_str = f"Du {dates[0]} au {dates[-1]}" if len(dates) >= 2 else (dates[0] if dates else "")
+    raw_dates = [format_readable_date(s.get("date", "")) for s in synthese_dict.values() if isinstance(s, dict) and s.get("date")]
+    raw_dates = [d for d in raw_dates if d]
+    dates_str = f"Du {raw_dates[0]} au {raw_dates[-1]}" if len(raw_dates) >= 2 else (raw_dates[0] if raw_dates else "")
 
     pdf = RCAWeeklyPDFReport(week_label=week_label, dates_label=dates_str)
 
     # --------------------------------------------------------------------------
-    # PAGE 1 : SYNTHÈSE GLOBALE DE LA SEMAINE & CHARGE JOURNALIÈRE
+    # PAGE 1 : SYNTHÈSE GLOBALE DE LA SEMAINE & GRAPHIQUES DE CHARGE
     # --------------------------------------------------------------------------
+    pdf.current_subtitle = "SYNTHÈSE GLOBALE & RÉPARTITION DE LA CHARGE"
     pdf.add_page()
-    pdf.set_y(24)
+    pdf.set_y(22)
 
     # KPIs Globaux
-    tot_km = df_hebdo["Distance Totale (km)"].sum() if not df_hebdo.empty else 0.0
-    tot_hi = df_hebdo["Haute intensité (m)"].sum() if not df_hebdo.empty else 0.0
+    tot_km = float(df_hebdo["Distance Totale (km)"].sum()) if not df_hebdo.empty and "Distance Totale (km)" in df_hebdo.columns else 0.0
+    tot_hi = float(df_hebdo["Haute intensité (m)"].sum()) if not df_hebdo.empty and "Haute intensité (m)" in df_hebdo.columns else 0.0
     nb_joueurs_tot = len(df_hebdo)
-    max_speed = df_hebdo["Top Speed (km/h)"].max() if not df_hebdo.empty else 0.0
+    max_speed = float(df_hebdo["Top Speed (km/h)"].max()) if not df_hebdo.empty and "Top Speed (km/h)" in df_hebdo.columns else 0.0
     nb_seances = len(synthese_dict)
 
     kpis = [
@@ -580,72 +1041,97 @@ def generate_weekly_pdf_report(
         ("Séances Fusionnées", f"{nb_seances} séances"),
     ]
 
-    col_w = 54.0
+    col_w = 52.8
     for idx, (label, val) in enumerate(kpis):
-        x = 12 + idx * (col_w + 2.5)
+        x = 12 + idx * (col_w + 2.2)
         pdf.set_fill_color(248, 250, 252)
         pdf.set_draw_color(226, 232, 240)
-        pdf.rect(x, 24, col_w, 20, "FD")
-        pdf.set_xy(x, 26)
-        pdf.set_font("Helvetica", "B", 8)
+        pdf.rect(x, 22, col_w, 17, "FD")
+        pdf.set_xy(x, 23.5)
+        pdf.set_font("Helvetica", "B", 7.5)
         pdf.set_text_color(100, 116, 139)
         pdf.cell(col_w, 4, label.upper(), align="C")
-        pdf.set_xy(x, 31)
-        pdf.set_font("Helvetica", "B", 13)
+        pdf.set_xy(x, 28.5)
+        pdf.set_font("Helvetica", "B", 11.5)
         pdf.set_text_color(31, 78, 121)
         pdf.cell(col_w, 8, val, align="C")
 
-    # Tableau comparatif journalier
-    pdf.set_xy(12, 48)
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.set_text_color(11, 25, 44)
-    pdf.cell(100, 6, "1. RÉPARTITION DE LA CHARGE PAR SÉANCE DANS LA SEMAINE :", align="L")
+    # Section intermédiaire (X gauche = 12, X droite = 151)
+    y_mid = 42.0
 
-    y_t = 56
-    pdf.set_xy(12, y_t)
+    # Colonne Gauche : Tableau des séances + Graphique Répartition de charge
+    pdf.set_xy(12, y_mid)
+    pdf.set_font("Helvetica", "B", 9.5)
+    pdf.set_text_color(11, 25, 44)
+    pdf.cell(133, 5, "1. SÉANCES ENREGISTRÉES & RÉPARTITION DE CHARGE :", align="L")
+
+    # Petit tableau des séances (width = 133)
+    y_table = y_mid + 6.0
+    pdf.set_xy(12, y_table)
     pdf.set_fill_color(31, 78, 121)
     pdf.set_text_color(255, 255, 255)
-    pdf.set_font("Helvetica", "B", 9)
-    pdf.cell(65, 7, "Séance / Type", 1, 0, "L", fill=True)
-    pdf.cell(35, 7, "Date", 1, 0, "C", fill=True)
-    pdf.cell(40, 7, "Effectif Présent", 1, 0, "C", fill=True)
-    pdf.cell(45, 7, "Distance Totale (km)", 1, 0, "C", fill=True)
-    pdf.cell(45, 7, "Haute Intensité (m)", 1, 0, "C", fill=True)
-    pdf.cell(43, 7, "Moyenne m/min", 1, 1, "C", fill=True)
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.cell(45, 5.5, "Séance / Type", 1, 0, "L", fill=True)
+    pdf.cell(24, 5.5, "Date", 1, 0, "C", fill=True)
+    pdf.cell(20, 5.5, "Effectif", 1, 0, "C", fill=True)
+    pdf.cell(22, 5.5, "Dist. (km)", 1, 0, "C", fill=True)
+    pdf.cell(22, 5.5, "H.I. (m)", 1, 1, "C", fill=True)
 
-    pdf.set_font("Helvetica", "", 9)
+    pdf.set_font("Helvetica", "", 7.5)
     pdf.set_text_color(15, 23, 42)
     for s_id, s in synthese_dict.items():
         pdf.set_x(12)
-        pdf.cell(65, 7, safe_latin1(s.get("day_type", "")), 1, 0, "L")
-        pdf.cell(35, 7, safe_latin1(s.get("date", "")), 1, 0, "C")
-        pdf.cell(40, 7, safe_latin1(f"{s.get('num_players', 0)} joueurs"), 1, 0, "C")
-        pdf.cell(45, 7, safe_latin1(f"{s.get('total_distance_km', 0.0):.2f} km"), 1, 0, "C")
-        pdf.cell(45, 7, safe_latin1(f"{int(round(s.get('total_hi_m', 0.0))):,d} m".replace(",", " ")), 1, 0, "C")
-        pdf.cell(43, 7, safe_latin1(f"{s.get('avg_dpm', 0.0):.1f} m/min"), 1, 1, "C")
+        pdf.cell(45, 5.0, safe_latin1(str(s.get("day_type", ""))[:20]), 1, 0, "L")
+        pdf.cell(24, 5.0, safe_latin1(format_readable_date(s.get("date", ""))), 1, 0, "C")
+        pdf.cell(20, 5.0, safe_latin1(f"{s.get('num_players', 0)}"), 1, 0, "C")
+        pdf.cell(22, 5.0, safe_latin1(f"{float(s.get('total_distance_km', 0.0)):.1f} km"), 1, 0, "C")
+        pdf.cell(22, 5.0, safe_latin1(f"{int(round(float(s.get('total_hi_m', 0.0)))):,d}".replace(",", " ")), 1, 1, "C")
 
-    # Podiums Hebdomadaires
-    pdf.set_xy(12, 94)
-    pdf.set_font("Helvetica", "B", 11)
+    # Graphique Répartition de charge par séance sous le tableau
+    y_chart_days = pdf.get_y() + 2.0
+    try:
+        buf_days = generer_graphique_hebdo_repartition_jours_matplotlib(synthese_dict)
+        chart_days_h = min(40.0, 118.0 - y_chart_days)
+        if chart_days_h > 20:
+            pdf.image(buf_days, x=12, y=y_chart_days, w=133, h=chart_days_h)
+    except Exception as e:
+        print(f"Erreur graphique repartition jours PDF : {e}")
+
+    # Colonne Droite : Graphique Charge moyenne par Ligne
+    pdf.set_xy(151, y_mid)
+    pdf.set_font("Helvetica", "B", 9.5)
     pdf.set_text_color(11, 25, 44)
-    pdf.cell(100, 6, "2. PODIUMS DE LA SEMAINE (TOUS POSTES CONFONDUS) :", align="L")
+    pdf.cell(133, 5, "2. CHARGE MOYENNE PAR LIGNE DE POSTE (SEMAINE) :", align="L")
+
+    try:
+        buf_groups = generer_graphique_hebdo_groupes_matplotlib(df_hebdo)
+        pdf.image(buf_groups, x=151, y=y_mid + 6.0, w=134, h=66.0)
+    except Exception as e:
+        print(f"Erreur graphique groupes hebdo PDF : {e}")
+
+    # 3. Podiums Hebdomadaires en bas de Page 1
+    y_pod = 120.0
+    pdf.set_xy(12, y_pod)
+    pdf.set_font("Helvetica", "B", 10.0)
+    pdf.set_text_color(11, 25, 44)
+    pdf.cell(273, 5, "3. PODIUMS HEBDOMADAIRES (CUMULS DE LA SEMAINE) :", align="L")
 
     podiums = generer_podiums_hebdomadaires(df_hebdo)
     cat_keys = ["Distance Totale (km)", "Top Speed (km/h)", "Haute Intensité (m)"]
-    p_col_w = 89.0
+    p_col_w = 88.5
 
     for idx, c_key in enumerate(cat_keys):
         c_data = podiums.get(c_key, {})
         players = c_data.get("players", [])
-        px = 12 + idx * (p_col_w + 3.0)
-        py = 102
+        px = 12 + idx * (p_col_w + 3.5)
+        py = y_pod + 6.5
 
         # Card header
         pdf.set_xy(px, py)
         pdf.set_fill_color(11, 25, 44)
         pdf.set_text_color(255, 255, 255)
-        pdf.set_font("Helvetica", "B", 9)
-        pdf.cell(p_col_w, 7, safe_latin1(f"{c_data.get('icon', '')} {c_key.upper()}"), 1, 1, "C", fill=True)
+        pdf.set_font("Helvetica", "B", 8.5)
+        pdf.cell(p_col_w, 6.0, safe_latin1(f"{c_data.get('icon', '')} {c_key.upper()}"), 1, 1, "C", fill=True)
 
         for p in players:
             rank = p.get("rank", 1)
@@ -653,59 +1139,75 @@ def generate_weekly_pdf_report(
             p_stat = p.get("stat", "-")
             p_pos = p.get("poste", "")
 
-            # Médaille
             bg_color = (255, 243, 199) if rank == 1 else ((241, 245, 249) if rank == 2 else (255, 237, 213))
             pdf.set_fill_color(*bg_color)
             pdf.set_draw_color(226, 232, 240)
             cur_y = pdf.get_y()
             pdf.set_x(px)
-            pdf.rect(px, cur_y, p_col_w, 16, "FD")
+            pdf.rect(px, cur_y, p_col_w, 14.5, "FD")
 
             # Photo du joueur
             photo_path = photo_manager.get_player_photo_path(p_name)
             has_photo = bool(photo_path and os.path.isfile(photo_path) and os.path.basename(photo_path) != "avatar_par_defaut.png")
             if has_photo:
                 try:
-                    pdf.image(photo_path, x=px + 2, y=cur_y + 1.5, w=13, h=13)
+                    pdf.image(photo_path, x=px + 2, y=cur_y + 1.2, w=12, h=12)
                 except Exception:
                     has_photo = False
 
-            text_x = px + (17 if has_photo else 4)
-            pdf.set_xy(text_x, cur_y + 2)
-            pdf.set_font("Helvetica", "B", 9)
+            text_x = px + (16 if has_photo else 4)
+            pdf.set_xy(text_x, cur_y + 1.5)
+            pdf.set_font("Helvetica", "B", 8.5)
             pdf.set_text_color(15, 23, 42)
-            pdf.cell(p_col_w - 20, 4, safe_latin1(f"#{rank} {p_name}"), align="L")
+            pdf.cell(p_col_w - 18, 3.8, safe_latin1(f"#{rank} {p_name}"), align="L")
 
-            pdf.set_xy(text_x, cur_y + 6.5)
-            pdf.set_font("Helvetica", "I", 7.5)
+            pdf.set_xy(text_x, cur_y + 5.5)
+            pdf.set_font("Helvetica", "I", 7.0)
             pdf.set_text_color(100, 116, 139)
-            pdf.cell(p_col_w - 20, 3.5, safe_latin1(f"Poste : {p_pos}"), align="L")
+            pdf.cell(p_col_w - 18, 3.2, safe_latin1(f"Poste : {p_pos}"), align="L")
 
-            pdf.set_xy(text_x, cur_y + 10.5)
-            pdf.set_font("Helvetica", "B", 9.5)
+            pdf.set_xy(text_x, cur_y + 9.2)
+            pdf.set_font("Helvetica", "B", 9.0)
             pdf.set_text_color(163, 0, 0 if rank == 1 else 31)
-            pdf.cell(p_col_w - 20, 4, safe_latin1(p_stat), align="L")
+            pdf.cell(p_col_w - 18, 3.8, safe_latin1(p_stat), align="L")
 
-            pdf.set_y(cur_y + 16)
+            pdf.set_y(cur_y + 14.5)
 
     # --------------------------------------------------------------------------
-    # PAGES SUIVANTES : TABLEAUX PAR CATÉGORIE DE POSTE (5 de devant, 3e Ligne, 3/4)
+    # PAGES 2, 3 ET 4 : BILAN DÉTAILLÉ PAR LIGNE DE POSTE (AVEC GRAPHIQUES 2x2)
     # --------------------------------------------------------------------------
     groupes_rca = ["5 de devant", "3ème Ligne", "Trois-quarts"]
 
     for grp in groupes_rca:
-        df_sub = df_hebdo[df_hebdo["Groupe"] == grp]
+        df_sub = df_hebdo[df_hebdo["Groupe"] == grp] if not df_hebdo.empty and "Groupe" in df_hebdo.columns else pd.DataFrame()
         if df_sub.empty:
             continue
 
+        pdf.current_subtitle = f"BILAN HEBDOMADAIRE — {grp.upper()} ({len(df_sub)} JOUEURS)"
         pdf.add_page()
-        pdf.set_y(23)
-        pdf.set_font("Helvetica", "B", 12)
+        pdf.set_y(22)
+
+        # 1. Graphiques en barres Objectif Hebdomadaire vs Réalisé Cumulé
+        pdf.set_xy(12, 22)
+        pdf.set_font("Helvetica", "B", 10.0)
         pdf.set_text_color(11, 25, 44)
-        pdf.cell(200, 7, safe_latin1(f"BILAN HEBDOMADAIRE - {grp.upper()} ({len(df_sub)} joueurs)"), align="L")
+        pdf.cell(273, 5, safe_latin1(f"1. OBJECTIFS HEBDOMADAIRES VS RÉALISÉ DU GROUPE ({nb_seances} SÉANCES CUMULÉES) :"), align="L")
+
+        try:
+            buf_jauges = generer_graphique_hebdo_jauges_matplotlib(grp, df_sub, nb_seances=nb_seances)
+            pdf.image(buf_jauges, x=12, y=28, w=273, h=56)
+        except Exception as e:
+            print(f"Erreur graphique jauges hebdo PDF pour {grp} : {e}")
+
+        # 2. Tableau individuel des joueurs
+        y_tbl_grp = 88.0
+        pdf.set_xy(12, y_tbl_grp)
+        pdf.set_font("Helvetica", "B", 10.0)
+        pdf.set_text_color(11, 25, 44)
+        pdf.cell(273, 5, safe_latin1(f"2. STATISTIQUES INDIVIDUELLES CUMULÉES SUR LA SEMAINE :"), align="L")
 
         # Table header
-        pdf.set_xy(12, 32)
+        pdf.set_xy(12, y_tbl_grp + 6.0)
         pdf.set_fill_color(31, 78, 121)
         pdf.set_text_color(255, 255, 255)
         pdf.set_font("Helvetica", "B", 8)
@@ -713,19 +1215,19 @@ def generate_weekly_pdf_report(
         cols_def = [
             ("Joueur", 46, "L"),
             ("Poste", 26, "C"),
-            ("Présences", 32, "C"),
+            ("Présences", 30, "C"),
             ("Temps (min)", 22, "C"),
             ("Dist. (km)", 24, "C"),
             ("H.I. (m)", 26, "C"),
-            ("Sprint (m)", 22, "C"),
-            ("Vmax (km/h)", 24, "C"),
-            ("m/min", 22, "C"),
-            ("Acc/Dec", 25, "C"),
+            ("Sprint (m)", 24, "C"),
+            ("Vmax (km/h)", 25, "C"),
+            ("m/min", 24, "C"),
+            ("Acc/Dec", 26, "C"),
         ]
 
         for title, w, align in cols_def:
-            pdf.cell(w, 7, safe_latin1(title), 1, 0, align, fill=True)
-        pdf.ln(7)
+            pdf.cell(w, 6.5, safe_latin1(title), 1, 0, align, fill=True)
+        pdf.ln(6.5)
 
         pdf.set_font("Helvetica", "", 8)
         pdf.set_text_color(15, 23, 42)
@@ -737,26 +1239,26 @@ def generate_weekly_pdf_report(
             pdf.set_fill_color(*bg)
 
             p_nom = str(row["Nom ; Prénom"])[:22]
-            p_pos = str(row["Poste_Detaille"])[:13]
-            p_pres = f"{row['Nombre de séances']} séance{'s' if row['Nombre de séances'] > 1 else ''}"
-            p_tps = f"{row['Temps total (min)']:.0f}"
-            p_dist = f"{row['Distance Totale (km)']:.2f}"
-            p_hi = f"{int(round(row['Haute intensité (m)'])):,d}".replace(",", " ")
-            p_vhsr = f"{int(round(row['Distance Sprint VHSR (m)'])):,d}".replace(",", " ")
-            p_vmax = f"{row['Top Speed (km/h)']:.1f}"
-            p_dpm = f"{row['Distance/min (m/min)']:.1f}"
-            p_acc = f"{row['Accel/Dec total']}"
+            p_pos = str(row.get("Poste_Detaille", "RCA"))[:13]
+            p_pres = f"{row.get('Nombre de séances', 1)} séance{'s' if row.get('Nombre de séances', 1) > 1 else ''}"
+            p_tps = f"{float(row.get('Temps total (min)', 0.0)):.0f}"
+            p_dist = f"{float(row.get('Distance Totale (km)', 0.0)):.2f}"
+            p_hi = f"{int(round(float(row.get('Haute intensité (m)', 0.0)))):,d}".replace(",", " ")
+            p_vhsr = f"{int(round(float(row.get('Distance Sprint VHSR (m)', 0.0)))):,d}".replace(",", " ")
+            p_vmax = f"{float(row.get('Top Speed (km/h)', 0.0)):.1f}"
+            p_dpm = f"{float(row.get('Distance/min (m/min)', 0.0)):.1f}"
+            p_acc = f"{int(round(float(row.get('Accel/Dec total', 0.0))))}"
 
-            pdf.cell(46, 6.5, safe_latin1(p_nom), 1, 0, "L", fill=True)
-            pdf.cell(26, 6.5, safe_latin1(p_pos), 1, 0, "C", fill=True)
-            pdf.cell(32, 6.5, safe_latin1(p_pres), 1, 0, "C", fill=True)
-            pdf.cell(22, 6.5, safe_latin1(p_tps), 1, 0, "C", fill=True)
-            pdf.cell(24, 6.5, safe_latin1(p_dist), 1, 0, "C", fill=True)
-            pdf.cell(26, 6.5, safe_latin1(p_hi), 1, 0, "C", fill=True)
-            pdf.cell(22, 6.5, safe_latin1(p_vhsr), 1, 0, "C", fill=True)
-            pdf.cell(24, 6.5, safe_latin1(p_vmax), 1, 0, "C", fill=True)
-            pdf.cell(22, 6.5, safe_latin1(p_dpm), 1, 0, "C", fill=True)
-            pdf.cell(25, 6.5, safe_latin1(p_acc), 1, 1, "C", fill=True)
+            pdf.cell(46, 5.8, safe_latin1(p_nom), 1, 0, "L", fill=True)
+            pdf.cell(26, 5.8, safe_latin1(p_pos), 1, 0, "C", fill=True)
+            pdf.cell(30, 5.8, safe_latin1(p_pres), 1, 0, "C", fill=True)
+            pdf.cell(22, 5.8, safe_latin1(p_tps), 1, 0, "C", fill=True)
+            pdf.cell(24, 5.8, safe_latin1(p_dist), 1, 0, "C", fill=True)
+            pdf.cell(26, 5.8, safe_latin1(p_hi), 1, 0, "C", fill=True)
+            pdf.cell(24, 5.8, safe_latin1(p_vhsr), 1, 0, "C", fill=True)
+            pdf.cell(25, 5.8, safe_latin1(p_vmax), 1, 0, "C", fill=True)
+            pdf.cell(24, 5.8, safe_latin1(p_dpm), 1, 0, "C", fill=True)
+            pdf.cell(26, 5.8, safe_latin1(p_acc), 1, 1, "C", fill=True)
             fill_row = not fill_row
 
     return bytes(pdf.output())

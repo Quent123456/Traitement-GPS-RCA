@@ -4476,34 +4476,64 @@ def _creer_semaine_test_demo() -> None:
         if old_c in demo_df.columns:
             demo_df[new_c] = demo_df[old_c]
 
-    demo_df = assign_player_groups(demo_df)
+    demo_df["Distance (m)"] = demo_df["Distance (km)"] * 1000
     demo_df["Distance haute intensité (m)"] = 180.0
     demo_df["Haute intensité Podium (m)"] = 180.0
+    demo_df["Distance Sprint VHSR (m)"] = 45.0
     demo_df["Distance Per Min (m/min)"] = 72.0
     demo_df["%Marche "] = 74.5
     demo_df["Temps de jeu "] = 75.0
+    demo_df["Accélération (> 3 m/s²)"] = 12
+    demo_df["Décélération (> 3 m/s²)"] = 14
+    demo_df = assign_player_groups(demo_df)
 
-    weekly_memory.save_session_to_memory(
-        demo_df, curr_year, curr_week, "Mardi (Entraînement)", "20/10/2026", "Séance axée aérobie & volume"
-    )
-    weekly_memory.save_session_to_memory(
-        demo_df, curr_year, curr_week, "Mercredi (Entraînement)", "21/10/2026", "Séance haute intensité & vitesse"
-    )
-    weekly_memory.save_session_to_memory(
-        demo_df, curr_year, curr_week, "Vendredi (Entraînement)", "23/10/2026", "Mise en place & lancements de jeu"
-    )
+    demo_group_stats = {
+        "5 de devant": {"Dist_m": 4200.0, "HSR_m": 120.0, "VHSR_m": 25.0, "AccDec": 22.0},
+        "3ème Ligne": {"Dist_m": 5100.0, "HSR_m": 210.0, "VHSR_m": 48.0, "AccDec": 28.0},
+        "Trois-quarts": {"Dist_m": 5600.0, "HSR_m": 310.0, "VHSR_m": 85.0, "AccDec": 32.0},
+    }
+
+    seances_demo = [
+        ("Mardi (Entraînement)", "20/10/2026", "Séance axée aérobie & volume"),
+        ("Mercredi (Entraînement)", "21/10/2026", "Séance haute intensité & vitesse"),
+        ("Vendredi (Entraînement)", "23/10/2026", "Mise en place & lancements de jeu"),
+    ]
+
+    for day_label, date_label, note_label in seances_demo:
+        try:
+            pdf_b = generer_rapport_pdf_coachs(
+                df_indiv=demo_df,
+                date_seance=date_label,
+                synthese_note=note_label,
+                moyennes_groupes=demo_group_stats,
+            )
+        except Exception:
+            pdf_b = None
+
+        weekly_memory.save_session_to_memory(
+            df_indiv=demo_df,
+            year=curr_year,
+            week_num=curr_week,
+            day_type=day_label,
+            date_str=date_label,
+            notes=note_label,
+            overwrite=True,
+            pdf_bytes=pdf_b,
+            group_stats=demo_group_stats,
+        )
 
 
 def render_weekly_reports_view() -> None:
     """
     Rendu de la vue indépendante '📅 Rapports Hebdomadaires' :
     1. Sélection de la semaine enregistrée.
-    2. Sélection et nettoyage des séances avec cases à cocher et suppression.
-    3. Agrégation instantanée par joueur sur la semaine (sommes, maximums, moyennes, présences).
-    4. Comparatif de charge journalière (Mardi vs Mercredi vs Vendredi) avec graphique Plotly.
-    5. Podiums hebdomadaires avec photos réelles et HTML nettoyé.
-    6. Tableaux récapitulatifs par catégorie de poste.
-    7. Export PDF du rapport hebdomadaire.
+    2. Cartes de séances avec cases à cocher, suppression, téléchargement direct de PDF et consultation (drill-down).
+    3. Panneau de consultation détaillée d'une séance passée (KPIs, jauges par groupe, podiums, effectif, rechargement).
+    4. Agrégation instantanée par joueur sur la semaine (sommes, maximums, moyennes, présences).
+    5. Graphiques de performance hebdomadaires (Répartition journalière & Comparatif de groupe).
+    6. Podiums hebdomadaires avec photos réelles.
+    7. Bilan par groupe de poste avec jauges 'Objectif Hebdo vs Réalisé' et tableaux détaillés.
+    8. Export PDF du rapport hebdomadaire officiel sur 4 pages avec graphiques.
     """
     st.markdown('<div class="section-header">📅 Mémoire & Rapports Hebdomadaires RCA</div>', unsafe_allow_html=True)
     st.markdown(
@@ -4562,7 +4592,7 @@ def render_weekly_reports_view() -> None:
 
     # 2. Sélection et nettoyage des séances
     st.markdown("#### 📋 Séances enregistrées pour cette semaine")
-    st.caption("Cochez les séances à inclure dans le calcul du rapport hebdomadaire, ou supprimez celles ajoutées par erreur :")
+    st.caption("Cochez les séances à inclure dans le calcul du rapport hebdomadaire, téléchargez le PDF de chaque séance ou explorez son détail :")
 
     selected_sids = []
     nb_cols = min(len(sessions), 4)
@@ -4570,12 +4600,13 @@ def render_weekly_reports_view() -> None:
 
     for idx, (s_id, s_info) in enumerate(sessions.items()):
         target_col = col_cards[idx % len(col_cards)]
+        date_clean_card = weekly_memory.format_readable_date(s_info.get("date", "-"))
         with target_col:
             st.markdown(
                 f"""
                 <div style="background:#FFFFFF;border:1.5px solid #CBD5E1;border-radius:10px;padding:12px;margin-bottom:8px;box-shadow:0 2px 6px rgba(0,0,0,0.04);">
                     <div style="font-weight:800;color:#1F4E79;font-size:0.95rem;">🏉 {s_info.get('day_type', s_id)}</div>
-                    <div style="font-size:0.75rem;color:#64748B;margin-top:2px;">📅 {s_info.get('date', '-')}</div>
+                    <div style="font-size:0.75rem;color:#64748B;margin-top:2px;">📅 {date_clean_card}</div>
                     <div style="font-size:0.80rem;color:#334155;margin-top:6px;">
                         👥 <strong>{s_info.get('num_players', 0)}</strong> joueurs<br/>
                         🏃 <strong>{s_info.get('total_distance_km', 0.0)} km</strong> cumulés<br/>
@@ -4599,6 +4630,121 @@ def render_weekly_reports_view() -> None:
                     weekly_memory.delete_session_from_memory(year, week_num, s_id)
                     st.toast(f"Séance {s_info.get('day_type', s_id)} supprimée.")
                     st.rerun()
+
+            c_pdf, c_exp = st.columns([1.9, 2.1])
+            with c_pdf:
+                pdf_seance_b = weekly_memory.get_session_pdf_bytes(year, week_num, s_id, generate_if_missing=True)
+                clean_tag = date_clean_card.replace("/", "_").replace(" ", "_")
+                if pdf_seance_b:
+                    st.download_button(
+                        label="📄 PDF",
+                        data=pdf_seance_b,
+                        file_name=f"Rapport_Seance_GPS_RCA_{clean_tag}.pdf",
+                        mime="application/pdf",
+                        key=f"dl_pdf_card_{year}_{week_num}_{s_id}",
+                        help=f"Télécharger le PDF journalier de cette séance ({date_clean_card})",
+                        use_container_width=True,
+                    )
+            with c_exp:
+                is_currently_explored = st.session_state.get("explored_session_key") == (year, week_num, s_id)
+                btn_explore_label = "🔼 Masquer" if is_currently_explored else "🔍 Explorer"
+                if st.button(
+                    btn_explore_label,
+                    key=f"btn_explore_{year}_{week_num}_{s_id}",
+                    use_container_width=True,
+                    help="Consulter les détails complets de cette séance passée (KPIs, jauges, podiums, effectif)",
+                ):
+                    if is_currently_explored:
+                        st.session_state["explored_session_key"] = None
+                    else:
+                        st.session_state["explored_session_key"] = (year, week_num, s_id)
+                    st.rerun()
+
+    # Section Drill-Down : Consultation détaillée d'une séance passée
+    explored_key = st.session_state.get("explored_session_key")
+    if explored_key and explored_key[0] == year and explored_key[1] == week_num and explored_key[2] in sessions:
+        exp_sid = explored_key[2]
+        exp_sinfo = sessions[exp_sid]
+        exp_date_str = weekly_memory.format_readable_date(exp_sinfo.get("date", "-"))
+        exp_day_type = exp_sinfo.get("day_type", exp_sid)
+        players_data = exp_sinfo.get("players_data", [])
+        df_exp_session = pd.DataFrame(players_data) if players_data else pd.DataFrame()
+
+        with st.expander(f"🔍 DÉTAILS DE LA SÉANCE : {exp_day_type.upper()} ({exp_date_str})", expanded=True):
+            col_exp_h1, col_exp_h2, col_exp_h3 = st.columns([3, 1.8, 1])
+            with col_exp_h1:
+                st.markdown(f"**Séance du {exp_day_type} ({exp_date_str})** — *{exp_sinfo.get('notes', 'Aucune note')}*")
+            with col_exp_h2:
+                if st.button("🏉 Charger dans l'analyse active", key=f"btn_load_session_{exp_sid}", type="primary", use_container_width=True):
+                    if not df_exp_session.empty:
+                        st.session_state["df_raw"] = df_exp_session
+                        st.session_state["step2_validated"] = True
+                        st.session_state["nav_mode_principal"] = "🏉 Séance du jour (Workflow 3 étapes)"
+                        st.toast(f"Séance {exp_day_type} chargée avec succès !")
+                        st.rerun()
+                    else:
+                        st.warning("Données de séance indisponibles pour le chargement.")
+            with col_exp_h3:
+                if st.button("❌ Fermer", key=f"btn_close_explore_{exp_sid}", use_container_width=True):
+                    st.session_state["explored_session_key"] = None
+                    st.rerun()
+
+            st.write("")
+            ekpi1, ekpi2, ekpi3, ekpi4, ekpi5 = st.columns(5)
+            with ekpi1:
+                st.metric("Joueurs présents", f"{exp_sinfo.get('num_players', len(df_exp_session))}")
+            with ekpi2:
+                st.metric("Volume Total (km)", f"{exp_sinfo.get('total_distance_km', 0.0):.1f} km")
+            with ekpi3:
+                st.metric("Distance Moy./Joueur", f"{exp_sinfo.get('avg_distance_m', 0.0):,.0f} m")
+            with ekpi4:
+                st.metric("Haute Intensité (>14.4)", f"{exp_sinfo.get('total_hi_m', 0.0):,.0f} m")
+            with ekpi5:
+                max_s = exp_sinfo.get("max_speed_kmh", 0.0)
+                max_p = exp_sinfo.get("max_speed_player", "-")
+                st.metric("Vitesse Max", f"{max_s:.1f} km/h", f"{max_p}")
+
+            if not df_exp_session.empty:
+                exp_tab_jauges, exp_tab_podiums, exp_tab_effectif = st.tabs([
+                    "📊 Jauges & Graphiques par Groupe",
+                    "🏆 Podiums de la Séance",
+                    "👥 Tableau de l'Effectif Présent",
+                ])
+
+                with exp_tab_jauges:
+                    grp_tabs = st.tabs(["🏉 5 de devant", "🏉 3ème Ligne", "🏉 Trois-quarts", "📊 Comparatif Barres"])
+                    for g_idx, g_name in enumerate(["5 de devant", "3ème Ligne", "Trois-quarts"]):
+                        with grp_tabs[g_idx]:
+                            sub_g = df_exp_session[df_exp_session["Groupe"] == g_name] if "Groupe" in df_exp_session.columns else pd.DataFrame()
+                            if not sub_g.empty:
+                                m_jauges = calculer_metriques_jauges(sub_g, g_name, mode_calc="Moyenne / joueur")
+                                render_dashboard_objectifs(g_name, m_jauges)
+                                st.caption(f"{len(sub_g)} joueur(s) analysé(s) dans le groupe {g_name}.")
+                            else:
+                                st.info(f"Aucun joueur du groupe {g_name} dans cette séance.")
+
+                    with grp_tabs[3]:
+                        st.markdown("##### 📊 Graphique Comparatif : Distance Moyenne & HSR Z3 Moyen par Groupe")
+                        buf_seance_chart = generer_graphique_groupes_matplotlib(
+                            df_exp_session, moyennes_groupes=exp_sinfo.get("group_stats")
+                        )
+                        st.image(buf_seance_chart, use_container_width=True)
+
+                with exp_tab_podiums:
+                    pod_seance = generer_podium_dynamique(df_exp_session)
+                    render_podium_section(pod_seance)
+
+                with exp_tab_effectif:
+                    cols_seance_pref = [
+                        "Nom ; Prénom", "Poste_Detaille", "Groupe",
+                        "Distance (km)", "Distance haute intensité (m)", "Distance Sprint VHSR (m)",
+                        "Top Speed (km/h)", "Distance Per Min (m/min)", "Temps de jeu ",
+                        "Accélération (> 3 m/s²)", "Décélération (> 3 m/s²)",
+                    ]
+                    cols_seance_valid = [c for c in cols_seance_pref if c in df_exp_session.columns]
+                    st.dataframe(df_exp_session[cols_seance_valid], use_container_width=True, hide_index=True)
+            else:
+                st.info("Détail individuel des joueurs non disponible pour cette séance.")
 
     if not selected_sids:
         st.warning("⚠️ Veuillez cocher au moins une séance pour générer le rapport hebdomadaire.")
@@ -4632,39 +4778,21 @@ def render_weekly_reports_view() -> None:
     with kpi5:
         st.metric("Top Speed Max", f"{max_ts_val:.1f} km/h", f"{max_ts_player}")
 
-    # Comparatif de charge journalière (Mardi vs Mercredi vs Vendredi)
-    st.markdown("#### 📊 Comparatif de Charge par Séance de la Semaine")
-    jours_labels = [s.get("day_type", s_id) for s_id, s in sessions.items() if s_id in selected_sids]
-    distances_jours = [s.get("total_distance_km", 0.0) for s_id, s in sessions.items() if s_id in selected_sids]
-    hi_jours = [s.get("total_hi_m", 0.0) for s_id, s in sessions.items() if s_id in selected_sids]
+    # 4. Graphiques de Performance Hebdomadaires (Répartition journalière & Comparatif par Groupe)
+    st.markdown("#### 📊 Analyse & Répartition de la Charge Hebdomadaire")
+    col_g1, col_g2 = st.columns(2)
 
-    fig_comp = go.Figure()
-    fig_comp.add_trace(go.Bar(
-        x=jours_labels,
-        y=distances_jours,
-        name="Distance Totale Cumulée (km)",
-        marker_color="#1F4E79",
-        yaxis="y",
-    ))
-    fig_comp.add_trace(go.Bar(
-        x=jours_labels,
-        y=hi_jours,
-        name="Haute Intensité Cumulée (m)",
-        marker_color="#A30000",
-        yaxis="y2",
-    ))
-    fig_comp.update_layout(
-        barmode="group",
-        height=320,
-        margin=dict(l=40, r=40, t=30, b=40),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        yaxis=dict(title="Distance (km)", side="left"),
-        yaxis2=dict(title="Haute Intensité (m)", overlaying="y", side="right"),
-        plot_bgcolor="#FFFFFF",
-    )
-    st.plotly_chart(fig_comp, use_container_width=True, config={"displayModeBar": False})
+    with col_g1:
+        st.markdown("##### 📅 Répartition de la Charge par Séance")
+        buf_chart_jours = weekly_memory.generer_graphique_hebdo_repartition_jours_matplotlib(synthese_jours)
+        st.image(buf_chart_jours, use_container_width=True)
 
-    # Podiums Hebdomadaires
+    with col_g2:
+        st.markdown("##### 🏉 Distance & Haute Intensité Moyennes par Groupe")
+        buf_chart_groupes = weekly_memory.generer_graphique_hebdo_groupes_matplotlib(df_agg)
+        st.image(buf_chart_groupes, use_container_width=True)
+
+    # 5. Podiums Hebdomadaires
     st.divider()
     st.markdown('<div class="section-header">🏆 PODIUMS HEBDOMADAIRES (CUMULS DE LA SEMAINE)</div>', unsafe_allow_html=True)
     podiums_hebdo = weekly_memory.generer_podiums_hebdomadaires(df_agg)
@@ -4687,7 +4815,7 @@ def render_weekly_reports_view() -> None:
             else:
                 st.markdown(clean_html, unsafe_allow_html=True)
 
-    # Tableaux récapitulatifs par groupe de poste
+    # 6. Tableaux récapitulatifs & Jauges Objectif vs Réalisé par catégorie de poste
     st.divider()
     st.markdown("#### 📋 Détail par Catégorie de Poste sur la Semaine")
 
@@ -4709,27 +4837,36 @@ def render_weekly_reports_view() -> None:
             if sub_df.empty:
                 st.info(f"Aucun joueur enregistré dans la catégorie {grp_target} cette semaine.")
             else:
+                if grp_target != "ALL":
+                    st.markdown(f"##### 🎯 Objectifs Hebdomadaires vs Réalisé Cumulé ({grp_target})")
+                    buf_grp_jauges = weekly_memory.generer_graphique_hebdo_jauges_matplotlib(
+                        grp_target, sub_df, nb_seances=len(selected_sids)
+                    )
+                    st.image(buf_grp_jauges, use_container_width=True)
+                    st.write("")
+
                 st.dataframe(sub_df[cols_valid], use_container_width=True, hide_index=True)
 
-    # Export PDF du Rapport Hebdomadaire
+    # 7. Export PDF du Rapport Hebdomadaire
     st.divider()
     st.markdown("#### 📥 Télécharger le Rapport Hebdomadaire PDF pour les Coachs")
 
     selected_meta = [s for s_id, s in sessions.items() if s_id in selected_sids]
     pdf_hebdo_bytes = weekly_memory.generate_weekly_pdf_report(
-        df_agg=df_agg,
+        df_hebdo=df_agg,
         year=year,
         week_num=week_num,
+        synthese_jours=synthese_jours,
         selected_sessions_meta=selected_meta,
-        notes=f"Rapport consolidé sur {len(selected_sids)} séance(s) validée(s).",
+        notes_coach=f"Rapport consolidé sur {len(selected_sids)} séance(s) validée(s).",
     )
 
     st.download_button(
-        label=f"📄 Télécharger le Bilan Hebdomadaire PDF (Semaine {week_num} — {year})",
+        label=f"📄 Télécharger le Bilan Hebdomadaire PDF (Semaine {week_num:02d} — {year})",
         data=pdf_hebdo_bytes,
         file_name=f"Rapport_Hebdomadaire_RCA_Semaine_{week_num:02d}_{year}.pdf",
         mime="application/pdf",
-        help="Télécharge le rapport hebdomadaire PDF complet avec bandeau RCA, KPIs, comparatif journalier, podiums avec photos et tableaux détaillés par poste.",
+        help="Télécharge le rapport hebdomadaire PDF complet officiel (4 pages A4 Paysage) avec KPIs, comparatif journalier, jauges hebdo par groupe, podiums avec photos et tableaux détaillés par poste.",
         key="btn_download_weekly_pdf",
         type="primary",
     )
@@ -5887,14 +6024,17 @@ def main() -> None:
                 )
 
             if st.button("✅ Enregistrer ce rapport dans la mémoire de la semaine", type="primary", use_container_width=True, key="btn_save_weekly_memory"):
+                clean_date_val = weekly_memory.format_readable_date(session_date_val) if session_date_val else datetime.date.today().strftime("%d/%m/%Y")
                 success, msg = weekly_memory.save_session_to_memory(
                     df_indiv=df_indiv,
                     year=int(sel_year),
                     week_num=int(sel_week_num),
                     day_type=sel_day_type,
-                    date_str=str(session_date_val) if session_date_val else None,
+                    date_str=clean_date_val,
                     notes=arch_notes,
                     overwrite=overwrite_choice,
+                    pdf_bytes=pdf_bytes,
+                    group_stats=moyennes_groupes,
                 )
                 if success:
                     st.success(f"🎉 {msg}")
