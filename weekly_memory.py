@@ -338,6 +338,16 @@ def save_session_to_memory(
     try:
         with open(fp, "w", encoding="utf-8") as f:
             json.dump(week_data, f, ensure_ascii=False, indent=2)
+
+        try:
+            import github_sync
+            github_sync.push_file_to_github(
+                fp,
+                commit_message=f"data: enregistrement séance {clean_day} (Semaine {week_num:02d} — {year})"
+            )
+        except Exception:
+            pass
+
         return True, f"Séance « {clean_day} » archivée avec succès en Semaine {week_num} ({len(df_indiv)} joueurs)."
     except Exception as e:
         return False, f"Erreur lors de la sauvegarde : {str(e)}"
@@ -364,11 +374,27 @@ def delete_session_from_memory(year: int, week_num: int, session_id: str) -> Tup
             if not sessions:
                 if os.path.exists(fp):
                     os.remove(fp)
+                try:
+                    import github_sync
+                    github_sync.delete_file_from_github(
+                        fp,
+                        commit_message=f"data: suppression de la semaine {week_num:02d} — {year} (vide)"
+                    )
+                except Exception:
+                    pass
                 return True, f"Séance « {day_label} » supprimée. Semaine {week_num} vide nettoyée."
             else:
                 week_data["last_updated"] = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
                 with open(fp, "w", encoding="utf-8") as f:
                     json.dump(week_data, f, ensure_ascii=False, indent=2)
+                try:
+                    import github_sync
+                    github_sync.push_file_to_github(
+                        fp,
+                        commit_message=f"data: suppression séance {day_label} (Semaine {week_num:02d} — {year})"
+                    )
+                except Exception:
+                    pass
                 return True, f"Séance « {day_label} » supprimée de la Semaine {week_num}."
         except Exception as e:
             return False, f"Erreur lors de la suppression : {str(e)}"
@@ -400,6 +426,14 @@ def delete_player_records(player_name: str) -> int:
             if changed:
                 with open(fp, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
+                try:
+                    import github_sync
+                    github_sync.push_file_to_github(
+                        fp,
+                        commit_message=f"data: nettoyage données joueur {player_name} (Semaine {w_info.get('week_num', '')})"
+                    )
+                except Exception:
+                    pass
         except Exception:
             pass
     return total_cleaned
@@ -692,6 +726,16 @@ def sauvegarder_objectifs_config(cfg: Dict[str, Dict[str, float]]) -> bool:
         cfg_to_save["Tous les groupes"] = _calculer_moyenne_tous_groupes(cfg_to_save)
         with open(TARGETS_CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(cfg_to_save, f, ensure_ascii=False, indent=2)
+
+        try:
+            import github_sync
+            github_sync.push_file_to_github(
+                TARGETS_CONFIG_FILE,
+                commit_message="config: mise à jour des objectifs de performance par poste"
+            )
+        except Exception:
+            pass
+
         return True
     except Exception as e:
         print(f"Erreur enregistrement targets_config.json : {e}")
@@ -758,6 +802,7 @@ def restaurer_archive_backup(uploaded_file: Any) -> Tuple[bool, str]:
         try:
             nb_json = 0
             nb_pdf = 0
+            restored_paths: List[str] = []
             with zipfile.ZipFile(io.BytesIO(file_bytes), "r") as zf:
                 for member in zf.infolist():
                     m_name = member.filename.replace("\\", "/")
@@ -769,6 +814,7 @@ def restaurer_archive_backup(uploaded_file: Any) -> Tuple[bool, str]:
                         target_path = os.path.join(WEEKLY_MEMORY_DIR, base)
                         with open(target_path, "wb") as f_out:
                             f_out.write(zf.read(member))
+                        restored_paths.append(target_path)
                         nb_json += 1
                     elif m_name.startswith("weekly_pdfs/") or base.endswith(".pdf"):
                         target_path = os.path.join(WEEKLY_PDFS_DIR, base)
@@ -778,10 +824,22 @@ def restaurer_archive_backup(uploaded_file: Any) -> Tuple[bool, str]:
                     elif base == "targets_config.json":
                         with open(TARGETS_CONFIG_FILE, "wb") as f_out:
                             f_out.write(zf.read(member))
+                        restored_paths.append(TARGETS_CONFIG_FILE)
                     elif base in ["config_rca_gps.json", "config_rca_joueurs_custom.json"]:
                         target_path = os.path.join(str(PROJECT_ROOT), base)
                         with open(target_path, "wb") as f_out:
                             f_out.write(zf.read(member))
+                        restored_paths.append(target_path)
+
+            try:
+                import github_sync
+                for rp in restored_paths:
+                    github_sync.push_file_to_github(
+                        rp,
+                        commit_message=f"backup: restauration {os.path.basename(rp)}"
+                    )
+            except Exception:
+                pass
 
             return True, f"Restauration réussie ! {nb_json} semaine(s) et {nb_pdf} PDF(s) restaurés."
         except Exception as e:
@@ -792,6 +850,7 @@ def restaurer_archive_backup(uploaded_file: Any) -> Tuple[bool, str]:
         try:
             raw_text = file_bytes.decode("utf-8")
             data = json.loads(raw_text)
+            restored_path = None
             if isinstance(data, dict):
                 if "sessions" in data:
                     y = data.get("year", 2026)
@@ -799,16 +858,31 @@ def restaurer_archive_backup(uploaded_file: Any) -> Tuple[bool, str]:
                     target_path = get_week_file_path(y, w)
                     with open(target_path, "w", encoding="utf-8") as f_out:
                         json.dump(data, f_out, ensure_ascii=False, indent=2)
-                    return True, f"Semaine {w} ({y}) restaurée avec succès ({len(data.get('sessions', {}))} séances)."
+                    restored_path = target_path
+                    res_msg = f"Semaine {w} ({y}) restaurée avec succès ({len(data.get('sessions', {}))} séances)."
                 elif "5 de devant" in data and "Trois-quarts" in data:
                     with open(TARGETS_CONFIG_FILE, "w", encoding="utf-8") as f_out:
                         json.dump(data, f_out, ensure_ascii=False, indent=2)
-                    return True, "Configuration des objectifs restaurée avec succès."
+                    restored_path = TARGETS_CONFIG_FILE
+                    res_msg = "Configuration des objectifs restaurée avec succès."
                 else:
                     target_path = os.path.join(WEEKLY_MEMORY_DIR, os.path.basename(filename))
                     with open(target_path, "w", encoding="utf-8") as f_out:
                         json.dump(data, f_out, ensure_ascii=False, indent=2)
-                    return True, f"Fichier {filename} importé dans la mémoire hebdomadaire."
+                    restored_path = target_path
+                    res_msg = f"Fichier {filename} importé dans la mémoire hebdomadaire."
+
+                if restored_path:
+                    try:
+                        import github_sync
+                        github_sync.push_file_to_github(
+                            restored_path,
+                            commit_message=f"backup: restauration {os.path.basename(restored_path)}"
+                        )
+                    except Exception:
+                        pass
+
+                return True, res_msg
         except Exception as e:
             return False, f"Erreur lecture JSON : {str(e)}"
 

@@ -337,6 +337,22 @@ def sauvegarder_joueur_personnalise(
         JOUEURS_CUSTOM_CACHE.clear()
         JOUEURS_CUSTOM_CACHE.update(custom)
         joueurs_data[nom_clean] = poste_clean
+
+        try:
+            import github_sync
+            github_sync.push_file_to_github(
+                CONFIG_JOUEURS_CUSTOM_FILE,
+                commit_message=f"data: ajout/mise à jour du joueur {nom_clean}"
+            )
+            saved_p_path = photo_manager.get_player_photo_path(nom_clean)
+            if saved_p_path and os.path.exists(saved_p_path):
+                github_sync.push_file_to_github(
+                    saved_p_path,
+                    commit_message=f"assets: photo du joueur {nom_clean}"
+                )
+        except Exception:
+            pass
+
         return True, f"Joueur « {nom_clean} » enregistré avec succès !"
     except Exception as e:
         return False, f"Erreur lors de l'enregistrement : {str(e)}"
@@ -356,7 +372,22 @@ def supprimer_joueur_personnalise(nom: str) -> Tuple[bool, str]:
                 del joueurs_data[nom]
 
             # Nettoyage et suppression propre de la photo associée dans assets/players_photos/
+            photo_path_to_del = photo_manager.get_player_photo_path(nom)
             photo_manager.delete_player_photo(nom)
+
+            try:
+                import github_sync
+                github_sync.push_file_to_github(
+                    CONFIG_JOUEURS_CUSTOM_FILE,
+                    commit_message=f"data: suppression du joueur {nom}"
+                )
+                if photo_path_to_del:
+                    github_sync.delete_file_from_github(
+                        photo_path_to_del,
+                        commit_message=f"assets: suppression photo {nom}"
+                    )
+            except Exception:
+                pass
 
             # Nettoyage de toutes les présences du joueur dans la mémoire hebdomadaire (règle sans orphelin)
             try:
@@ -1236,6 +1267,16 @@ def sauvegarder_mapping_gps_persistant(
     try:
         with open(CONFIG_GPS_FILE, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
+
+        try:
+            import github_sync
+            github_sync.push_file_to_github(
+                CONFIG_GPS_FILE,
+                commit_message="config: mise à jour mapping boîtiers GPS"
+            )
+        except Exception:
+            pass
+
         return True
     except Exception:
         return False
@@ -4751,6 +4792,9 @@ def render_weekly_reports_view() -> None:
     # SAUVEGARDE & RESTAURATION DE SÉCURITÉ (PROTECTION CLOUD ANTI-PERTE)
     # --------------------------------------------------------------------------
     with st.expander("🛡️ Sauvegarde de sécurité & Restauration Cloud", expanded=False):
+        import github_sync
+        github_sync.render_github_sync_badge_ui(in_sidebar=False)
+        st.divider()
         st.markdown(
             "<div style='font-size:0.88rem; color:#475569; margin-bottom:12px;'>"
             "Afin de garantir la persistance permanente de vos données (notamment lors des redémarrages automatiques de Streamlit Cloud), "
@@ -4827,6 +4871,14 @@ def render_weekly_reports_view() -> None:
             fp = w_meta["file_path"]
             if os.path.exists(fp):
                 os.remove(fp)
+                try:
+                    import github_sync
+                    github_sync.delete_file_from_github(
+                        fp,
+                        commit_message=f"data: suppression complète de la semaine {week_num:02d} — {year}"
+                    )
+                except Exception:
+                    pass
                 st.toast(f"Semaine {week_num} supprimée.")
                 st.rerun()
 
@@ -5130,8 +5182,42 @@ def main() -> None:
         page_title="Dashboard & Suivi des Charges GPS | Rugby Club Amiénois",
         page_icon="🏉",
         layout="wide",
-        initial_sidebar_state="collapsed",
+        initial_sidebar_state="auto",
     )
+
+    # Indicateur de synchronisation permanente GitHub dans la barre latérale
+    try:
+        import github_sync
+        github_sync.render_github_sync_badge_ui(in_sidebar=True)
+
+        with st.sidebar.expander("🛡️ Sauvegarde & Restauration Rapide", expanded=False):
+            st.caption("Exportez ou restaurez l'intégralité de la mémoire en un clic.")
+            zip_bak = weekly_memory.creer_archive_backup_zip()
+            st.download_button(
+                label="💾 Exporter Sauvegarde (.zip)",
+                data=zip_bak,
+                file_name=f"Backup_Memoire_GPS_RCA_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+                mime="application/zip",
+                key="sb_btn_download_zip",
+                use_container_width=True,
+            )
+            sb_up = st.file_uploader(
+                "Importer une sauvegarde :",
+                type=["zip", "json"],
+                key="sb_file_uploader_backup",
+                help="Restaure les données et synchronise sur GitHub si configuré.",
+            )
+            if sb_up is not None:
+                if st.button("🚀 Restaurer maintenant", key="sb_btn_restore", use_container_width=True):
+                    ok_r, m_r = weekly_memory.restaurer_archive_backup(sb_up)
+                    if ok_r:
+                        st.success(m_r)
+                        st.toast("Sauvegarde restaurée !")
+                        st.rerun()
+                    else:
+                        st.error(m_r)
+    except Exception:
+        pass
 
     # Styles CSS modernes et soignés (Esthétique Canva / Design épuré RCA)
     st.markdown(
@@ -6298,6 +6384,12 @@ def main() -> None:
                 if success:
                     st.success(f"🎉 {msg}")
                     st.toast(msg)
+                    try:
+                        import github_sync
+                        if github_sync.is_github_sync_available():
+                            st.toast("☁️ Synchronisé avec succès sur GitHub !")
+                    except Exception:
+                        pass
                 else:
                     st.error(f"❌ {msg}")
 
