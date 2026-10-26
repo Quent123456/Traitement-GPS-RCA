@@ -20,10 +20,11 @@
     "19": "DE BRUYN Octave",
     "20": "SAINTOMER Lucas",
     "21": "BŒUF Eliot",
-    "22": "MOINE Arthur"
+    "22": "MOINE Arthur",
+    "18": "GENTIEN Tim"
   },
-  "derniere_mise_a_jour": "26/10/2026 13:59:55",
-  "nb_boitiers": 21,
+  "derniere_mise_a_jour": "26/10/2026 14:00:12",
+  "nb_boitiers": 22,
   "last_validated_file_sig": "DB 201026.xlsx_69293",
   "splits_participation": {
     "PECQUERY Thomas:::Split 1": true,
