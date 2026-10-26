@@ -21,8 +21,10 @@ import datetime
 import io
 import json
 import os
+import pathlib
 import re
 from typing import Any, Dict, List, Optional, Tuple, Union
+import zipfile
 
 from fpdf import FPDF
 import matplotlib
@@ -33,9 +35,11 @@ import pandas as pd
 
 import photo_manager
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-WEEKLY_MEMORY_DIR = os.path.join(PROJECT_ROOT, "data", "weekly_memory")
-WEEKLY_PDFS_DIR = os.path.join(PROJECT_ROOT, "data", "weekly_pdfs")
+PROJECT_ROOT = pathlib.Path(__file__).parent.resolve()
+DATA_DIR = PROJECT_ROOT / "data"
+WEEKLY_MEMORY_DIR = str(DATA_DIR / "weekly_memory")
+WEEKLY_PDFS_DIR = str(DATA_DIR / "weekly_pdfs")
+TARGETS_CONFIG_FILE = str(DATA_DIR / "targets_config.json")
 os.makedirs(WEEKLY_MEMORY_DIR, exist_ok=True)
 os.makedirs(WEEKLY_PDFS_DIR, exist_ok=True)
 
@@ -609,35 +613,211 @@ def generer_podiums_hebdomadaires(df_hebdo: pd.DataFrame) -> Dict[str, Dict[str,
 
 
 # ==============================================================================
-# GRAPHIQUES MATPLOTLIB POUR LE RAPPORT HEBDOMADAIRE (PDF & STREAMLIT)
+# GESTION DES OBJECTIFS DE CHARGE ATHLÉTIQUE (PAR GROUPE DE POSTE)
 # ==============================================================================
 
-DEFAULT_OBJECTIFS_CONFIG: Dict[str, Dict[str, float]] = {
-    "5 de devant": {
-        "Objectif Distance (m)": 4500.0,
-        "Obj. HSR": 200.0,
-        "Obj. VHSR": 40.0,
-        "Obj. ACC/DEC": 30.0,
+PREREGLAGES_OBJECTIFS: Dict[str, Dict[str, Dict[str, float]]] = {
+    "Standard / Référence RCA": {
+        "5 de devant": {"Objectif Distance (m)": 4500.0, "Obj. HSR": 250.0, "Obj. VHSR": 50.0, "Obj. ACC/DEC": 35.0},
+        "3ème Ligne": {"Objectif Distance (m)": 5500.0, "Obj. HSR": 450.0, "Obj. VHSR": 100.0, "Obj. ACC/DEC": 45.0},
+        "Trois-quarts": {"Objectif Distance (m)": 6200.0, "Obj. HSR": 700.0, "Obj. VHSR": 250.0, "Obj. ACC/DEC": 50.0},
     },
-    "3ème Ligne": {
-        "Objectif Distance (m)": 5500.0,
-        "Obj. HSR": 400.0,
-        "Obj. VHSR": 80.0,
-        "Obj. ACC/DEC": 40.0,
+    "Mardi (Aérobie & Volume)": {
+        "5 de devant": {"Objectif Distance (m)": 4800.0, "Obj. HSR": 220.0, "Obj. VHSR": 40.0, "Obj. ACC/DEC": 32.0},
+        "3ème Ligne": {"Objectif Distance (m)": 5600.0, "Obj. HSR": 380.0, "Obj. VHSR": 80.0, "Obj. ACC/DEC": 40.0},
+        "Trois-quarts": {"Objectif Distance (m)": 6200.0, "Obj. HSR": 550.0, "Obj. VHSR": 180.0, "Obj. ACC/DEC": 45.0},
     },
-    "Trois-quarts": {
-        "Objectif Distance (m)": 6000.0,
-        "Obj. HSR": 550.0,
-        "Obj. VHSR": 150.0,
-        "Obj. ACC/DEC": 45.0,
+    "Mercredi (Intensité & Vitesse)": {
+        "5 de devant": {"Objectif Distance (m)": 4200.0, "Obj. HSR": 280.0, "Obj. VHSR": 60.0, "Obj. ACC/DEC": 38.0},
+        "3ème Ligne": {"Objectif Distance (m)": 5200.0, "Obj. HSR": 500.0, "Obj. VHSR": 120.0, "Obj. ACC/DEC": 48.0},
+        "Trois-quarts": {"Objectif Distance (m)": 5800.0, "Obj. HSR": 750.0, "Obj. VHSR": 300.0, "Obj. ACC/DEC": 55.0},
     },
-    "Tous les groupes": {
-        "Objectif Distance (m)": 5000.0,
-        "Obj. HSR": 350.0,
-        "Obj. VHSR": 80.0,
-        "Obj. ACC/DEC": 35.0,
+    "Vendredi (Mise en place / Affûtage)": {
+        "5 de devant": {"Objectif Distance (m)": 3200.0, "Obj. HSR": 140.0, "Obj. VHSR": 30.0, "Obj. ACC/DEC": 22.0},
+        "3ème Ligne": {"Objectif Distance (m)": 3800.0, "Obj. HSR": 250.0, "Obj. VHSR": 60.0, "Obj. ACC/DEC": 28.0},
+        "Trois-quarts": {"Objectif Distance (m)": 4200.0, "Obj. HSR": 350.0, "Obj. VHSR": 120.0, "Obj. ACC/DEC": 32.0},
+    },
+    "Dimanche (Match)": {
+        "5 de devant": {"Objectif Distance (m)": 5500.0, "Obj. HSR": 350.0, "Obj. VHSR": 80.0, "Obj. ACC/DEC": 45.0},
+        "3ème Ligne": {"Objectif Distance (m)": 6800.0, "Obj. HSR": 650.0, "Obj. VHSR": 180.0, "Obj. ACC/DEC": 55.0},
+        "Trois-quarts": {"Objectif Distance (m)": 7500.0, "Obj. HSR": 900.0, "Obj. VHSR": 400.0, "Obj. ACC/DEC": 60.0},
     },
 }
+
+DEFAULT_OBJECTIFS_CONFIG: Dict[str, Dict[str, float]] = {
+    "5 de devant": {"Objectif Distance (m)": 4500.0, "Obj. HSR": 250.0, "Obj. VHSR": 50.0, "Obj. ACC/DEC": 35.0},
+    "3ème Ligne": {"Objectif Distance (m)": 5500.0, "Obj. HSR": 450.0, "Obj. VHSR": 100.0, "Obj. ACC/DEC": 45.0},
+    "Trois-quarts": {"Objectif Distance (m)": 6200.0, "Obj. HSR": 700.0, "Obj. VHSR": 250.0, "Obj. ACC/DEC": 50.0},
+    "Tous les groupes": {"Objectif Distance (m)": 5400.0, "Obj. HSR": 460.0, "Obj. VHSR": 130.0, "Obj. ACC/DEC": 43.0},
+}
+
+
+def _calculer_moyenne_tous_groupes(cfg: Dict[str, Dict[str, float]]) -> Dict[str, float]:
+    """Calcule la moyenne pondérée / équiprobable de référence pour 'Tous les groupes'."""
+    keys = ["Objectif Distance (m)", "Obj. HSR", "Obj. VHSR", "Obj. ACC/DEC"]
+    grps = ["5 de devant", "3ème Ligne", "Trois-quarts"]
+    res = {}
+    for k in keys:
+        vals = [float(cfg.get(g, {}).get(k, 0.0)) for g in grps if g in cfg]
+        res[k] = round(sum(vals) / max(len(vals), 1), 1)
+    return res
+
+
+def charger_objectifs_config() -> Dict[str, Dict[str, float]]:
+    """
+    Charge les objectifs configurés depuis data/targets_config.json.
+    Si le fichier n'existe pas encore, il est automatiquement initialisé avec les standards RCA.
+    """
+    if os.path.exists(TARGETS_CONFIG_FILE):
+        try:
+            with open(TARGETS_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and "5 de devant" in data:
+                    if "Tous les groupes" not in data:
+                        data["Tous les groupes"] = _calculer_moyenne_tous_groupes(data)
+                    return data
+        except Exception as e:
+            print(f"Avertissement targets_config.json : {e}")
+
+    cfg = dict(DEFAULT_OBJECTIFS_CONFIG)
+    sauvegarder_objectifs_config(cfg)
+    return cfg
+
+
+def sauvegarder_objectifs_config(cfg: Dict[str, Dict[str, float]]) -> bool:
+    """Enregistre les objectifs configurés dans data/targets_config.json."""
+    try:
+        os.makedirs(os.path.dirname(TARGETS_CONFIG_FILE), exist_ok=True)
+        cfg_to_save = dict(cfg)
+        cfg_to_save["Tous les groupes"] = _calculer_moyenne_tous_groupes(cfg_to_save)
+        with open(TARGETS_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg_to_save, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"Erreur enregistrement targets_config.json : {e}")
+        return False
+
+
+# ==============================================================================
+# SÉCURITÉ CLOUD : SAUVEGARDE & RESTAURATION (ARCHIVE ZIP & JSON)
+# ==============================================================================
+
+def creer_archive_backup_zip() -> bytes:
+    """
+    Génère une archive ZIP complète de toute la mémoire hebdomadaire :
+    - Tous les JSON de data/weekly_memory/
+    - Tous les PDFs de data/weekly_pdfs/
+    - La configuration des objectifs data/targets_config.json
+    - Les mappings persistants config_rca_gps.json & config_rca_joueurs_custom.json
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        if os.path.exists(WEEKLY_MEMORY_DIR):
+            for fname in os.listdir(WEEKLY_MEMORY_DIR):
+                if fname.endswith(".json"):
+                    fpath = os.path.join(WEEKLY_MEMORY_DIR, fname)
+                    zf.write(fpath, arcname=f"weekly_memory/{fname}")
+
+        if os.path.exists(WEEKLY_PDFS_DIR):
+            for fname in os.listdir(WEEKLY_PDFS_DIR):
+                if fname.endswith(".pdf"):
+                    fpath = os.path.join(WEEKLY_PDFS_DIR, fname)
+                    zf.write(fpath, arcname=f"weekly_pdfs/{fname}")
+
+        if os.path.exists(TARGETS_CONFIG_FILE):
+            zf.write(TARGETS_CONFIG_FILE, arcname="targets_config.json")
+
+        for cfg_name in ["config_rca_gps.json", "config_rca_joueurs_custom.json"]:
+            cp = os.path.join(str(PROJECT_ROOT), cfg_name)
+            if os.path.exists(cp):
+                zf.write(cp, arcname=cfg_name)
+
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def restaurer_archive_backup(uploaded_file: Any) -> Tuple[bool, str]:
+    """
+    Restaure une sauvegarde à partir d'un fichier ZIP ou JSON uploadé par l'utilisateur.
+    Garantit une persistance absolue en cas de réinitialisation d'un conteneur Streamlit Cloud.
+    """
+    if uploaded_file is None:
+        return False, "Aucun fichier fourni."
+
+    filename = getattr(uploaded_file, "name", "").lower()
+    file_bytes = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
+
+    if not file_bytes:
+        return False, "Le fichier de sauvegarde est vide."
+
+    os.makedirs(WEEKLY_MEMORY_DIR, exist_ok=True)
+    os.makedirs(WEEKLY_PDFS_DIR, exist_ok=True)
+
+    # 1. Format ZIP
+    if filename.endswith(".zip") or zipfile.is_zipfile(io.BytesIO(file_bytes)):
+        try:
+            nb_json = 0
+            nb_pdf = 0
+            with zipfile.ZipFile(io.BytesIO(file_bytes), "r") as zf:
+                for member in zf.infolist():
+                    m_name = member.filename.replace("\\", "/")
+                    if m_name.endswith("/") or ".." in m_name:
+                        continue
+                    base = os.path.basename(m_name)
+
+                    if m_name.startswith("weekly_memory/") or (base.startswith("week_") and base.endswith(".json")):
+                        target_path = os.path.join(WEEKLY_MEMORY_DIR, base)
+                        with open(target_path, "wb") as f_out:
+                            f_out.write(zf.read(member))
+                        nb_json += 1
+                    elif m_name.startswith("weekly_pdfs/") or base.endswith(".pdf"):
+                        target_path = os.path.join(WEEKLY_PDFS_DIR, base)
+                        with open(target_path, "wb") as f_out:
+                            f_out.write(zf.read(member))
+                        nb_pdf += 1
+                    elif base == "targets_config.json":
+                        with open(TARGETS_CONFIG_FILE, "wb") as f_out:
+                            f_out.write(zf.read(member))
+                    elif base in ["config_rca_gps.json", "config_rca_joueurs_custom.json"]:
+                        target_path = os.path.join(str(PROJECT_ROOT), base)
+                        with open(target_path, "wb") as f_out:
+                            f_out.write(zf.read(member))
+
+            return True, f"Restauration réussie ! {nb_json} semaine(s) et {nb_pdf} PDF(s) restaurés."
+        except Exception as e:
+            return False, f"Erreur lors de la décompression : {str(e)}"
+
+    # 2. Format JSON
+    elif filename.endswith(".json"):
+        try:
+            raw_text = file_bytes.decode("utf-8")
+            data = json.loads(raw_text)
+            if isinstance(data, dict):
+                if "sessions" in data:
+                    y = data.get("year", 2026)
+                    w = data.get("week_num", 1)
+                    target_path = get_week_file_path(y, w)
+                    with open(target_path, "w", encoding="utf-8") as f_out:
+                        json.dump(data, f_out, ensure_ascii=False, indent=2)
+                    return True, f"Semaine {w} ({y}) restaurée avec succès ({len(data.get('sessions', {}))} séances)."
+                elif "5 de devant" in data and "Trois-quarts" in data:
+                    with open(TARGETS_CONFIG_FILE, "w", encoding="utf-8") as f_out:
+                        json.dump(data, f_out, ensure_ascii=False, indent=2)
+                    return True, "Configuration des objectifs restaurée avec succès."
+                else:
+                    target_path = os.path.join(WEEKLY_MEMORY_DIR, os.path.basename(filename))
+                    with open(target_path, "w", encoding="utf-8") as f_out:
+                        json.dump(data, f_out, ensure_ascii=False, indent=2)
+                    return True, f"Fichier {filename} importé dans la mémoire hebdomadaire."
+        except Exception as e:
+            return False, f"Erreur lecture JSON : {str(e)}"
+
+    return False, "Format non reconnu (.zip ou .json attendu)."
+
+
+# ==============================================================================
+# GRAPHIQUES MATPLOTLIB POUR LE RAPPORT HEBDOMADAIRE (PDF & STREAMLIT)
+# ==============================================================================
 
 
 def generer_graphique_hebdo_groupes_matplotlib(df_agg: pd.DataFrame) -> io.BytesIO:
@@ -798,6 +978,7 @@ def generer_graphique_hebdo_jauges_matplotlib(
     group_name: str,
     df_grp: pd.DataFrame,
     nb_seances: int = 3,
+    objectifs_config: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> io.BytesIO:
     """
     Génère une figure 2x2 propre regroupant les 4 duels de barres 'Objectif Hebdomadaire vs Réalisé Cumulé'
@@ -807,12 +988,8 @@ def generer_graphique_hebdo_jauges_matplotlib(
     3. VHSR Sprint (m)
     4. ACC / DEC (> 3 m/s²)
     """
-    targets_daily = DEFAULT_OBJECTIFS_CONFIG.get(group_name, DEFAULT_OBJECTIFS_CONFIG["Tous les groupes"])
-    try:
-        from app import OBJECTIFS_CONFIG
-        targets_daily = OBJECTIFS_CONFIG.get(group_name, targets_daily)
-    except Exception:
-        pass
+    active_cfg = objectifs_config or charger_objectifs_config()
+    targets_daily = active_cfg.get(group_name, active_cfg.get("Tous les groupes", DEFAULT_OBJECTIFS_CONFIG["Tous les groupes"]))
 
     multiplier = max(nb_seances, 1)
 
@@ -996,6 +1173,7 @@ def generate_weekly_pdf_report(
     week_num: int = 1,
     synthese_jours: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
     notes_coach: str = "",
+    objectifs_config: Optional[Dict[str, Dict[str, float]]] = None,
     **kwargs: Any,
 ) -> bytes:
     """Génère un rapport PDF multi-pages enrichi de graphiques de performance sur 4 pages au format Paysage."""
@@ -1194,7 +1372,9 @@ def generate_weekly_pdf_report(
         pdf.cell(273, 5, safe_latin1(f"1. OBJECTIFS HEBDOMADAIRES VS RÉALISÉ DU GROUPE ({nb_seances} SÉANCES CUMULÉES) :"), align="L")
 
         try:
-            buf_jauges = generer_graphique_hebdo_jauges_matplotlib(grp, df_sub, nb_seances=nb_seances)
+            buf_jauges = generer_graphique_hebdo_jauges_matplotlib(
+                grp, df_sub, nb_seances=nb_seances, objectifs_config=objectifs_config
+            )
             pdf.image(buf_jauges, x=12, y=28, w=273, h=56)
         except Exception as e:
             print(f"Erreur graphique jauges hebdo PDF pour {grp} : {e}")

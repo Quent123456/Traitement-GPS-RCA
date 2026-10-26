@@ -23,6 +23,7 @@ Description :
 from __future__ import annotations
 
 import base64
+import copy
 import datetime
 import io
 import json
@@ -552,6 +553,140 @@ OBJECTIFS_CONFIG: Dict[str, Dict[str, float]] = {
         "Obj. ACC/DEC": 43.0,
     },
 }
+
+
+def get_active_objectifs_config() -> Dict[str, Dict[str, float]]:
+    """
+    Récupère la configuration des objectifs actuellement active en session Streamlit,
+    ou charge la configuration sauvegardée sur disque dans data/targets_config.json.
+    """
+    if "objectifs_config" in st.session_state and isinstance(st.session_state["objectifs_config"], dict):
+        return st.session_state["objectifs_config"]
+
+    cfg = weekly_memory.charger_objectifs_config()
+    st.session_state["objectifs_config"] = cfg
+    return cfg
+
+
+def render_config_objectifs_ui() -> Dict[str, Dict[str, float]]:
+    """
+    Panneau interactif de configuration manuelle des objectifs de performance par groupe de poste.
+    Permet :
+    - De choisir un préréglage (Mardi, Mercredi, Vendredi, Match, Standard).
+    - De modifier manuellement les 4 métriques clés pour les 3 groupes (5 de devant, 3ème Ligne, Trois-quarts).
+    - De sauvegarder comme configuration par défaut dans data/targets_config.json.
+    - Met à jour immédiatement st.session_state["objectifs_config"].
+    """
+    with st.expander("🎯 Paramétrer les Objectifs par Poste (5 de devant, 3ème Ligne, Trois-quarts)", expanded=False):
+        st.markdown(
+            "<div style='font-size:0.88rem; color:#475569; margin-bottom:12px;'>"
+            "Définissez ici les valeurs cibles (objectifs) individuelles moyennes par séance. "
+            "Ces cibles s'appliquent instantanément aux jauges de comparaison du Dashboard, "
+            "au calcul du <b>% d'accomplissement</b> et au <b>Rapport PDF officiel</b>."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        current_cfg = get_active_objectifs_config()
+
+        # 1. Préréglages et actions
+        col_preset, col_btn_apply, col_btn_save = st.columns([3, 1.5, 2.2])
+        with col_preset:
+            preset_names = list(getattr(weekly_memory, "PREREGLAGES_OBJECTIFS", {}).keys())
+            selected_preset = st.selectbox(
+                "⚡ Préréglages par type de séance :",
+                options=["-- Conserver les réglages actuels --"] + preset_names,
+                index=0,
+                key="select_targets_preset",
+                help="Charge instantanément une grille d'objectifs adaptée au thème du jour.",
+            )
+        with col_btn_apply:
+            st.write("")
+            st.write("")
+            if st.button("🔄 Appliquer", key="btn_apply_target_preset", use_container_width=True, help="Charge les valeurs de ce préréglage"):
+                prereglages = getattr(weekly_memory, "PREREGLAGES_OBJECTIFS", {})
+                if selected_preset in prereglages:
+                    new_cfg = copy.deepcopy(prereglages[selected_preset])
+                    new_cfg["Tous les groupes"] = weekly_memory._calculer_moyenne_tous_groupes(new_cfg)
+                    st.session_state["objectifs_config"] = new_cfg
+                    st.toast(f"Préréglage « {selected_preset} » appliqué !")
+                    st.rerun()
+
+        with col_btn_save:
+            st.write("")
+            st.write("")
+            if st.button("💾 Sauvegarder par défaut", key="btn_save_target_defaults", use_container_width=True, help="Enregistre la configuration actuelle comme défaut permanent"):
+                cfg_to_save = st.session_state.get("objectifs_config", current_cfg)
+                weekly_memory.sauvegarder_objectifs_config(cfg_to_save)
+                st.toast("✅ Objectifs sauvegardés par défaut dans data/targets_config.json !")
+
+        # 2. Grille de 3 colonnes pour les 3 groupes de postes
+        col_avants, col_3eme, col_arrieres = st.columns(3)
+
+        cfg_5dev = current_cfg.get("5 de devant", {})
+        cfg_3eme = current_cfg.get("3ème Ligne", {})
+        cfg_tq = current_cfg.get("Trois-quarts", {})
+
+        updated_cfg: Dict[str, Dict[str, float]] = {}
+
+        with col_avants:
+            st.markdown(
+                "<div style='background-color:#EFF6FF; border:1px solid #BFDBFE; border-radius:8px; padding:8px 12px; margin-bottom:10px;'>"
+                "<b style='color:#1D4ED8; font-size:0.95rem;'>🏉 5 DE DEVANT</b><br/>"
+                "<span style='font-size:0.75rem; color:#64748B;'>Piliers • Talonneurs • 2èmes lignes</span></div>",
+                unsafe_allow_html=True,
+            )
+            v_dist_5 = st.number_input("Volume Total (m) :", min_value=500.0, max_value=12000.0, step=100.0, value=float(cfg_5dev.get("Objectif Distance (m)", 4500.0)), key="in_tgt_5dev_dist")
+            v_hsr_5 = st.number_input("Distance HSR (>18 km/h) (m) :", min_value=0.0, max_value=3000.0, step=20.0, value=float(cfg_5dev.get("Obj. HSR", 250.0)), key="in_tgt_5dev_hsr")
+            v_vhsr_5 = st.number_input("Distance VHSR (>21 km/h) (m) :", min_value=0.0, max_value=1500.0, step=10.0, value=float(cfg_5dev.get("Obj. VHSR", 50.0)), key="in_tgt_5dev_vhsr")
+            v_acc_5 = st.number_input("ACC / DEC (nb) :", min_value=0.0, max_value=200.0, step=1.0, value=float(cfg_5dev.get("Obj. ACC/DEC", 35.0)), key="in_tgt_5dev_acc")
+            updated_cfg["5 de devant"] = {
+                "Objectif Distance (m)": v_dist_5,
+                "Obj. HSR": v_hsr_5,
+                "Obj. VHSR": v_vhsr_5,
+                "Obj. ACC/DEC": v_acc_5,
+            }
+
+        with col_3eme:
+            st.markdown(
+                "<div style='background-color:#FEF2F2; border:1px solid #FECACA; border-radius:8px; padding:8px 12px; margin-bottom:10px;'>"
+                "<b style='color:#B91C1C; font-size:0.95rem;'>🏉 3ÈME LIGNE</b><br/>"
+                "<span style='font-size:0.75rem; color:#64748B;'>Flankers • N°8</span></div>",
+                unsafe_allow_html=True,
+            )
+            v_dist_3 = st.number_input("Volume Total (m) :", min_value=500.0, max_value=12000.0, step=100.0, value=float(cfg_3eme.get("Objectif Distance (m)", 5500.0)), key="in_tgt_3eme_dist")
+            v_hsr_3 = st.number_input("Distance HSR (>18 km/h) (m) :", min_value=0.0, max_value=3000.0, step=20.0, value=float(cfg_3eme.get("Obj. HSR", 450.0)), key="in_tgt_3eme_hsr")
+            v_vhsr_3 = st.number_input("Distance VHSR (>21 km/h) (m) :", min_value=0.0, max_value=1500.0, step=10.0, value=float(cfg_3eme.get("Obj. VHSR", 100.0)), key="in_tgt_3eme_vhsr")
+            v_acc_3 = st.number_input("ACC / DEC (nb) :", min_value=0.0, max_value=200.0, step=1.0, value=float(cfg_3eme.get("Obj. ACC/DEC", 45.0)), key="in_tgt_3eme_acc")
+            updated_cfg["3ème Ligne"] = {
+                "Objectif Distance (m)": v_dist_3,
+                "Obj. HSR": v_hsr_3,
+                "Obj. VHSR": v_vhsr_3,
+                "Obj. ACC/DEC": v_acc_3,
+            }
+
+        with col_arrieres:
+            st.markdown(
+                "<div style='background-color:#F0FDF4; border:1px solid #BBF7D0; border-radius:8px; padding:8px 12px; margin-bottom:10px;'>"
+                "<b style='color:#15803D; font-size:0.95rem;'>🏉 TROIS-QUARTS</b><br/>"
+                "<span style='font-size:0.75rem; color:#64748B;'>Demis • Centres • Ailiers • Arrières</span></div>",
+                unsafe_allow_html=True,
+            )
+            v_dist_tq = st.number_input("Volume Total (m) :", min_value=500.0, max_value=12000.0, step=100.0, value=float(cfg_tq.get("Objectif Distance (m)", 6200.0)), key="in_tgt_tq_dist")
+            v_hsr_tq = st.number_input("Distance HSR (>18 km/h) (m) :", min_value=0.0, max_value=3000.0, step=20.0, value=float(cfg_tq.get("Obj. HSR", 700.0)), key="in_tgt_tq_hsr")
+            v_vhsr_tq = st.number_input("Distance VHSR (>21 km/h) (m) :", min_value=0.0, max_value=1500.0, step=10.0, value=float(cfg_tq.get("Obj. VHSR", 250.0)), key="in_tgt_tq_vhsr")
+            v_acc_tq = st.number_input("ACC / DEC (nb) :", min_value=0.0, max_value=200.0, step=1.0, value=float(cfg_tq.get("Obj. ACC/DEC", 50.0)), key="in_tgt_tq_acc")
+            updated_cfg["Trois-quarts"] = {
+                "Objectif Distance (m)": v_dist_tq,
+                "Obj. HSR": v_hsr_tq,
+                "Obj. VHSR": v_vhsr_tq,
+                "Obj. ACC/DEC": v_acc_tq,
+            }
+
+        updated_cfg["Tous les groupes"] = weekly_memory._calculer_moyenne_tous_groupes(updated_cfg)
+        st.session_state["objectifs_config"] = updated_cfg
+        return updated_cfg
+
 
 FINAL_COLUMNS: List[str] = [
     'Nom ; Prénom',
@@ -2728,9 +2863,12 @@ def calculer_metriques_jauges(
     group_name: str,
     mode_calc: str = "Moyenne / joueur",
     group_split_stats: Optional[Dict[str, float]] = None,
+    config_objectifs: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> Dict[str, Tuple[float, float]]:
     """Calcule dynamiquement les 4 métriques des jauges pour le groupe sélectionné."""
-    targets = OBJECTIFS_CONFIG.get(group_name, OBJECTIFS_CONFIG["Tous les groupes"])
+    if config_objectifs is None:
+        config_objectifs = get_active_objectifs_config()
+    targets = config_objectifs.get(group_name, config_objectifs.get("Tous les groupes", OBJECTIFS_CONFIG["Tous les groupes"]))
 
     if len(df_subset) == 0:
         return {k: (v, 0.0) for k, v in targets.items()}
@@ -3708,6 +3846,7 @@ def generer_rapport_pdf_coachs(
     date_seance: Optional[Any] = None,
     synthese_note: Optional[str] = None,
     moyennes_groupes: Optional[Dict[str, Dict[str, float]]] = None,
+    config_objectifs: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> bytes:
     """
     Génère un rapport PDF multi-pages complet et aéré de 7 pages au format Paysage (Landscape),
@@ -3955,7 +4094,9 @@ def generer_rapport_pdf_coachs(
         pdf.add_page()
 
         # Récupération des objectifs et des valeurs réalisées par le groupe
-        cfg_targets = OBJECTIFS_CONFIG.get(grp, OBJECTIFS_CONFIG["Tous les groupes"])
+        if config_objectifs is None:
+            config_objectifs = get_active_objectifs_config()
+        cfg_targets = config_objectifs.get(grp, config_objectifs.get("Tous les groupes", OBJECTIFS_CONFIG["Tous les groupes"]))
         if moyennes_groupes and grp in moyennes_groupes:
             grp_stats = moyennes_groupes[grp]
         else:
@@ -4560,28 +4701,29 @@ def _creer_semaine_test_demo() -> None:
         ("Vendredi (Entraînement)", "23/10/2026", "Mise en place & lancements de jeu"),
     ]
 
-    for day_label, date_label, note_label in seances_demo:
-        try:
-            pdf_b = generer_rapport_pdf_coachs(
-                df_indiv=demo_df,
-                date_seance=date_label,
-                synthese_note=note_label,
-                moyennes_groupes=demo_group_stats,
-            )
-        except Exception:
-            pdf_b = None
+    for w_target in set([curr_week, 43]):
+        for day_label, date_label, note_label in seances_demo:
+            try:
+                pdf_b = generer_rapport_pdf_coachs(
+                    df_indiv=demo_df,
+                    date_seance=date_label,
+                    synthese_note=note_label,
+                    moyennes_groupes=demo_group_stats,
+                )
+            except Exception:
+                pdf_b = None
 
-        weekly_memory.save_session_to_memory(
-            df_indiv=demo_df,
-            year=curr_year,
-            week_num=curr_week,
-            day_type=day_label,
-            date_str=date_label,
-            notes=note_label,
-            overwrite=True,
-            pdf_bytes=pdf_b,
-            group_stats=demo_group_stats,
-        )
+            weekly_memory.save_session_to_memory(
+                df_indiv=demo_df,
+                year=curr_year,
+                week_num=w_target,
+                day_type=day_label,
+                date_str=date_label,
+                notes=note_label,
+                overwrite=True,
+                pdf_bytes=pdf_b,
+                group_stats=demo_group_stats,
+            )
 
 
 def render_weekly_reports_view() -> None:
@@ -4604,6 +4746,50 @@ def render_weekly_reports_view() -> None:
         '</div>',
         unsafe_allow_html=True,
     )
+
+    # --------------------------------------------------------------------------
+    # SAUVEGARDE & RESTAURATION DE SÉCURITÉ (PROTECTION CLOUD ANTI-PERTE)
+    # --------------------------------------------------------------------------
+    with st.expander("🛡️ Sauvegarde de sécurité & Restauration Cloud", expanded=False):
+        st.markdown(
+            "<div style='font-size:0.88rem; color:#475569; margin-bottom:12px;'>"
+            "Afin de garantir la persistance permanente de vos données (notamment lors des redémarrages automatiques de Streamlit Cloud), "
+            "vous pouvez <b>télécharger en 1 clic une archive complète (.zip)</b> de toutes les séances enregistrées et des objectifs, "
+            "ou <b>réimporter votre sauvegarde</b> pour restaurer instantanément l'intégralité de la mémoire."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        c_bak_dl, c_bak_up = st.columns([1, 1])
+        with c_bak_dl:
+            st.markdown("##### 📦 Exporter les données")
+            zip_data = weekly_memory.creer_archive_backup_zip()
+            now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+            st.download_button(
+                label="💾 Télécharger la Sauvegarde (.zip)",
+                data=zip_data,
+                file_name=f"Backup_Memoire_GPS_RCA_{now_str}.zip",
+                mime="application/zip",
+                help="Archive zip complète contenant tous les fichiers JSON de semaines, les PDF des séances et la configuration des objectifs.",
+                use_container_width=True,
+                key="btn_download_cloud_backup_zip",
+            )
+        with c_bak_up:
+            st.markdown("##### 📥 Restaurer une sauvegarde")
+            up_backup = st.file_uploader(
+                "Fichier de sauvegarde (.zip ou .json) :",
+                type=["zip", "json"],
+                key="file_uploader_backup_restore",
+                help="Sélectionnez l'archive .zip téléchargée précédemment ou un fichier JSON de semaine.",
+            )
+            if up_backup is not None:
+                if st.button("🚀 Restaurer cette sauvegarde", type="primary", use_container_width=True, key="btn_execute_restore"):
+                    success_rest, msg_rest = weekly_memory.restaurer_archive_backup(up_backup)
+                    if success_rest:
+                        st.success(f"🎉 {msg_rest}")
+                        st.toast("Restauration réussie !")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {msg_rest}")
 
     weeks_list = weekly_memory.list_saved_weeks()
 
@@ -4779,7 +4965,7 @@ def render_weekly_reports_view() -> None:
                         with grp_tabs[g_idx]:
                             sub_g = df_exp_session[df_exp_session["Groupe"] == g_name] if "Groupe" in df_exp_session.columns else pd.DataFrame()
                             if not sub_g.empty:
-                                m_jauges = calculer_metriques_jauges(sub_g, g_name, mode_calc="Moyenne / joueur")
+                                m_jauges = calculer_metriques_jauges(sub_g, g_name, mode_calc="Moyenne / joueur", config_objectifs=get_active_objectifs_config())
                                 render_dashboard_objectifs(g_name, m_jauges)
                                 st.caption(f"{len(sub_g)} joueur(s) analysé(s) dans le groupe {g_name}.")
                             else:
@@ -4902,7 +5088,7 @@ def render_weekly_reports_view() -> None:
                 if grp_target != "ALL":
                     st.markdown(f"##### 🎯 Objectifs Hebdomadaires vs Réalisé Cumulé ({grp_target})")
                     buf_grp_jauges = weekly_memory.generer_graphique_hebdo_jauges_matplotlib(
-                        grp_target, sub_df, nb_seances=len(selected_sids)
+                        grp_target, sub_df, nb_seances=len(selected_sids), objectifs_config=get_active_objectifs_config()
                     )
                     st.image(buf_grp_jauges, use_container_width=True)
                     st.write("")
@@ -4921,6 +5107,7 @@ def render_weekly_reports_view() -> None:
         synthese_jours=synthese_jours,
         selected_sessions_meta=selected_meta,
         notes_coach=f"Rapport consolidé sur {len(selected_sids)} séance(s) validée(s).",
+        objectifs_config=get_active_objectifs_config(),
     )
 
     st.download_button(
@@ -5784,7 +5971,12 @@ def main() -> None:
         df_groupe_actif = df_indiv[df_indiv["Groupe"] == groupe_selectionne]
 
     # --------------------------------------------------------------------------
-    # 3.2. SECTION RETOUR JOURNÉE (JAUGES CONNECTÉES AUX VRAIES DONNÉES)
+    # 3.2. CONFIGURATION MANUELLE DES OBJECTIFS PAR LIGNE DE POSTE (CHANTIER 2)
+    # --------------------------------------------------------------------------
+    active_objectifs = render_config_objectifs_ui()
+
+    # --------------------------------------------------------------------------
+    # 3.3. SECTION RETOUR JOURNÉE (JAUGES CONNECTÉES AUX VRAIES DONNÉES)
     # --------------------------------------------------------------------------
     st.markdown('<div class="section-header">📊 RETOUR JOURNÉE</div>', unsafe_allow_html=True)
     st.markdown(
@@ -5807,7 +5999,8 @@ def main() -> None:
             sub = df_indiv[df_indiv["Groupe"] == "5 de devant"]
             metrics = calculer_metriques_jauges(
                 sub, "5 de devant", mode_calc=mode_calcul,
-                group_split_stats=moyennes_groupes.get("5 de devant") if mode_calcul == "Moyenne / joueur" else None
+                group_split_stats=moyennes_groupes.get("5 de devant") if mode_calcul == "Moyenne / joueur" else None,
+                config_objectifs=active_objectifs,
             )
             render_dashboard_objectifs("5 de devant", metrics)
             st.caption(f"Effectif analysé : {len(sub)} joueurs dans les 5 de devant.")
@@ -5816,7 +6009,8 @@ def main() -> None:
             sub = df_indiv[df_indiv["Groupe"] == "3ème Ligne"]
             metrics = calculer_metriques_jauges(
                 sub, "3ème Ligne", mode_calc=mode_calcul,
-                group_split_stats=moyennes_groupes.get("3ème Ligne") if mode_calcul == "Moyenne / joueur" else None
+                group_split_stats=moyennes_groupes.get("3ème Ligne") if mode_calcul == "Moyenne / joueur" else None,
+                config_objectifs=active_objectifs,
             )
             render_dashboard_objectifs("3ème Ligne", metrics)
             st.caption(f"Effectif analysé : {len(sub)} joueurs en 3ème Ligne.")
@@ -5825,7 +6019,8 @@ def main() -> None:
             sub = df_indiv[df_indiv["Groupe"] == "Trois-quarts"]
             metrics = calculer_metriques_jauges(
                 sub, "Trois-quarts", mode_calc=mode_calcul,
-                group_split_stats=moyennes_groupes.get("Trois-quarts") if mode_calcul == "Moyenne / joueur" else None
+                group_split_stats=moyennes_groupes.get("Trois-quarts") if mode_calcul == "Moyenne / joueur" else None,
+                config_objectifs=active_objectifs,
             )
             render_dashboard_objectifs("Trois-quarts", metrics)
             st.caption(f"Effectif analysé : {len(sub)} joueurs chez les Trois-quarts.")
@@ -5839,7 +6034,8 @@ def main() -> None:
     else:
         metrics = calculer_metriques_jauges(
             df_groupe_actif, groupe_selectionne, mode_calc=mode_calcul,
-            group_split_stats=moyennes_groupes.get(groupe_selectionne) if mode_calcul == "Moyenne / joueur" else None
+            group_split_stats=moyennes_groupes.get(groupe_selectionne) if mode_calcul == "Moyenne / joueur" else None,
+            config_objectifs=active_objectifs,
         )
         render_dashboard_objectifs(groupe_selectionne, metrics)
         st.caption(f"Effectif analysé : {len(df_groupe_actif)} joueur(s) dans le groupe '{groupe_selectionne}'.")
@@ -5988,6 +6184,7 @@ def main() -> None:
             date_seance=session_date_val,
             synthese_note=synthese_note_active,
             moyennes_groupes=moyennes_groupes,
+            config_objectifs=active_objectifs,
         )
         clean_date_tag = re.sub(r"[^0-9a-zA-Z]", "_", str(session_date_val or datetime.date.today().strftime("%d_%m_%Y")))
         pdf_filename = f"Rapport_Seance_GPS_RCA_{clean_date_tag}.pdf"
