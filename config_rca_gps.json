@@ -23,7 +23,7 @@
     "22": "OPE",
     "18": "SAINTOMER Lucas"
   },
-  "derniere_mise_a_jour": "05/11/2026 11:39:50",
+  "derniere_mise_a_jour": "05/11/2026 11:40:41",
   "nb_boitiers": 22,
   "last_validated_file_sig": "DB 041126.xlsx_101997",
   "splits_participation": {
@@ -33,7 +33,7 @@
     "PECQUERY Thomas:::Split 4": true,
     "Jean-Étienne ( TIJ):::Split 1": true,
     "Jean-Étienne ( TIJ):::Split 2": true,
-    "Jean-Étienne ( TIJ):::Split 3": false,
+    "Jean-Étienne ( TIJ):::Split 3": true,
     "Jean-Étienne ( TIJ):::Split 4": false,
     "COZIC Adrien:::Split 1": true,
     "COZIC Adrien:::Split 2": true,
