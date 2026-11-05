@@ -3607,6 +3607,7 @@ def safe_latin1(s: Any) -> str:
 
 _render_podium_section_pdf = weekly_memory._render_podium_section_pdf
 _render_podium_page_aere = weekly_memory._render_podium_page_aere
+_render_podiums_compact_horizontal = weekly_memory._render_podiums_compact_horizontal
 calculer_sous_titres_podium = weekly_memory.calculer_sous_titres_podium
 
 

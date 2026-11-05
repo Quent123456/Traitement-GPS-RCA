@@ -1633,6 +1633,206 @@ def _render_podium_page_aere(
             pdf.cell(col_w - 6.0, 7.0, safe_latin1(name_disp), align="C")
 
 
+def _render_podiums_compact_horizontal(
+    pdf: Any,
+    podium_data: Dict[str, Dict[str, Any]],
+    y_start: float,
+    col_w: float = 87.5,
+    col_gap: float = 5.25,
+    subtitle_map: Optional[Dict[str, str]] = None,
+    is_large: bool = False,
+    x_start: float = 12.0,
+) -> float:
+    """
+    Rend un bloc podium horizontal élégant de 3 catégories côte-à-côte :
+    - Top Speed (km/h)
+    - % de marche
+    - Haute intensité (m)
+
+    Deux formats supportés :
+    - is_large=True (Page 1 - Podium Général) : cartes aérées avec photos 14x14 mm, nom, poste et stats grand format.
+    - is_large=False (Pages 2, 3, 4 - Lignes de poste) : format compact haute densité avec photos 8.4x8.4 mm.
+
+    Gère gracieusement le cas où un groupe compte strictement moins de 3 joueurs ou 0 joueur sans exception.
+    Retourne la hauteur totale occupée (mm).
+    """
+    categories_config = [
+        {
+            "key": "Top speed (km/h)",
+            "title": "TOP SPEED (km/h)",
+            "def_sub": "Vitesse Maximale",
+            "color": (31, 78, 121),
+        },
+        {
+            "key": "% de marche",
+            "title": "% DE MARCHE",
+            "def_sub": "Moins marche (> 0%)",
+            "color": (46, 90, 136),
+        },
+        {
+            "key": "Haute intensité (m)",
+            "title": "HAUTE INTENSITÉ (m)",
+            "def_sub": "Cumul Z3+Z4+Z5 > 14.4 km/h",
+            "color": (163, 0, 0),
+        },
+    ]
+
+    rank_badges = {
+        1: {"label": "1er", "bg": (217, 119, 6), "fg": (255, 255, 255)},
+        2: {"label": "2e", "bg": (100, 116, 139), "fg": (255, 255, 255)},
+        3: {"label": "3e", "bg": (180, 83, 9), "fg": (255, 255, 255)},
+    }
+
+    if is_large:
+        banner_h = 5.8
+        row_h = 20.0
+        row_gap = 1.6
+        photo_size = 14.0
+        title_font = 8.5
+        sub_font = 7.0
+    else:
+        banner_h = 5.0
+        row_h = 10.5
+        row_gap = 1.0
+        photo_size = 8.4
+        title_font = 7.5
+        sub_font = 6.2
+
+    y_rows_start = y_start + banner_h + (1.2 if is_large else 1.0)
+
+    for c_idx, cat in enumerate(categories_config):
+        x_c = x_start + c_idx * (col_w + col_gap)
+        accent_color = cat["color"]
+
+        # 1. En-tête de catégorie
+        pdf.set_fill_color(*accent_color)
+        pdf.rect(x_c, y_start, col_w, banner_h, style="F")
+
+        # Liseré doré décoratif
+        pdf.set_fill_color(212, 175, 55)
+        pdf.rect(x_c, y_start + banner_h - 0.5, col_w, 0.5, style="F")
+
+        pdf.set_xy(x_c + 2.0, y_start)
+        pdf.set_font("Helvetica", "B", title_font)
+        pdf.set_text_color(255, 255, 255)
+        pdf.cell(col_w * 0.55, banner_h - 0.5, safe_latin1(cat["title"]), align="L")
+
+        sub_val = subtitle_map.get(cat["key"]) if isinstance(subtitle_map, dict) else None
+        sub_txt = str(sub_val).strip() if sub_val is not None else cat["def_sub"]
+        pdf.set_xy(x_c + col_w * 0.55, y_start)
+        pdf.set_font("Helvetica", "I", sub_font)
+        pdf.set_text_color(241, 245, 249)
+        pdf.cell(col_w * 0.45 - 2.0, banner_h - 0.5, safe_latin1(sub_txt), align="R")
+
+        # 2. Les 3 lignes joueurs
+        cat_data = podium_data.get(cat["key"], {}) if isinstance(podium_data, dict) else {}
+        players = cat_data.get("players", []) if isinstance(cat_data, dict) else []
+
+        for r_idx in range(1, 4):
+            y_row = y_rows_start + (r_idx - 1) * (row_h + row_gap)
+            p_entry = players[r_idx - 1] if len(players) >= r_idx and isinstance(players[r_idx - 1], dict) else {}
+            p_name = safe_latin1(p_entry.get("name", "-")).strip()
+            p_poste = safe_latin1(p_entry.get("poste", "")).strip()
+            p_stat = safe_latin1(p_entry.get("stat", "-")).strip()
+
+            # Fond de carte blanc
+            pdf.set_fill_color(255, 255, 255)
+            pdf.set_draw_color(226, 232, 240)
+            pdf.rect(x_c, y_row, col_w, row_h, style="FD")
+
+            # Liseré d'accent vertical à gauche
+            accent_w = 2.0 if is_large else 1.5
+            pdf.set_fill_color(*accent_color)
+            pdf.rect(x_c, y_row, accent_w, row_h, style="F")
+
+            # Badge de rang (1er, 2e, 3e)
+            badge = rank_badges.get(r_idx, {"label": f"{r_idx}e", "bg": (100, 116, 139), "fg": (255, 255, 255)})
+            b_w = 10.0 if is_large else 7.5
+            b_h = 8.0 if is_large else 7.5
+            b_x = x_c + accent_w + 1.2
+            b_y = y_row + (row_h - b_h) / 2.0
+            pdf.set_fill_color(*badge["bg"])
+            pdf.rect(b_x, b_y, b_w, b_h, style="F")
+            pdf.set_xy(b_x, b_y)
+            pdf.set_font("Helvetica", "B", 7.0 if is_large else 6.0)
+            pdf.set_text_color(*badge["fg"])
+            pdf.cell(b_w, b_h, badge["label"], align="C")
+
+            # Photo / Avatar
+            photo_x = b_x + b_w + 1.5
+            photo_y = y_row + (row_h - photo_size) / 2.0
+            photo_path = photo_manager.get_player_photo_path(p_name) if p_name and p_name != "-" else None
+            has_photo = bool(photo_path and os.path.isfile(photo_path) and os.path.basename(photo_path) not in ["avatar_par_defaut.jpg", "avatar_par_defaut.png"])
+
+            if has_photo:
+                try:
+                    pdf.image(photo_path, x=photo_x, y=photo_y, w=photo_size, h=photo_size)
+                    pdf.set_draw_color(203, 213, 225)
+                    pdf.rect(photo_x, photo_y, photo_size, photo_size, style="D")
+                except Exception:
+                    has_photo = False
+
+            if not has_photo:
+                pdf.set_fill_color(241, 245, 249)
+                pdf.set_draw_color(203, 213, 225)
+                pdf.rect(photo_x, photo_y, photo_size, photo_size, style="FD")
+                pdf.set_xy(photo_x, photo_y)
+                pdf.set_font("Helvetica", "B", 7.0 if is_large else 5.5)
+                pdf.set_text_color(148, 163, 184)
+                initials = "".join([part[0].upper() for part in p_name.split() if part])[:2] if (p_name and p_name != "-") else "?"
+                pdf.cell(photo_size, photo_size, safe_latin1(initials), align="C")
+
+            # Textes et statistiques
+            if is_large:
+                x_text = photo_x + photo_size + 2.5
+                w_text = (x_c + col_w) - x_text - 1.5
+
+                disp_name = p_name if len(p_name) <= 22 else p_name[:20] + ".."
+                pdf.set_xy(x_text, y_row + 1.8)
+                pdf.set_font("Helvetica", "B", 7.8)
+                pdf.set_text_color(30, 41, 59)
+                pdf.cell(w_text, 4.8, safe_latin1(disp_name), align="L")
+
+                disp_poste = p_poste if p_poste else "RCA"
+                if len(disp_poste) > 18:
+                    disp_poste = disp_poste[:16] + ".."
+                pdf.set_xy(x_text, y_row + 6.8)
+                pdf.set_font("Helvetica", "", 6.8)
+                pdf.set_text_color(100, 116, 139)
+                pdf.cell(w_text, 4.2, safe_latin1(disp_poste), align="L")
+
+                pdf.set_xy(x_text, y_row + 11.8)
+                pdf.set_font("Helvetica", "B", 9.5)
+                pdf.set_text_color(*accent_color)
+                pdf.cell(w_text, 5.5, safe_latin1(p_stat), align="L")
+            else:
+                x_text = photo_x + photo_size + 1.8
+                x_stat = x_c + col_w - 29.0
+                w_name = x_stat - x_text - 1.0
+
+                disp_name = p_name if len(p_name) <= 18 else p_name[:16] + ".."
+                pdf.set_xy(x_text, y_row + 1.0)
+                pdf.set_font("Helvetica", "B", 6.8)
+                pdf.set_text_color(30, 41, 59)
+                pdf.cell(w_name, 4.2, safe_latin1(disp_name), align="L")
+
+                disp_poste = p_poste if p_poste else "RCA"
+                if len(disp_poste) > 15:
+                    disp_poste = disp_poste[:13] + ".."
+                pdf.set_xy(x_text, y_row + 5.2)
+                pdf.set_font("Helvetica", "", 5.8)
+                pdf.set_text_color(100, 116, 139)
+                pdf.cell(w_name, 3.8, safe_latin1(disp_poste), align="L")
+
+                pdf.set_xy(x_stat, y_row)
+                pdf.set_font("Helvetica", "B", 7.8)
+                pdf.set_text_color(*accent_color)
+                pdf.cell(27.5, row_h, safe_latin1(p_stat), align="R")
+
+    total_h = banner_h + (1.2 if is_large else 1.0) + 3 * row_h + 2 * row_gap
+    return total_h
+
+
 class RCAWeeklyPDFReport(FPDF):
     """Classe FPDF Landscape dédiée au rapport hebdomadaire du RCA."""
     def __init__(self, week_label: str, dates_label: str):
@@ -1694,7 +1894,7 @@ class RCAWeeklyPDFReport(FPDF):
         self.set_font("Helvetica", "I", 8)
         self.set_text_color(100, 116, 139)
         self.cell(140, 6, safe_latin1("Cellule Performance & Préparation Physique RCA Amiens - Confidentiel Staff"), align="L")
-        self.cell(133, 6, safe_latin1(f"Page {self.page_no()}/{{nb}}"), align="R")
+        self.cell(133, 6, safe_latin1(f"Page {self.page_no()}/4"), align="R")
 
 
 def generate_weekly_pdf_report(
@@ -1734,44 +1934,13 @@ def generate_weekly_pdf_report(
         return bytes(pdf.output())
 
     # =========================================================================
-    # 1. PODIUM GÉNÉRAL HEBDOMADAIRE (TOUT EN HAUT DU DOCUMENT, SOUS L'EN-TÊTE)
+    # PAGE 1 : SYNTHÈSE GLOBALE DU CLUB & PODIUM GÉNÉRAL (FORMAT STRICT 4 PAGES)
     # =========================================================================
-    pdf.current_subtitle = "PODIUM GÉNÉRAL HEBDOMADAIRE — EFFECTIF COMPLET"
+    pdf.current_subtitle = "SYNTHÈSE GLOBALE DU CLUB & CHARGE HEBDOMADAIRE"
     pdf.add_page()
-    podium_general = generer_podiums_hebdomadaires(df_hebdo)
-    sub_map_gen = calculer_sous_titres_podium(df_hebdo, label_prefix="Moy. semaine")
-    _render_podium_page_aere(
-        pdf=pdf,
-        podium_data=podium_general,
-        group_name="Effectif Global",
-        subtitle_map=sub_map_gen,
-    )
+    pdf.set_y(20.0)
 
-    # =========================================================================
-    # 2. PODIUMS PAR POSTE / GROUPE POSITIONNEL (À LA SUITE DU PODIUM GÉNÉRAL)
-    # =========================================================================
-    groupes_rca = ["5 de devant", "3ème Ligne", "Trois-quarts"]
-    for grp in groupes_rca:
-        df_grp = df_hebdo[df_hebdo["Groupe"] == grp] if "Groupe" in df_hebdo.columns else pd.DataFrame()
-        pdf.current_subtitle = f"PODIUMS HEBDOMADAIRES — {grp.upper()}"
-        pdf.add_page()
-        podium_grp = generer_podiums_hebdomadaires(df_hebdo, groupe=grp)
-        sub_map_grp = calculer_sous_titres_podium(df_grp, label_prefix="Moyenne")
-        _render_podium_page_aere(
-            pdf=pdf,
-            podium_data=podium_grp,
-            group_name=grp,
-            subtitle_map=sub_map_grp,
-        )
-
-    # =========================================================================
-    # 3. SYNTHÈSE GLOBALE DE LA SEMAINE & RÉPARTITION DE LA CHARGE
-    # =========================================================================
-    pdf.current_subtitle = "SYNTHÈSE GLOBALE & RÉPARTITION DE LA CHARGE"
-    pdf.add_page()
-    pdf.set_y(22)
-
-    # KPIs Globaux
+    # 1. KPIs Globaux
     tot_km = float(df_hebdo["Distance Totale (km)"].sum()) if not df_hebdo.empty and "Distance Totale (km)" in df_hebdo.columns else 0.0
     tot_hi = float(df_hebdo["Haute intensité (m)"].sum()) if not df_hebdo.empty and "Haute intensité (m)" in df_hebdo.columns else 0.0
     nb_joueurs_tot = len(df_hebdo)
@@ -1788,112 +1957,148 @@ def generate_weekly_pdf_report(
 
     col_w = 52.8
     for idx, (label, val) in enumerate(kpis):
-        x = 12 + idx * (col_w + 2.2)
+        x = 12 + idx * (col_w + 2.25)
         pdf.set_fill_color(248, 250, 252)
         pdf.set_draw_color(226, 232, 240)
-        pdf.rect(x, 22, col_w, 17, "FD")
-        pdf.set_xy(x, 23.5)
-        pdf.set_font("Helvetica", "B", 7.5)
+        pdf.rect(x, 20.0, col_w, 13.0, "FD")
+        pdf.set_xy(x, 21.0)
+        pdf.set_font("Helvetica", "B", 7.0)
         pdf.set_text_color(100, 116, 139)
-        pdf.cell(col_w, 4, label.upper(), align="C")
-        pdf.set_xy(x, 28.5)
-        pdf.set_font("Helvetica", "B", 11.5)
+        pdf.cell(col_w, 3.8, label.upper(), align="C")
+        pdf.set_xy(x, 25.0)
+        pdf.set_font("Helvetica", "B", 10.5)
         pdf.set_text_color(31, 78, 121)
-        pdf.cell(col_w, 8, val, align="C")
+        pdf.cell(col_w, 6.5, val, align="C")
 
-    # Section intermédiaire (X gauche = 12, X droite = 151)
-    y_mid = 43.0
+    # 2. Section intermédiaire (Tableau des séances + Graphiques)
+    y_mid = 35.0
 
     # Colonne Gauche : Tableau des séances + Graphique Répartition de charge
     pdf.set_xy(12, y_mid)
-    pdf.set_font("Helvetica", "B", 9.5)
+    pdf.set_font("Helvetica", "B", 8.8)
     pdf.set_text_color(11, 25, 44)
-    pdf.cell(133, 5, "1. SÉANCES ENREGISTRÉES & RÉPARTITION DE CHARGE :", align="L")
+    pdf.cell(133, 4.0, safe_latin1("1. SÉANCES ENREGISTRÉES & RÉPARTITION DE CHARGE :"), align="L")
 
-    # Petit tableau des séances (width = 133)
-    y_table = y_mid + 6.0
+    y_table = y_mid + 4.5
     pdf.set_xy(12, y_table)
     pdf.set_fill_color(31, 78, 121)
     pdf.set_text_color(255, 255, 255)
-    pdf.set_font("Helvetica", "B", 8)
-    pdf.cell(45, 5.5, "Séance / Type", 1, 0, "L", fill=True)
-    pdf.cell(24, 5.5, "Date", 1, 0, "C", fill=True)
-    pdf.cell(20, 5.5, "Effectif", 1, 0, "C", fill=True)
-    pdf.cell(22, 5.5, "Dist. (km)", 1, 0, "C", fill=True)
-    pdf.cell(22, 5.5, "H.I. (m)", 1, 1, "C", fill=True)
+    pdf.set_font("Helvetica", "B", 7.5)
+    pdf.cell(45, 4.8, "Séance / Type", 1, 0, "L", fill=True)
+    pdf.cell(24, 4.8, "Date", 1, 0, "C", fill=True)
+    pdf.cell(20, 4.8, "Effectif", 1, 0, "C", fill=True)
+    pdf.cell(22, 4.8, "Dist. (km)", 1, 0, "C", fill=True)
+    pdf.cell(22, 4.8, "H.I. (m)", 1, 1, "C", fill=True)
 
-    pdf.set_font("Helvetica", "", 7.5)
+    pdf.set_font("Helvetica", "", 7.2)
     pdf.set_text_color(15, 23, 42)
-    for s_id, s in synthese_dict.items():
+    sessions_to_show = list(synthese_dict.items())[:4]
+    for s_id, s in sessions_to_show:
         pdf.set_x(12)
-        pdf.cell(45, 5.0, safe_latin1(str(s.get("day_type", ""))[:20]), 1, 0, "L")
-        pdf.cell(24, 5.0, safe_latin1(format_readable_date(s.get("date", ""))), 1, 0, "C")
-        pdf.cell(20, 5.0, safe_latin1(f"{s.get('num_players', 0)}"), 1, 0, "C")
-        pdf.cell(22, 5.0, safe_latin1(f"{float(s.get('total_distance_km', 0.0)):.1f} km"), 1, 0, "C")
-        pdf.cell(22, 5.0, safe_latin1(f"{int(round(float(s.get('total_hi_m', 0.0)))):,d}".replace(",", " ")), 1, 1, "C")
+        pdf.cell(45, 4.2, safe_latin1(str(s.get("day_type", ""))[:20]), 1, 0, "L")
+        pdf.cell(24, 4.2, safe_latin1(format_readable_date(s.get("date", ""))), 1, 0, "C")
+        pdf.cell(20, 4.2, safe_latin1(f"{s.get('num_players', 0)}"), 1, 0, "C")
+        pdf.cell(22, 4.2, safe_latin1(f"{float(s.get('total_distance_km', 0.0)):.1f} km"), 1, 0, "C")
+        pdf.cell(22, 4.2, safe_latin1(f"{int(round(float(s.get('total_hi_m', 0.0)))):,d}".replace(",", " ")), 1, 1, "C")
 
     # Graphique Répartition de charge par séance sous le tableau
-    y_chart_days = pdf.get_y() + 3.0
+    y_chart_days = pdf.get_y() + 2.0
+    chart_days_h = min(46.0, max(24.0, 106.0 - y_chart_days))
     try:
         buf_days = generer_graphique_hebdo_repartition_jours_matplotlib(synthese_dict)
-        chart_days_h = min(80.0, 195.0 - y_chart_days)
-        if chart_days_h > 20:
-            pdf.image(buf_days, x=12, y=y_chart_days, w=133, h=chart_days_h)
+        pdf.image(buf_days, x=12, y=y_chart_days, w=133, h=chart_days_h)
     except Exception as e:
         print(f"Erreur graphique repartition jours PDF : {e}")
 
     # Colonne Droite : Graphique Charge moyenne par Ligne
     pdf.set_xy(151, y_mid)
-    pdf.set_font("Helvetica", "B", 9.5)
+    pdf.set_font("Helvetica", "B", 8.8)
     pdf.set_text_color(11, 25, 44)
-    pdf.cell(133, 5, "2. CHARGE MOYENNE PAR LIGNE DE POSTE (SEMAINE) :", align="L")
+    pdf.cell(133, 4.0, safe_latin1("2. CHARGE MOYENNE PAR LIGNE DE POSTE (SEMAINE) :"), align="L")
 
     try:
         buf_groups = generer_graphique_hebdo_groupes_matplotlib(df_hebdo)
-        pdf.image(buf_groups, x=151, y=y_mid + 6.0, w=134, h=135.0)
+        pdf.image(buf_groups, x=151, y=y_mid + 4.5, w=134, h=66.5)
     except Exception as e:
         print(f"Erreur graphique groupes hebdo PDF : {e}")
 
-    # --------------------------------------------------------------------------
-    # PAGES 2, 3 ET 4 : BILAN DÉTAILLÉ PAR LIGNE DE POSTE (AVEC GRAPHIQUES 2x2)
-    # --------------------------------------------------------------------------
+    # 3. Section 3 : Podium Général de l'effectif complet
+    y_pod_gen = 108.0
+    pdf.set_xy(12, y_pod_gen)
+    pdf.set_font("Helvetica", "B", 9.2)
+    pdf.set_text_color(11, 25, 44)
+    pdf.cell(273, 4.0, safe_latin1("3. PODIUM GÉNÉRAL HEBDOMADAIRE — EFFECTIF COMPLET :"), align="L")
+
+    podium_general = generer_podiums_hebdomadaires(df_hebdo)
+    sub_map_gen = calculer_sous_titres_podium(df_hebdo, label_prefix="Moy. semaine")
+    _render_podiums_compact_horizontal(
+        pdf=pdf,
+        podium_data=podium_general,
+        y_start=y_pod_gen + 4.8,
+        subtitle_map=sub_map_gen,
+        is_large=True,
+    )
+
+    # =========================================================================
+    # PAGES 2, 3 ET 4 : BILANS DÉTAILLÉS PAR LIGNE DE POSTE (STRICTEMENT 4 PAGES TOTAL)
+    # Page 2 : 5 de devant
+    # Page 3 : 3ème Ligne
+    # Page 4 : Trois-quarts
+    # =========================================================================
     groupes_rca = ["5 de devant", "3ème Ligne", "Trois-quarts"]
 
     for grp in groupes_rca:
         df_sub = df_hebdo[df_hebdo["Groupe"] == grp] if not df_hebdo.empty and "Groupe" in df_hebdo.columns else pd.DataFrame()
-        if df_sub.empty:
-            continue
+        n_players_grp = len(df_sub)
 
-        pdf.current_subtitle = f"BILAN HEBDOMADAIRE — {grp.upper()} ({len(df_sub)} JOUEURS)"
+        pdf.current_subtitle = f"BILAN HEBDOMADAIRE — {grp.upper()} ({n_players_grp} JOUEUR{'S' if n_players_grp > 1 else ''})"
         pdf.add_page()
-        pdf.set_y(22)
+        pdf.set_y(19.5)
 
-        # 1. Graphiques en barres Objectif Hebdomadaire vs Réalisé Cumulé
-        pdf.set_xy(12, 22)
-        pdf.set_font("Helvetica", "B", 10.0)
+        # 1. Objectifs Hebdomadaires vs Réalisé Cumulé
+        pdf.set_xy(12, 19.5)
+        pdf.set_font("Helvetica", "B", 9.0)
         pdf.set_text_color(11, 25, 44)
-        pdf.cell(273, 5, safe_latin1(f"1. OBJECTIFS HEBDOMADAIRES VS RÉALISÉ DU GROUPE ({nb_seances} SÉANCES CUMULÉES) :"), align="L")
+        pdf.cell(273, 4.0, safe_latin1(f"1. OBJECTIFS HEBDOMADAIRES VS RÉALISÉ DU GROUPE ({nb_seances} SÉANCES CUMULÉES) :"), align="L")
 
         try:
             buf_jauges = generer_graphique_hebdo_jauges_matplotlib(
                 grp, df_sub, nb_seances=nb_seances, objectifs_config=objectifs_config
             )
-            pdf.image(buf_jauges, x=12, y=28, w=273, h=56)
+            pdf.image(buf_jauges, x=12, y=24.0, w=273, h=38.0)
         except Exception as e:
             print(f"Erreur graphique jauges hebdo PDF pour {grp} : {e}")
 
-        # 2. Tableau individuel des joueurs
-        y_tbl_grp = 88.0
-        pdf.set_xy(12, y_tbl_grp)
-        pdf.set_font("Helvetica", "B", 10.0)
+        # 2. Podiums de la Ligne (Format Compact Horizontal)
+        y_sec_pod = 63.5
+        pdf.set_xy(12, y_sec_pod)
+        pdf.set_font("Helvetica", "B", 9.0)
         pdf.set_text_color(11, 25, 44)
-        pdf.cell(273, 5, safe_latin1(f"2. STATISTIQUES INDIVIDUELLES CUMULÉES SUR LA SEMAINE :"), align="L")
+        pdf.cell(273, 4.0, safe_latin1(f"2. PODIUMS DU GROUPE — {grp.upper()} :"), align="L")
 
-        # Table header
-        pdf.set_xy(12, y_tbl_grp + 6.0)
+        podium_grp = generer_podiums_hebdomadaires(df_hebdo, groupe=grp)
+        sub_map_grp = calculer_sous_titres_podium(df_sub, label_prefix="Moyenne")
+        _render_podiums_compact_horizontal(
+            pdf=pdf,
+            podium_data=podium_grp,
+            y_start=y_sec_pod + 4.5,
+            subtitle_map=sub_map_grp,
+            is_large=False,
+        )
+
+        # 3. Tableau individuel des statistiques cumulées
+        y_sec_tbl = 109.5
+        pdf.set_xy(12, y_sec_tbl)
+        pdf.set_font("Helvetica", "B", 9.0)
+        pdf.set_text_color(11, 25, 44)
+        pdf.cell(273, 4.0, safe_latin1("3. STATISTIQUES INDIVIDUELLES CUMULÉES SUR LA SEMAINE :"), align="L")
+
+        # En-tête du tableau
+        y_tbl_hdr = y_sec_tbl + 4.5
+        pdf.set_xy(12, y_tbl_hdr)
         pdf.set_fill_color(31, 78, 121)
         pdf.set_text_color(255, 255, 255)
-        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_font("Helvetica", "B", 7.5)
 
         cols_def = [
             ("Joueur", 46, "L"),
@@ -1909,39 +2114,51 @@ def generate_weekly_pdf_report(
         ]
 
         for title, w, align in cols_def:
-            pdf.cell(w, 6.5, safe_latin1(title), 1, 0, align, fill=True)
-        pdf.ln(6.5)
+            pdf.cell(w, 5.0, safe_latin1(title), 1, 0, align, fill=True)
+        pdf.ln(5.0)
 
-        pdf.set_font("Helvetica", "", 8)
-        pdf.set_text_color(15, 23, 42)
-        fill_row = False
-
-        for _, row in df_sub.iterrows():
+        # Lignes du tableau
+        if df_sub.empty:
             pdf.set_x(12)
-            bg = (248, 250, 252) if fill_row else (255, 255, 255)
-            pdf.set_fill_color(*bg)
+            pdf.set_fill_color(248, 250, 252)
+            pdf.set_font("Helvetica", "I", 8.0)
+            pdf.set_text_color(100, 116, 139)
+            pdf.cell(273, 7.0, safe_latin1("Aucun joueur enregistré pour ce groupe cette semaine."), 1, 1, "C", fill=True)
+        else:
+            avail_h = 196.0 - (y_tbl_hdr + 5.0)  # ~ 72.5 mm
+            row_h = min(4.8, max(3.5, avail_h / max(n_players_grp, 1)))
+            font_sz = 7.5 if row_h >= 4.5 else 6.5
+            pdf.set_font("Helvetica", "", font_sz)
+            pdf.set_text_color(15, 23, 42)
+            fill_row = False
 
-            p_nom = str(row["Nom ; Prénom"])[:22]
-            p_pos = str(row.get("Poste_Detaille", "RCA"))[:13]
-            p_pres = f"{row.get('Nombre de séances', 1)} séance{'s' if row.get('Nombre de séances', 1) > 1 else ''}"
-            p_tps = f"{float(row.get('Temps total (min)', 0.0)):.0f}"
-            p_dist = f"{float(row.get('Distance Totale (km)', 0.0)):.2f}"
-            p_hi = f"{int(round(float(row.get('Haute intensité (m)', 0.0)))):,d}".replace(",", " ")
-            p_vhsr = f"{int(round(float(row.get('Distance Sprint VHSR (m)', 0.0)))):,d}".replace(",", " ")
-            p_vmax = f"{float(row.get('Top Speed (km/h)', 0.0)):.1f}"
-            p_dpm = f"{float(row.get('Distance/min (m/min)', 0.0)):.1f}"
-            p_acc = f"{int(round(float(row.get('Accel/Dec total', 0.0))))}"
+            for _, row in df_sub.iterrows():
+                pdf.set_x(12)
+                bg = (248, 250, 252) if fill_row else (255, 255, 255)
+                pdf.set_fill_color(*bg)
 
-            pdf.cell(46, 5.8, safe_latin1(p_nom), 1, 0, "L", fill=True)
-            pdf.cell(26, 5.8, safe_latin1(p_pos), 1, 0, "C", fill=True)
-            pdf.cell(30, 5.8, safe_latin1(p_pres), 1, 0, "C", fill=True)
-            pdf.cell(22, 5.8, safe_latin1(p_tps), 1, 0, "C", fill=True)
-            pdf.cell(24, 5.8, safe_latin1(p_dist), 1, 0, "C", fill=True)
-            pdf.cell(26, 5.8, safe_latin1(p_hi), 1, 0, "C", fill=True)
-            pdf.cell(24, 5.8, safe_latin1(p_vhsr), 1, 0, "C", fill=True)
-            pdf.cell(25, 5.8, safe_latin1(p_vmax), 1, 0, "C", fill=True)
-            pdf.cell(24, 5.8, safe_latin1(p_dpm), 1, 0, "C", fill=True)
-            pdf.cell(26, 5.8, safe_latin1(p_acc), 1, 1, "C", fill=True)
-            fill_row = not fill_row
+                p_nom = str(row.get("Nom ; Prénom", "-"))[:22]
+                p_pos = str(row.get("Poste_Detaille", row.get("Poste", "RCA")))[:13]
+                nb_s = row.get("Nombre de séances", 1)
+                p_pres = f"{nb_s} séance{'s' if nb_s > 1 else ''}"
+                p_tps = f"{float(row.get('Temps total (min)', 0.0)):.0f}"
+                p_dist = f"{float(row.get('Distance Totale (km)', 0.0)):.2f}"
+                p_hi = f"{int(round(float(row.get('Haute intensité (m)', 0.0)))):,d}".replace(",", " ")
+                p_vhsr = f"{int(round(float(row.get('Distance Sprint VHSR (m)', 0.0)))):,d}".replace(",", " ")
+                p_vmax = f"{float(row.get('Top Speed (km/h)', 0.0)):.1f}"
+                p_dpm = f"{float(row.get('Distance/min (m/min)', 0.0)):.1f}"
+                p_acc = f"{int(round(float(row.get('Accel/Dec total', 0.0))))}"
+
+                pdf.cell(46, row_h, safe_latin1(p_nom), 1, 0, "L", fill=True)
+                pdf.cell(26, row_h, safe_latin1(p_pos), 1, 0, "C", fill=True)
+                pdf.cell(30, row_h, safe_latin1(p_pres), 1, 0, "C", fill=True)
+                pdf.cell(22, row_h, safe_latin1(p_tps), 1, 0, "C", fill=True)
+                pdf.cell(24, row_h, safe_latin1(p_dist), 1, 0, "C", fill=True)
+                pdf.cell(26, row_h, safe_latin1(p_hi), 1, 0, "C", fill=True)
+                pdf.cell(24, row_h, safe_latin1(p_vhsr), 1, 0, "C", fill=True)
+                pdf.cell(25, row_h, safe_latin1(p_vmax), 1, 0, "C", fill=True)
+                pdf.cell(24, row_h, safe_latin1(p_dpm), 1, 0, "C", fill=True)
+                pdf.cell(26, row_h, safe_latin1(p_acc), 1, 1, "C", fill=True)
+                fill_row = not fill_row
 
     return bytes(pdf.output())
