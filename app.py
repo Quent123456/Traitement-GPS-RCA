@@ -3605,281 +3605,9 @@ def safe_latin1(s: Any) -> str:
     return "".join(clean_chars)
 
 
-def _render_podium_section_pdf(
-    pdf: Any,
-    podium_data: Dict[str, Dict[str, Any]],
-    x_pod: float,
-    y_pod: float,
-    w_pod: float,
-    title_header: str,
-    subtitle_map: Optional[Dict[str, str]] = None,
-) -> None:
-    """Rend un bloc podium élégant de 3 catégories (Top Speed, % Marche, Haute Intensité)."""
-    pdf.set_fill_color(31, 78, 121)
-    pdf.rect(x_pod, y_pod, w_pod, 6.0, style="F")
-    pdf.set_fill_color(212, 175, 55)  # Liseré doré #D4AF37
-    pdf.rect(x_pod, y_pod + 5.5, w_pod, 0.5, style="F")
-
-    pdf.set_xy(x_pod, y_pod)
-    pdf.set_font("Helvetica", "B", 9.0)
-    pdf.set_text_color(255, 255, 255)
-    pdf.cell(w_pod, 5.5, safe_latin1(title_header), align="C")
-
-    categories_config = [
-        {
-            "key": "Top speed (km/h)",
-            "title": "TOP SPEED (km/h)",
-            "def_sub": "Vitesse Maximale",
-            "color": (31, 78, 121),
-        },
-        {
-            "key": "% de marche",
-            "title": "% DE MARCHE",
-            "def_sub": "Moins marche (> 0%)",
-            "color": (46, 90, 136),
-        },
-        {
-            "key": "Haute intensité (m)",
-            "title": "HAUTE INTENSITÉ (m)",
-            "def_sub": "Cumul Z3 + Z4 + Z5 > 14.4 km/h",
-            "color": (163, 0, 0),
-        },
-    ]
-
-    rank_badges = {
-        1: {"label": "1er", "bg": (217, 119, 6), "fg": (255, 255, 255)},
-        2: {"label": "2e", "bg": (100, 116, 139), "fg": (255, 255, 255)},
-        3: {"label": "3e", "bg": (180, 83, 9), "fg": (255, 255, 255)},
-    }
-
-    y_card_start = y_pod + 6.0 + 2.0
-    card_h = 42.0
-    card_gap = 2.5
-
-    for i, cat_cfg in enumerate(categories_config):
-        y_card = y_card_start + i * (card_h + card_gap)
-
-        pdf.set_fill_color(248, 250, 252)
-        pdf.set_draw_color(203, 213, 225)
-        pdf.rect(x_pod, y_card, w_pod, card_h, style="FD")
-
-        accent_color = cat_cfg["color"]
-        pdf.set_fill_color(*accent_color)
-        pdf.rect(x_pod, y_card, w_pod, 5.8, style="F")
-
-        pdf.set_xy(x_pod + 3.5, y_card)
-        pdf.set_font("Helvetica", "B", 8.5)
-        pdf.set_text_color(255, 255, 255)
-        pdf.cell(65, 5.8, safe_latin1(cat_cfg["title"]), align="L")
-
-        sub_val = subtitle_map.get(cat_cfg["key"]) if isinstance(subtitle_map, dict) else None
-        sub_txt = str(sub_val).strip() if sub_val is not None else cat_cfg["def_sub"]
-        pdf.set_xy(x_pod + 65, y_card)
-        pdf.set_font("Helvetica", "I", 7.5)
-        pdf.set_text_color(226, 232, 240)
-        pdf.cell(w_pod - 69, 5.8, safe_latin1(sub_txt), align="R")
-
-        cat_data = podium_data.get(cat_cfg["key"], {})
-        players = cat_data.get("players", [])
-
-        row_w = w_pod - 4
-        row_h = 10.0
-        row_gap = 1.3
-        y_rows_start = y_card + 5.8 + 1.2
-
-        for rank_idx in range(1, 4):
-            y_row = y_rows_start + (rank_idx - 1) * (row_h + row_gap)
-            x_row = x_pod + 2
-
-            p_entry = players[rank_idx - 1] if len(players) >= rank_idx else {}
-            p_name = safe_latin1(p_entry.get("name", "-"))
-            p_stat = safe_latin1(p_entry.get("stat", "-"))
-
-            pdf.set_fill_color(255, 255, 255)
-            pdf.set_draw_color(226, 232, 240)
-            pdf.rect(x_row, y_row, row_w, row_h, style="FD")
-
-            badge_info = rank_badges.get(rank_idx, {"label": f"{rank_idx}e", "bg": (100, 116, 139), "fg": (255, 255, 255)})
-            photo_path = obtenir_chemin_photo(p_name) if p_name and p_name != "-" else None
-            has_photo = bool(photo_path and os.path.isfile(photo_path) and os.path.basename(photo_path) != "avatar_par_defaut.jpg")
-
-            if has_photo:
-                pdf.set_fill_color(*badge_info["bg"])
-                pdf.rect(x_row + 2, y_row + 1.3, 10.0, 7.4, style="F")
-                pdf.set_xy(x_row + 2, y_row + 1.3)
-                pdf.set_font("Helvetica", "B", 7)
-                pdf.set_text_color(*badge_info["fg"])
-                pdf.cell(10.0, 7.4, badge_info["label"], align="C")
-
-                try:
-                    pdf.image(photo_path, x=x_row + 13.5, y=y_row + 1.0, w=8.0, h=8.0)
-                    pdf.set_draw_color(203, 213, 225)
-                    pdf.rect(x_row + 13.5, y_row + 1.0, 8.0, 8.0, style="D")
-                except Exception:
-                    has_photo = False
-
-                name_disp = p_name if len(p_name) <= 24 else p_name[:22] + ".."
-                pdf.set_xy(x_row + 24.0, y_row)
-                pdf.set_font("Helvetica", "B", 8)
-                pdf.set_text_color(30, 41, 59)
-                pdf.cell(66.0, row_h, safe_latin1(name_disp), align="L")
-            else:
-                pdf.set_fill_color(*badge_info["bg"])
-                pdf.rect(x_row + 2, y_row + 1.3, 12.0, 7.4, style="F")
-                pdf.set_xy(x_row + 2, y_row + 1.3)
-                pdf.set_font("Helvetica", "B", 7.5)
-                pdf.set_text_color(*badge_info["fg"])
-                pdf.cell(12.0, 7.4, badge_info["label"], align="C")
-
-                name_disp = p_name if len(p_name) <= 28 else p_name[:26] + ".."
-                pdf.set_xy(x_row + 16.5, y_row)
-                pdf.set_font("Helvetica", "B", 8.5)
-                pdf.set_text_color(30, 41, 59)
-                pdf.cell(73.5, row_h, safe_latin1(name_disp), align="L")
-
-            pdf.set_xy(x_row + 90.0, y_row)
-            pdf.set_font("Helvetica", "B", 9)
-            pdf.set_text_color(*accent_color)
-            pdf.cell(40.0, row_h, safe_latin1(p_stat), align="R")
-
-
-def _render_podium_page_aere(
-    pdf: Any,
-    podium_data: Dict[str, Dict[str, Any]],
-    group_name: str,
-    subtitle_map: Optional[Dict[str, str]] = None,
-) -> None:
-    """
-    Rend une page podium dédiée, ultra-aérée et prestigieuse pour une ligne de poste RCA.
-    Organise les 3 catégories (Top Speed, % Marche, Haute Intensité) en 3 grandes colonnes verticales
-    côte-à-côte avec bandeau supérieur, badges de podium, photos de profil et statistiques en grand format.
-    """
-    categories_config = [
-        {
-            "key": "Top speed (km/h)",
-            "title": "TOP SPEED (km/h)",
-            "def_sub": "Vitesse Maximale",
-            "color": (31, 78, 121),
-        },
-        {
-            "key": "% de marche",
-            "title": "% DE MARCHE",
-            "def_sub": "Moins marche (> 0%)",
-            "color": (46, 90, 136),
-        },
-        {
-            "key": "Haute intensité (m)",
-            "title": "HAUTE INTENSITÉ (m)",
-            "def_sub": "Cumul Z3 + Z4 + Z5 > 14.4 km/h",
-            "color": (163, 0, 0),
-        },
-    ]
-
-    rank_badges = {
-        1: {"label": "1er", "bg": (217, 119, 6), "fg": (255, 255, 255)},
-        2: {"label": "2e", "bg": (100, 116, 139), "fg": (255, 255, 255)},
-        3: {"label": "3e", "bg": (180, 83, 9), "fg": (255, 255, 255)},
-    }
-
-    col_w = 87.0
-    col_gap = 6.0
-    x_start = 12.0
-    y_start = 23.0
-    banner_h = 14.0
-    card_h = 47.0
-    card_gap = 3.5
-
-    for c_idx, cat in enumerate(categories_config):
-        x_c = x_start + c_idx * (col_w + col_gap)
-        accent_color = cat["color"]
-
-        # 1. En-tête de catégorie
-        pdf.set_fill_color(*accent_color)
-        pdf.rect(x_c, y_start, col_w, banner_h, style="F")
-
-        # Liseré doré décoratif
-        pdf.set_fill_color(212, 175, 55)
-        pdf.rect(x_c, y_start + banner_h - 1.0, col_w, 1.0, style="F")
-
-        pdf.set_xy(x_c + 2.0, y_start + 1.2)
-        pdf.set_font("Helvetica", "B", 11.0)
-        pdf.set_text_color(255, 255, 255)
-        pdf.cell(col_w - 4.0, 5.5, safe_latin1(cat["title"]), align="C")
-
-        sub_val = subtitle_map.get(cat["key"]) if isinstance(subtitle_map, dict) else None
-        sub_txt = str(sub_val).strip() if sub_val is not None else cat["def_sub"]
-        pdf.set_xy(x_c + 2.0, y_start + 7.2)
-        pdf.set_font("Helvetica", "I", 8.5)
-        pdf.set_text_color(226, 232, 240)
-        pdf.cell(col_w - 4.0, 4.8, safe_latin1(sub_txt), align="C")
-
-        # 2. Les 3 fiches joueurs
-        cat_data = podium_data.get(cat["key"], {})
-        players = cat_data.get("players", [])
-
-        y_cards_start = y_start + banner_h + 3.0
-
-        for r_idx in range(1, 4):
-            y_card = y_cards_start + (r_idx - 1) * (card_h + card_gap)
-            p_entry = players[r_idx - 1] if len(players) >= r_idx else {}
-            p_name = safe_latin1(p_entry.get("name", "-"))
-            p_stat = safe_latin1(p_entry.get("stat", "-"))
-
-            # Carte fond blanc avec contour fin
-            pdf.set_fill_color(255, 255, 255)
-            pdf.set_draw_color(203, 213, 225)
-            pdf.rect(x_c, y_card, col_w, card_h, style="FD")
-
-            # Petit liseré d'accent à gauche de la carte
-            pdf.set_fill_color(*accent_color)
-            pdf.rect(x_c, y_card, 2.5, card_h, style="F")
-
-            # Badge de rang (1er, 2e, 3e) en haut à gauche
-            badge = rank_badges.get(r_idx, {"label": f"{r_idx}e", "bg": (100, 116, 139), "fg": (255, 255, 255)})
-            pdf.set_fill_color(*badge["bg"])
-            pdf.rect(x_c + 5.0, y_card + 3.0, 15.0, 7.5, style="F")
-            pdf.set_xy(x_c + 5.0, y_card + 3.0)
-            pdf.set_font("Helvetica", "B", 8.5)
-            pdf.set_text_color(*badge["fg"])
-            pdf.cell(15.0, 7.5, badge["label"], align="C")
-
-            # Statistique en haut à droite
-            pdf.set_xy(x_c + 22.0, y_card + 3.0)
-            pdf.set_font("Helvetica", "B", 10.0)
-            pdf.set_text_color(*accent_color)
-            pdf.cell(col_w - 26.0, 7.5, safe_latin1(p_stat), align="R")
-
-            # Photo du joueur au centre
-            photo_path = obtenir_chemin_photo(p_name) if p_name and p_name != "-" else None
-            has_photo = bool(photo_path and os.path.isfile(photo_path) and os.path.basename(photo_path) != "avatar_par_defaut.jpg")
-            photo_size = 24.0
-            photo_x = x_c + (col_w - photo_size) / 2.0
-            photo_y = y_card + 11.5
-
-            if has_photo:
-                try:
-                    pdf.image(photo_path, x=photo_x, y=photo_y, w=photo_size, h=photo_size)
-                    pdf.set_draw_color(203, 213, 225)
-                    pdf.rect(photo_x, photo_y, photo_size, photo_size, style="D")
-                except Exception:
-                    has_photo = False
-
-            if not has_photo:
-                # Avatar placeholder propre
-                pdf.set_fill_color(241, 245, 249)
-                pdf.set_draw_color(203, 213, 225)
-                pdf.rect(photo_x, photo_y, photo_size, photo_size, style="FD")
-                pdf.set_xy(photo_x, photo_y + 6.0)
-                pdf.set_font("Helvetica", "B", 12)
-                pdf.set_text_color(148, 163, 184)
-                pdf.cell(photo_size, 10, "?", align="C")
-
-            # Nom du joueur en bas
-            name_disp = p_name if len(p_name) <= 22 else p_name[:20] + ".."
-            pdf.set_xy(x_c + 3.0, y_card + 37.0)
-            pdf.set_font("Helvetica", "B", 9.5)
-            pdf.set_text_color(30, 41, 59)
-            pdf.cell(col_w - 6.0, 7.0, safe_latin1(name_disp), align="C")
+_render_podium_section_pdf = weekly_memory._render_podium_section_pdf
+_render_podium_page_aere = weekly_memory._render_podium_page_aere
+calculer_sous_titres_podium = weekly_memory.calculer_sous_titres_podium
 
 
 def generer_rapport_pdf_coachs(
@@ -4078,40 +3806,7 @@ def generer_rapport_pdf_coachs(
 
     # 4. Colonne de Droite : Podium Général de la Séance (Top 3 tous postes confondus)
     podium_general = generer_podium_dynamique(df_indiv)
-    if "Top Speed (km/h)" in df_indiv.columns and not df_indiv.empty:
-        s_ts_all = pd.to_numeric(df_indiv["Top Speed (km/h)"], errors="coerce")
-        s_ts_all_pos = s_ts_all[s_ts_all > 0]
-        vmax_all_moy = float(s_ts_all_pos.mean()) if not s_ts_all_pos.empty else 0.0
-    else:
-        vmax_all_moy = 0.0
-    if pd.isna(vmax_all_moy) or np.isnan(vmax_all_moy):
-        vmax_all_moy = 0.0
-
-    if "%Marche " in df_indiv.columns and not df_indiv.empty:
-        s_w_all = pd.to_numeric(df_indiv["%Marche "], errors="coerce")
-        s_w_all_pos = s_w_all[s_w_all > 0.0]
-        walk_all_moy = float(s_w_all_pos.mean()) if not s_w_all_pos.empty else 0.0
-    else:
-        walk_all_moy = 0.0
-    if pd.isna(walk_all_moy) or np.isnan(walk_all_moy):
-        walk_all_moy = 0.0
-    walk_all_pct = walk_all_moy * 100.0 if walk_all_moy <= 1.0 else walk_all_moy
-
-    hi_col_all = "Haute intensité Podium (m)" if "Haute intensité Podium (m)" in df_indiv.columns else " Distance haute intensité (m)"
-    if hi_col_all in df_indiv.columns and not df_indiv.empty:
-        s_hi_all = pd.to_numeric(df_indiv[hi_col_all], errors="coerce")
-        hi_all_moy = float(s_hi_all.mean()) if not s_hi_all.empty else 0.0
-    else:
-        hi_all_moy = 0.0
-    if pd.isna(hi_all_moy) or np.isnan(hi_all_moy):
-        hi_all_moy = 0.0
-    hi_all_int = int(round(hi_all_moy))
-
-    sub_map_gen = {
-        "Top speed (km/h)": f"Moy. séance : {vmax_all_moy:.1f} km/h",
-        "% de marche": f"Moy. séance : {walk_all_pct:.1f} %",
-        "Haute intensité (m)": f"Moy. séance : {hi_all_int:,d} m".replace(",", " "),
-    }
+    sub_map_gen = calculer_sous_titres_podium(df_indiv, label_prefix="Moy. séance")
     _render_podium_section_pdf(
         pdf=pdf,
         podium_data=podium_general,
@@ -4247,41 +3942,7 @@ def generer_rapport_pdf_coachs(
 
         df_grp = df_indiv[df_indiv["Groupe"] == grp]
         podium_grp = generer_podium_dynamique(df_grp)
-
-        if "Top Speed (km/h)" in df_grp.columns and not df_grp.empty:
-            s_ts_g = pd.to_numeric(df_grp["Top Speed (km/h)"], errors="coerce")
-            s_ts_g_pos = s_ts_g[s_ts_g > 0]
-            vmax_grp_moy = float(s_ts_g_pos.mean()) if not s_ts_g_pos.empty else 0.0
-        else:
-            vmax_grp_moy = 0.0
-        if pd.isna(vmax_grp_moy) or np.isnan(vmax_grp_moy):
-            vmax_grp_moy = 0.0
-
-        if "%Marche " in df_grp.columns and not df_grp.empty:
-            s_w_g = pd.to_numeric(df_grp["%Marche "], errors="coerce")
-            s_w_g_pos = s_w_g[s_w_g > 0.0]
-            walk_grp_moy = float(s_w_g_pos.mean()) if not s_w_g_pos.empty else 0.0
-        else:
-            walk_grp_moy = 0.0
-        if pd.isna(walk_grp_moy) or np.isnan(walk_grp_moy):
-            walk_grp_moy = 0.0
-        walk_pct = walk_grp_moy * 100.0 if walk_grp_moy <= 1.0 else walk_grp_moy
-
-        hi_col_grp = "Haute intensité Podium (m)" if "Haute intensité Podium (m)" in df_grp.columns else " Distance haute intensité (m)"
-        if hi_col_grp in df_grp.columns and not df_grp.empty:
-            s_hi_g = pd.to_numeric(df_grp[hi_col_grp], errors="coerce")
-            hi_grp_moy = float(s_hi_g.mean()) if not s_hi_g.empty else 0.0
-        else:
-            hi_grp_moy = 0.0
-        if pd.isna(hi_grp_moy) or np.isnan(hi_grp_moy):
-            hi_grp_moy = 0.0
-        hi_grp_int = int(round(hi_grp_moy))
-
-        sub_map = {
-            "Top speed (km/h)": f"Moyenne : {vmax_grp_moy:.1f} km/h",
-            "% de marche": f"Moyenne : {walk_pct:.1f} %",
-            "Haute intensité (m)": f"Moyenne : {hi_grp_int:,d} m".replace(",", " "),
-        }
+        sub_map = calculer_sous_titres_podium(df_grp, label_prefix="Moyenne")
 
         _render_podium_page_aere(
             pdf=pdf,
@@ -5095,25 +4756,42 @@ def render_weekly_reports_view() -> None:
     # 5. Podiums Hebdomadaires
     st.divider()
     st.markdown('<div class="section-header">🏆 PODIUMS HEBDOMADAIRES (CUMULS DE LA SEMAINE)</div>', unsafe_allow_html=True)
-    podiums_hebdo = weekly_memory.generer_podiums_hebdomadaires(df_agg)
 
-    c_pod1, c_pod2, c_pod3 = st.columns(3)
-    cols_pod = [c_pod1, c_pod2, c_pod3]
+    tab_pod_gen, tab_pod_av, tab_pod_3e, tab_pod_bk = st.tabs([
+        "🏆 Podium Général",
+        "🏉 5 de devant",
+        "🏉 3ème Ligne",
+        "🏉 Trois-quarts",
+    ])
 
-    for p_idx, (cat_name, p_data) in enumerate(podiums_hebdo.items()):
-        if p_idx >= 3:
-            break
-        card_html = photo_manager.render_podium_html_markup(
-            category_title=f"HEBDO : {cat_name}",
-            category_icon=p_data.get("icon", "🏉"),
-            players=p_data.get("players", []),
-        )
-        clean_html = "\n".join([line.lstrip() for line in card_html.splitlines() if line.strip()])
-        with cols_pod[p_idx % 3]:
-            if hasattr(st, "html"):
-                st.html(clean_html)
+    for tab_obj, grp_filter, grp_title in [
+        (tab_pod_gen, None, "Général"),
+        (tab_pod_av, "5 de devant", "5 de devant"),
+        (tab_pod_3e, "3ème Ligne", "3ème Ligne"),
+        (tab_pod_bk, "Trois-quarts", "Trois-quarts"),
+    ]:
+        with tab_obj:
+            df_pod_src = df_agg if grp_filter is None else (df_agg[df_agg["Groupe"] == grp_filter] if "Groupe" in df_agg.columns else pd.DataFrame())
+            if df_pod_src.empty:
+                st.info(f"Aucune donnée disponible pour le podium {grp_title}.")
             else:
-                st.markdown(clean_html, unsafe_allow_html=True)
+                pod_data_dict = weekly_memory.generer_podiums_hebdomadaires(df_agg, groupe=grp_filter)
+                c_p1, c_p2, c_p3 = st.columns(3)
+                cols_p = [c_p1, c_p2, c_p3]
+                for p_idx, (cat_name, p_data) in enumerate(pod_data_dict.items()):
+                    if p_idx >= 3:
+                        break
+                    card_html = photo_manager.render_podium_html_markup(
+                        category_title=f"HEBDO ({grp_title}) : {cat_name}",
+                        category_icon=p_data.get("icon", "🏉"),
+                        players=p_data.get("players", []),
+                    )
+                    clean_html = "\n".join([line.lstrip() for line in card_html.splitlines() if line.strip()])
+                    with cols_p[p_idx % 3]:
+                        if hasattr(st, "html"):
+                            st.html(clean_html)
+                        else:
+                            st.markdown(clean_html, unsafe_allow_html=True)
 
     # 6. Tableaux récapitulatifs & Jauges Objectif vs Réalisé par catégorie de poste
     st.divider()
@@ -5167,7 +4845,7 @@ def render_weekly_reports_view() -> None:
         data=pdf_hebdo_bytes,
         file_name=f"Rapport_Hebdomadaire_RCA_Semaine_{week_num:02d}_{year}.pdf",
         mime="application/pdf",
-        help="Télécharge le rapport hebdomadaire PDF complet officiel (4 pages A4 Paysage) avec KPIs, comparatif journalier, jauges hebdo par groupe, podiums avec photos et tableaux détaillés par poste.",
+        help="Télécharge le rapport hebdomadaire PDF complet officiel avec podiums généraux et par poste, KPIs, comparatif journalier, jauges hebdo par groupe et tableaux détaillés par poste.",
         key="btn_download_weekly_pdf",
         type="primary",
     )
