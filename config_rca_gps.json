@@ -23,9 +23,9 @@
     "22": "OPE",
     "18": "SAINTOMER Lucas"
   },
-  "derniere_mise_a_jour": "05/11/2026 11:39:49",
+  "derniere_mise_a_jour": "05/11/2026 11:39:50",
   "nb_boitiers": 22,
-  "last_validated_file_sig": "DB 031126.xlsx_103419",
+  "last_validated_file_sig": "DB 041126.xlsx_101997",
   "splits_participation": {
     "PECQUERY Thomas:::Split 1": true,
     "PECQUERY Thomas:::Split 2": true,
@@ -33,8 +33,8 @@
     "PECQUERY Thomas:::Split 4": true,
     "Jean-Étienne ( TIJ):::Split 1": true,
     "Jean-Étienne ( TIJ):::Split 2": true,
-    "Jean-Étienne ( TIJ):::Split 3": true,
-    "Jean-Étienne ( TIJ):::Split 4": true,
+    "Jean-Étienne ( TIJ):::Split 3": false,
+    "Jean-Étienne ( TIJ):::Split 4": false,
     "COZIC Adrien:::Split 1": true,
     "COZIC Adrien:::Split 2": true,
     "COZIC Adrien:::Split 3": true,
@@ -140,7 +140,7 @@
     "MOINE Arthur:::Split 3": true,
     "MOINE Arthur:::Split 4": true,
     "PECQUERY Thomas:::Split 5": true,
-    "Jean-Étienne ( TIJ):::Split 5": true,
+    "Jean-Étienne ( TIJ):::Split 5": false,
     "COZIC Adrien:::Split 5": true,
     "Demian PANIZZO:::Split 5": true,
     "GENERMONT Roméo:::Split 5": true,
@@ -219,7 +219,7 @@
     "MARTIN Benjamin:::Split 4": true,
     "MARTIN Benjamin:::Split 5": true,
     "PECQUERY Thomas:::Split 6": true,
-    "Jean-Étienne ( TIJ):::Split 6": true,
+    "Jean-Étienne ( TIJ):::Split 6": false,
     "COZIC Adrien:::Split 6": true,
     "ROY Etienne:::Split 1": true,
     "ROY Etienne:::Split 2": true,
@@ -258,6 +258,15 @@
     "OPE:::Split 3": true,
     "OPE:::Split 4": true,
     "OPE:::Split 5": true,
-    "OPE:::Split 6": true
+    "OPE:::Split 6": true,
+    "FRION Quentin:::Split 6": true,
+    "GRENET Paul:::Split 6": true,
+    "Demian PANIZZO:::Split 6": true,
+    "ORION Lucas:::Split 6": true,
+    "TREMBLAY Brieuc:::Split 5": true,
+    "TREMBLAY Brieuc:::Split 6": true,
+    "MARTIN Benjamin:::Split 6": true,
+    "SELTZER Antoine:::Split 6": true,
+    "MZE Mouhayam:::Split 6": true
   }
 }
