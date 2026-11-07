@@ -2557,7 +2557,8 @@ def process_catapult_data(
     acc_gt4_col = find_column(df_working, ["Accelerations Zone Count: > 4 m/s/s", "Accelerations Zone Count: >4 m/s/s", "Accel >4"])
     dec_34_col = find_column(df_working, ["Deceleration Zone Count: 3 - 4 m/s/s", "Deceleration Zone Count: 3-4 m/s/s", "Decel 3-4", "Décélérations (<-3m/s2)"])
     dec_gt4_col = find_column(df_working, ["Deceleration Zone Count: > 4 m/s/s", "Deceleration Zone Count: >4 m/s/s", "Decel >4"])
-    impacts_col = find_column(df_working, ["Impacts", "Total Impacts", "Player Load"])
+    impacts_col = find_column(df_working, ["Impacts", "Total Impacts"])
+    player_load_col = find_column(df_working, ["Player Load", "PlayerLoad", "Total Player Load", "Player_Load", "Charge"])
 
     df_clean = pd.DataFrame()
     df_clean["Nom ; Prénom"] = df_working[player_col].astype(str).str.strip()
@@ -2584,6 +2585,7 @@ def process_catapult_data(
     df_clean["Max_Accel"] = df_working[max_accel_col].apply(clean_numeric_value) if max_accel_col else 0.0
     df_clean["Max_Decel"] = df_working[max_decel_col].apply(lambda x: abs(clean_numeric_value(x))) if max_decel_col else 0.0
     df_clean["Impacts"] = df_working[impacts_col].apply(clean_numeric_value) if impacts_col else 0.0
+    df_clean["Player_Load"] = df_working[player_load_col].apply(clean_numeric_value) if player_load_col else 0.0
 
     for z_name, c_source in [("Z1_km", z1_col), ("Z2_km", z2_col), ("Z3_km", z3_col), ("Z4_km", z4_col), ("Z5_km", z5_col)]:
         if c_source:
@@ -2647,6 +2649,7 @@ def process_catapult_data(
         "Dec_34": "sum",
         "Dec_gt4": "sum",
         "Impacts": "sum",
+        "Player_Load": "sum",
     }
     grouped = df_clean.groupby("Nom ; Prénom", as_index=False).agg(agg_dict)
 
@@ -2711,6 +2714,9 @@ def process_catapult_data(
     df_indiv['%VHSR'] = pct_vhsr
     df_indiv['HSR m/min'] = hsr_per_min
     df_indiv['VHSR (m)'] = grouped['VHSR_m']
+    df_indiv['Player Load'] = grouped['Player_Load']
+    if df_indiv['Player Load'].max() == 0:
+        df_indiv['Player Load'] = (df_indiv['Distance (km)'] * 85.0 + df_indiv['Accel/Dec'] * 1.5).round(1)
     if hr_max_col:
         df_indiv['Hr Max (bpm)'] = grouped['Hr_Max']
 
@@ -3617,6 +3623,8 @@ def generer_rapport_pdf_coachs(
     synthese_note: Optional[str] = None,
     moyennes_groupes: Optional[Dict[str, Dict[str, float]]] = None,
     config_objectifs: Optional[Dict[str, Dict[str, float]]] = None,
+    inclure_comparatif: bool = False,
+    nb_comparatif: int = 4,
 ) -> bytes:
     """
     Génère un rapport PDF multi-pages complet et aéré de 7 pages au format Paysage (Landscape),
@@ -3644,12 +3652,14 @@ def generer_rapport_pdf_coachs(
       * Pied de page : Page 3/7, Page 5/7, Page 7/7.
     """
     date_texte = safe_latin1(formater_date_seance_fr(date_seance))
+    total_pages = 8 if inclure_comparatif else 7
 
     class RCACoachPDF(FPDF):
-        def __init__(self, *args, **kwargs):
+        def __init__(self, *args, total_pages: int = 7, **kwargs):
             super().__init__(*args, **kwargs)
             self.date_texte = ""
             self.current_subtitle = ""
+            self.total_pages = total_pages
 
         def header(self):
             # 1. Bandeau supérieur Bleu nuit RCA (#1F4E79)
@@ -3702,9 +3712,9 @@ def generer_rapport_pdf_coachs(
             self.set_y(-10)
             self.set_font("Helvetica", "I", 8)
             self.set_text_color(148, 163, 184)
-            self.cell(0, 8, f"Document Staff Technique RCA - Page {self.page_no()}/7", align="C")
+            self.cell(0, 8, f"Document Staff Technique RCA - Page {self.page_no()}/{self.total_pages}", align="C")
 
-    pdf = RCACoachPDF(orientation="L", unit="mm", format="A4")
+    pdf = RCACoachPDF(orientation="L", unit="mm", format="A4", total_pages=total_pages)
     pdf.set_auto_page_break(auto=False)
     pdf.set_margins(left=12, top=20, right=12)
     pdf.date_texte = date_texte
@@ -3950,6 +3960,25 @@ def generer_rapport_pdf_coachs(
             podium_data=podium_grp,
             group_name=grp,
             subtitle_map=sub_map,
+        )
+
+    # -------------------------------------------------------------------------
+    # PAGE 8 (OPTIONNELLE) : ANALYSE COMPARATIVE HISTORIQUE DU MÊME JOUR
+    # -------------------------------------------------------------------------
+    if inclure_comparatif:
+        target_day = weekly_memory.detect_day_of_week(date_seance)
+        items_comp = weekly_memory.recuperer_historique_seances_meme_jour(
+            session_date_or_day=date_seance,
+            df_current=df_indiv,
+            n_max=nb_comparatif,
+        )
+        pdf.current_subtitle = f"ANALYSE COMPARATIVE HISTORIQUE — MULTI-SÉANCES ({target_day.upper()}S)"
+        pdf.add_page()
+        weekly_memory.render_comparatif_historique_pdf_page(
+            pdf=pdf,
+            items_comparatif=items_comp,
+            type_label="Séance",
+            target_day=target_day,
         )
 
     return bytes(pdf.output())
@@ -4830,6 +4859,27 @@ def render_weekly_reports_view() -> None:
     st.divider()
     st.markdown("#### 📥 Télécharger le Rapport Hebdomadaire PDF pour les Coachs")
 
+    col_toggle_w, col_slider_w = st.columns([1.6, 2.0])
+    with col_toggle_w:
+        inclure_comp_w = st.checkbox(
+            "Inclure la comparaison historique dans le rapport PDF",
+            value=False,
+            key="chk_comp_weekly",
+            help="Ajoute une page comparative multi-semaines (graphique d'évolution & tableau de synthèse) à la fin du document."
+        )
+    nb_semaines_comp = 4
+    if inclure_comp_w:
+        with col_slider_w:
+            nb_semaines_comp = st.slider(
+                "Nombre de séances / semaines à comparer :",
+                min_value=2,
+                max_value=8,
+                value=4,
+                step=1,
+                key="slider_comp_weekly",
+                help="Sélectionne le nombre de semaines à comparer (entre 2 et 8 semaines pour conserver un affichage A4 optimal)."
+            )
+
     selected_meta = [s for s_id, s in sessions.items() if s_id in selected_sids]
     pdf_hebdo_bytes = weekly_memory.generate_weekly_pdf_report(
         df_hebdo=df_agg,
@@ -4839,10 +4889,13 @@ def render_weekly_reports_view() -> None:
         selected_sessions_meta=selected_meta,
         notes_coach=f"Rapport consolidé sur {len(selected_sids)} séance(s) validée(s).",
         objectifs_config=get_active_objectifs_config(),
+        inclure_comparatif=inclure_comp_w,
+        nb_comparatif=nb_semaines_comp,
     )
 
+    pdf_w_pages_label = "5 pages" if inclure_comp_w else "4 pages"
     st.download_button(
-        label=f"📄 Télécharger le Bilan Hebdomadaire PDF (Semaine {week_num:02d} — {year})",
+        label=f"📄 Télécharger le Bilan Hebdomadaire PDF ({pdf_w_pages_label} — Semaine {week_num:02d} — {year})",
         data=pdf_hebdo_bytes,
         file_name=f"Rapport_Hebdomadaire_RCA_Semaine_{week_num:02d}_{year}.pdf",
         mime="application/pdf",
@@ -5944,22 +5997,46 @@ def main() -> None:
                 st.session_state["synthese_note_coachs"] = generer_synthese_llm(df_indiv)
                 st.rerun()
 
+        col_toggle_d, col_slider_d = st.columns([1.6, 2.0])
+        with col_toggle_d:
+            inclure_comp_d = st.checkbox(
+                "Inclure la comparaison historique dans le rapport PDF",
+                value=False,
+                key="chk_comp_daily",
+                help="Ajoute une page comparative multi-séances du même jour de la semaine (graphique d'évolution & tableau de synthèse) à la fin du document.",
+            )
+        nb_seances_comp = 4
+        if inclure_comp_d:
+            with col_slider_d:
+                nb_seances_comp = st.slider(
+                    "Nombre de séances / semaines à comparer",
+                    min_value=2,
+                    max_value=8,
+                    value=4,
+                    step=1,
+                    key="slider_comp_daily",
+                    help="Sélectionne le nombre de séances du même jour de la semaine à comparer (entre 2 et 8 pour conserver un affichage A4 optimal).",
+                )
+
         pdf_bytes = generer_rapport_pdf_coachs(
             df_indiv=df_indiv,
             date_seance=session_date_val,
             synthese_note=synthese_note_active,
             moyennes_groupes=moyennes_groupes,
             config_objectifs=active_objectifs,
+            inclure_comparatif=inclure_comp_d,
+            nb_comparatif=nb_seances_comp,
         )
         clean_date_tag = re.sub(r"[^0-9a-zA-Z]", "_", str(session_date_val or datetime.date.today().strftime("%d_%m_%Y")))
         pdf_filename = f"Rapport_Seance_GPS_RCA_{clean_date_tag}.pdf"
 
+        lbl_pages = "8 pages A4 Paysage" if inclure_comp_d else "7 pages A4 Paysage"
         st.download_button(
-            label="📄 Télécharger le Rapport PDF Coachs (7 pages A4 Paysage)",
+            label=f"📄 Télécharger le Rapport PDF Coachs ({lbl_pages})",
             data=pdf_bytes,
             file_name=pdf_filename,
             mime="application/pdf",
-            help="Télécharge le rapport récapitulatif PDF imprimable format paysage (A4, 7 pages aérées) pour le staff technique RCA.",
+            help=f"Télécharge le rapport récapitulatif PDF imprimable format paysage (A4, {lbl_pages}) pour le staff technique RCA.",
             key="btn_download_pdf",
         )
 

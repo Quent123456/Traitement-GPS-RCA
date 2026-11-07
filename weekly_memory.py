@@ -1166,15 +1166,32 @@ def generer_graphique_hebdo_jauges_matplotlib(
 
     # Calcul des réalisés moyens par joueur du groupe sur la semaine
     if not df_grp.empty:
-        val_dist = float(df_grp["Distance Totale (m)"].mean()) if "Distance Totale (m)" in df_grp.columns else (float(df_grp["Distance Totale (km)"].mean()) * 1000.0 if "Distance Totale (km)" in df_grp.columns else 0.0)
-        val_hsr = float(df_grp["HSR Z3 (m)"].mean()) if "HSR Z3 (m)" in df_grp.columns else (float(df_grp["Haute intensité (m)"].mean()) if "Haute intensité (m)" in df_grp.columns else 0.0)
-        val_vhsr = float(df_grp["Distance Sprint VHSR (m)"].mean()) if "Distance Sprint VHSR (m)" in df_grp.columns else (float(df_grp["VHSR (m)"].mean()) if "VHSR (m)" in df_grp.columns else 0.0)
-        val_acc = float(df_grp["Accel/Dec total"].mean()) if "Accel/Dec total" in df_grp.columns else (float(df_grp["Accel/Dec"].mean()) if "Accel/Dec" in df_grp.columns else 0.0)
+        try:
+            val_dist = float(pd.to_numeric(df_grp.get("Distance Totale (m)", df_grp.get("Distance Totale (km)", 0) * 1000.0), errors="coerce").mean())
+        except Exception:
+            val_dist = 0.0
+        try:
+            val_hsr = float(pd.to_numeric(df_grp.get("HSR Z3 (m)", df_grp.get("Haute intensité (m)", 0)), errors="coerce").mean())
+        except Exception:
+            val_hsr = 0.0
+        try:
+            val_vhsr = float(pd.to_numeric(df_grp.get("Distance Sprint VHSR (m)", df_grp.get("VHSR (m)", 0)), errors="coerce").mean())
+        except Exception:
+            val_vhsr = 0.0
+        try:
+            val_acc = float(pd.to_numeric(df_grp.get("Accel/Dec total", df_grp.get("Accel/Dec", 0)), errors="coerce").mean())
+        except Exception:
+            val_acc = 0.0
     else:
         val_dist = 0.0
         val_hsr = 0.0
         val_vhsr = 0.0
         val_acc = 0.0
+
+    val_dist = 0.0 if (val_dist is None or np.isnan(val_dist)) else val_dist
+    val_hsr = 0.0 if (val_hsr is None or np.isnan(val_hsr)) else val_hsr
+    val_vhsr = 0.0 if (val_vhsr is None or np.isnan(val_vhsr)) else val_vhsr
+    val_acc = 0.0 if (val_acc is None or np.isnan(val_acc)) else val_acc
 
     cards_def = [
         ("Distance Totale (m)", targets_daily["Objectif Distance (m)"] * multiplier, val_dist, "m"),
@@ -1353,6 +1370,587 @@ def calculer_sous_titres_podium(
         "% de marche": f"{label_prefix} : {walk_pct:.1f} %",
         "Haute intensité (m)": f"{label_prefix} : {hi_int:,d} m".replace(",", " "),
     }
+
+
+# ==============================================================================
+# MOTEUR D'ANALYSE COMPARATIVE MULTI-SÉANCES & MULTI-SEMAINES (HISTORIQUE)
+# ==============================================================================
+
+def detect_day_of_week(val: Any) -> str:
+    """
+    Détecte le jour de la semaine en français (Lundi, Mardi, Mercredi, Jeudi, Vendredi, Samedi, Dimanche).
+    Fonctionne avec un nom de jour, une chaîne de date (JJ/MM/AAAA, AAAA-MM-JJ), ou un objet date/datetime.
+    """
+    JOURS = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+    if val is None:
+        return JOURS[datetime.date.today().weekday()]
+
+    if isinstance(val, (datetime.date, datetime.datetime)):
+        return JOURS[val.weekday()]
+
+    val_str = str(val).strip().lower()
+    for j in JOURS:
+        if j.lower() in val_str:
+            return j
+
+    # Recherche format JJ/MM/AAAA ou JJ-MM-AAAA
+    m_fr = re.search(r"(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})", val_str)
+    if m_fr:
+        try:
+            d, m, y = int(m_fr.group(1)), int(m_fr.group(2)), int(m_fr.group(3))
+            if y < 100:
+                y += 2000
+            dt = datetime.date(y, m, d)
+            return JOURS[dt.weekday()]
+        except Exception:
+            pass
+
+    # Recherche format AAAA-MM-JJ
+    m_iso = re.search(r"(\d{4})[/.-](\d{1,2})[/.-](\d{1,2})", val_str)
+    if m_iso:
+        try:
+            y, m, d = int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3))
+            dt = datetime.date(y, m, d)
+            return JOURS[dt.weekday()]
+        except Exception:
+            pass
+
+    return JOURS[datetime.date.today().weekday()]
+
+
+def _parse_date_to_obj(date_val: Any, fallback_year: int = 2026, fallback_week: int = 1, fallback_day_name: str = "Mardi") -> datetime.date:
+    """Convertit une valeur de date quelconque en objet datetime.date pour tri chronologique strict."""
+    if isinstance(date_val, datetime.datetime):
+        return date_val.date()
+    if isinstance(date_val, datetime.date):
+        return date_val
+
+    val_str = str(date_val or "").strip()
+    m_fr = re.search(r"(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})", val_str)
+    if m_fr:
+        try:
+            d, m, y = int(m_fr.group(1)), int(m_fr.group(2)), int(m_fr.group(3))
+            if y < 100:
+                y += 2000
+            return datetime.date(y, m, d)
+        except Exception:
+            pass
+
+    m_iso = re.search(r"(\d{4})[/.-](\d{1,2})[/.-](\d{1,2})", val_str)
+    if m_iso:
+        try:
+            y, m, d = int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3))
+            return datetime.date(y, m, d)
+        except Exception:
+            pass
+
+    JOURS_MAP = {"lundi": 1, "mardi": 2, "mercredi": 3, "jeudi": 4, "vendredi": 5, "samedi": 6, "dimanche": 7}
+    day_num = JOURS_MAP.get(fallback_day_name.lower(), 2)
+    try:
+        return datetime.date.fromisocalendar(fallback_year, max(1, min(53, fallback_week)), day_num)
+    except Exception:
+        return datetime.date.today()
+
+
+def _is_avant(row: Any) -> bool:
+    """Détecte si un joueur appartient aux Avants (5 de devant + 3ème Ligne)."""
+    grp = str(row.get("Groupe", "")).strip().lower() if hasattr(row, "get") else ""
+    pos = str(row.get("Poste_Detaille", row.get("Poste", ""))).strip().lower() if hasattr(row, "get") else ""
+    if any(k in grp for k in ["5 de devant", "devant", "3ème ligne", "3eme ligne", "avants", "pack"]):
+        return True
+    if any(k in pos for k in ["pilier", "talonneur", "deuxième ligne", "2ème ligne", "troisième ligne", "3ème ligne", "flanker", "n8", "numéro 8"]):
+        return True
+    return False
+
+
+def _is_arriere(row: Any) -> bool:
+    """Détecte si un joueur appartient aux Arrières (Trois-quarts / charnière)."""
+    grp = str(row.get("Groupe", "")).strip().lower() if hasattr(row, "get") else ""
+    pos = str(row.get("Poste_Detaille", row.get("Poste", ""))).strip().lower() if hasattr(row, "get") else ""
+    if any(k in grp for k in ["trois-quarts", "trois quarts", "arrières", "arrieres", "3/4", "backs"]):
+        return True
+    if any(k in pos for k in ["demi", "mêlée", "ouverture", "centre", "ailier", "arrière", "arriere", "10", "9", "12", "13", "11", "14", "15"]):
+        return True
+    return False
+
+
+def _extract_metric_dist_m(row: Any) -> float:
+    for col in ["Distance Totale (m)", "Distance_m"]:
+        if col in row and pd.notna(row[col]):
+            try: return float(row[col])
+            except Exception: pass
+    for col in ["Distance (km)", "Distance Totale (km)"]:
+        if col in row and pd.notna(row[col]):
+            try: return float(row[col]) * 1000.0
+            except Exception: pass
+    return 0.0
+
+
+def _extract_metric_hsr_m(row: Any) -> float:
+    for col in ["HSR Z3 (m)", " Distance haute intensité (m)", "Haute intensité (m)", "Haute intensité Podium (m)", "HSR_m"]:
+        if col in row and pd.notna(row[col]):
+            try: return float(row[col])
+            except Exception: pass
+    return 0.0
+
+
+def _extract_metric_acc_dec(row: Any) -> float:
+    for col in ["Accel/Dec total", "Accel/Dec"]:
+        if col in row and pd.notna(row[col]):
+            try: return float(row[col])
+            except Exception: pass
+    return 0.0
+
+
+def _extract_metric_dpm(row: Any) -> float:
+    for col in ["Distance Per Min (m/min)", "Distance/min (m/min)", "Distance_Per_Min"]:
+        if col in row and pd.notna(row[col]):
+            try: return float(row[col])
+            except Exception: pass
+    return 0.0
+
+
+def _extract_metric_player_load(row: Any) -> float:
+    for col in ["Player Load", "PlayerLoad", "Charge", "Impacts", "Total Impacts"]:
+        if col in row and pd.notna(row[col]):
+            try:
+                v = float(row[col])
+                if v > 0:
+                    return v
+            except Exception: pass
+    d_m = _extract_metric_dist_m(row)
+    acc = _extract_metric_acc_dec(row)
+    return round(d_m * 0.08 + acc * 1.8, 1)
+
+
+def calculer_moyennes_seance(df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
+    """
+    Calcule les moyennes collectives globales et par groupe (Avants vs Arrières)
+    sur les 5 métriques clés spécifiées :
+    1. Distance Totale (m)
+    2. High Speed Running (> 20 km/h) (m)
+    3. Accélérations & Décélérations intenses (> 3 m/s²)
+    4. Mètres par minute (m/min)
+    5. Player Load / Charge globale
+    """
+    res: Dict[str, Dict[str, float]] = {
+        "Distance Totale (m)": {"Total": 0.0, "Avants": 0.0, "Arrières": 0.0},
+        "HSR (> 20 km/h) (m)": {"Total": 0.0, "Avants": 0.0, "Arrières": 0.0},
+        "Acc/Dec (> 3 m/s²)": {"Total": 0.0, "Avants": 0.0, "Arrières": 0.0},
+        "m/min": {"Total": 0.0, "Avants": 0.0, "Arrières": 0.0},
+        "Player Load": {"Total": 0.0, "Avants": 0.0, "Arrières": 0.0},
+    }
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return res
+
+    is_av = df.apply(_is_avant, axis=1)
+    is_ar = df.apply(_is_arriere, axis=1)
+    if not is_ar.any() and is_av.any():
+        is_ar = ~is_av
+    elif not is_av.any() and is_ar.any():
+        is_av = ~is_ar
+
+    df_av = df[is_av]
+    df_ar = df[is_ar]
+
+    metric_extractors = [
+        ("Distance Totale (m)", _extract_metric_dist_m),
+        ("HSR (> 20 km/h) (m)", _extract_metric_hsr_m),
+        ("Acc/Dec (> 3 m/s²)", _extract_metric_acc_dec),
+        ("m/min", _extract_metric_dpm),
+        ("Player Load", _extract_metric_player_load),
+    ]
+
+    for m_name, extractor in metric_extractors:
+        vals_tot = [extractor(r) for _, r in df.iterrows()]
+        vals_av = [extractor(r) for _, r in df_av.iterrows()] if not df_av.empty else []
+        vals_ar = [extractor(r) for _, r in df_ar.iterrows()] if not df_ar.empty else []
+
+        res[m_name]["Total"] = round(float(np.mean(vals_tot)), 1) if vals_tot else 0.0
+        res[m_name]["Avants"] = round(float(np.mean(vals_av)), 1) if vals_av else 0.0
+        res[m_name]["Arrières"] = round(float(np.mean(vals_ar)), 1) if vals_ar else 0.0
+
+    return res
+
+
+def recuperer_historique_seances_meme_jour(
+    session_date_or_day: Any,
+    df_current: pd.DataFrame,
+    n_max: int = 4,
+) -> List[Dict[str, Any]]:
+    """
+    Extrait l'historique des N dernières séances enregistrées correspondant au même jour de la semaine
+    (ex. si séance du mardi -> les N derniers mardis disponibles, séance du jour incluse).
+    """
+    target_day = detect_day_of_week(session_date_or_day)
+    dt_curr = _parse_date_to_obj(session_date_or_day, fallback_day_name=target_day)
+
+    matched_sessions: Dict[str, Dict[str, Any]] = {}
+    saved_weeks = list_saved_weeks()
+
+    for w_info in saved_weeks:
+        y = w_info["year"]
+        w = w_info["week_num"]
+        w_data = load_week_data(y, w)
+        for s_id, s in w_data.get("sessions", {}).items():
+            if not isinstance(s, dict):
+                continue
+            s_day_raw = s.get("day_type", "") + " " + s.get("date", "")
+            s_day = detect_day_of_week(s_day_raw)
+            if s_day.lower() == target_day.lower():
+                s_dt = _parse_date_to_obj(s.get("date"), fallback_year=y, fallback_week=w, fallback_day_name=s_day)
+                date_key = s_dt.strftime("%Y-%m-%d")
+                p_list = s.get("players_data", [])
+                if p_list:
+                    df_s = pd.DataFrame(p_list)
+                    label_str = f"{target_day} {s_dt.strftime('%d/%m')}"
+                    short_str = f"{s_dt.strftime('%d/%m')}"
+                    matched_sessions[date_key] = {
+                        "date_key": date_key,
+                        "sort_date": s_dt,
+                        "label": label_str,
+                        "short_label": short_str,
+                        "full_date": s_dt.strftime("%d/%m/%Y"),
+                        "is_current": False,
+                        "num_players": len(df_s),
+                        "metrics": calculer_moyennes_seance(df_s),
+                    }
+
+    # Intégration de la séance actuelle
+    curr_date_key = dt_curr.strftime("%Y-%m-%d")
+    curr_label = f"{target_day} {dt_curr.strftime('%d/%m')}"
+    curr_short = f"{dt_curr.strftime('%d/%m')}"
+    matched_sessions[curr_date_key] = {
+        "date_key": curr_date_key,
+        "sort_date": dt_curr,
+        "label": curr_label,
+        "short_label": curr_short,
+        "full_date": dt_curr.strftime("%d/%m/%Y"),
+        "is_current": True,
+        "num_players": len(df_current) if df_current is not None else 0,
+        "metrics": calculer_moyennes_seance(df_current),
+    }
+
+    sorted_sessions = sorted(matched_sessions.values(), key=lambda x: x["sort_date"])
+    n_clamped = max(1, min(8, n_max))
+    final_sessions = sorted_sessions[-n_clamped:]
+
+    if final_sessions:
+        final_sessions[-1]["is_current"] = True
+        for it in final_sessions[:-1]:
+            it["is_current"] = False
+
+    return final_sessions
+
+
+def recuperer_historique_semaines(
+    year_curr: int,
+    week_curr: int,
+    df_curr_hebdo: pd.DataFrame,
+    n_max: int = 4,
+) -> List[Dict[str, Any]]:
+    """
+    Extrait l'historique des N dernières semaines enregistrées (semaine en cours incluse).
+    """
+    saved_weeks = list_saved_weeks()
+    saved_weeks_chrono = sorted(saved_weeks, key=lambda x: (x["year"], x["week_num"]))
+
+    weeks_dict: Dict[str, Dict[str, Any]] = {}
+    for w_info in saved_weeks_chrono:
+        y = w_info["year"]
+        w = w_info["week_num"]
+        if (y < year_curr) or (y == year_curr and w <= week_curr):
+            w_key = f"{y}-W{w:02d}"
+            w_data = load_week_data(y, w)
+            df_w, _ = aggregate_weekly_sessions(w_data)
+            label_str = f"Semaine {w:02d}"
+            short_str = f"S{w:02d}"
+            weeks_dict[w_key] = {
+                "key": w_key,
+                "year": y,
+                "week_num": w,
+                "label": label_str,
+                "short_label": short_str,
+                "is_current": False,
+                "num_players": len(df_w),
+                "metrics": calculer_moyennes_seance(df_w),
+            }
+
+    curr_key = f"{year_curr}-W{week_curr:02d}"
+    curr_label = f"Semaine {week_curr:02d}"
+    curr_short = f"S{week_curr:02d}"
+    weeks_dict[curr_key] = {
+        "key": curr_key,
+        "year": year_curr,
+        "week_num": week_curr,
+        "label": curr_label,
+        "short_label": curr_short,
+        "is_current": True,
+        "num_players": len(df_curr_hebdo) if df_curr_hebdo is not None else 0,
+        "metrics": calculer_moyennes_seance(df_curr_hebdo),
+    }
+
+    sorted_weeks = sorted(weeks_dict.values(), key=lambda x: (x["year"], x["week_num"]))
+    n_clamped = max(1, min(8, n_max))
+    final_weeks = sorted_weeks[-n_clamped:]
+
+    if final_weeks:
+        final_weeks[-1]["is_current"] = True
+        for it in final_weeks[:-1]:
+            it["is_current"] = False
+
+    return final_weeks
+
+
+def generer_graphique_comparatif_historique_matplotlib(
+    items_comparatif: List[Dict[str, Any]],
+    type_label: str = "Séance",
+) -> io.BytesIO:
+    """
+    Génère un graphique d'évolution épuré 2 en 1 via Matplotlib :
+    - Subplot 1 (Gauche) : Player Load Moyen (Charge Globale) par date/semaine avec courbes Avants & Arrières.
+    - Subplot 2 (Droite) : High Speed Running (> 20 km/h) Moyen par date/semaine avec courbes Avants & Arrières.
+    Met en valeur la séance ou semaine actuelle (mise en avant dorée/or, badge ★ Actuelle).
+    """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.5, 2.7), dpi=180)
+    fig.patch.set_facecolor("#FFFFFF")
+
+    labels = [it.get("short_label", it.get("label", "")) for it in items_comparatif]
+    x = np.arange(len(labels))
+
+    pl_tot = [it["metrics"]["Player Load"]["Total"] for it in items_comparatif]
+    pl_av = [it["metrics"]["Player Load"]["Avants"] for it in items_comparatif]
+    pl_ar = [it["metrics"]["Player Load"]["Arrières"] for it in items_comparatif]
+
+    hsr_tot = [it["metrics"]["HSR (> 20 km/h) (m)"]["Total"] for it in items_comparatif]
+    hsr_av = [it["metrics"]["HSR (> 20 km/h) (m)"]["Avants"] for it in items_comparatif]
+    hsr_ar = [it["metrics"]["HSR (> 20 km/h) (m)"]["Arrières"] for it in items_comparatif]
+
+    colors_pl = ["#D4AF37" if it.get("is_current") else "#1F4E79" for it in items_comparatif]
+    colors_hsr = ["#D4AF37" if it.get("is_current") else "#A30000" for it in items_comparatif]
+
+    # --- AX1 : Player Load ---
+    ax1.set_facecolor("#F8FAFC")
+    bars1 = ax1.bar(x, pl_tot, width=0.42, color=colors_pl, edgecolor="#0F2B48", linewidth=0.8, zorder=3)
+    ax1.plot(x, pl_av, color="#A30000", linestyle="--", marker="o", markersize=4, label="Avants (Pack)", zorder=5)
+    ax1.plot(x, pl_ar, color="#2E5A88", linestyle=":", marker="s", markersize=4, label="Arrières (3/4)", zorder=5)
+
+    ax1.set_title(f"Évolution Player Load Moyen ({type_label}s)", fontsize=9.2, fontweight="bold", color="#1F4E79", pad=6)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(labels, fontsize=8.2, fontweight="bold", color="#334155")
+    max_pl = max(1.0, max(pl_tot or [1.0]), max(pl_av or [1.0]), max(pl_ar or [1.0]))
+    ax1.set_ylim(0, max_pl * 1.35)
+    ax1.grid(axis="y", linestyle="--", alpha=0.35, color="#94A3B8", zorder=1)
+
+    for i, rect in enumerate(bars1):
+        h = rect.get_height()
+        it = items_comparatif[i]
+        lbl = f"{h:.1f}" if abs(h - round(h)) > 0.05 else f"{int(round(h))}"
+        if it.get("is_current"):
+            lbl += " ★"
+        ax1.annotate(lbl, xy=(rect.get_x() + rect.get_width() / 2, h),
+                     xytext=(0, 2), textcoords="offset points", ha="center", va="bottom",
+                     fontsize=7.5, fontweight="bold", color="#D97706" if it.get("is_current") else "#1F4E79")
+
+    ax1.legend(loc="upper right", frameon=False, fontsize=7.0)
+
+    # --- AX2 : HSR ---
+    ax2.set_facecolor("#F8FAFC")
+    bars2 = ax2.bar(x, hsr_tot, width=0.42, color=colors_hsr, edgecolor="#7A0000", linewidth=0.8, zorder=3)
+    ax2.plot(x, hsr_av, color="#A30000", linestyle="--", marker="o", markersize=4, label="Avants (Pack)", zorder=5)
+    ax2.plot(x, hsr_ar, color="#2E5A88", linestyle=":", marker="s", markersize=4, label="Arrières (3/4)", zorder=5)
+
+    ax2.set_title(f"Évolution High Speed Running (> 20 km/h) ({type_label}s)", fontsize=9.2, fontweight="bold", color="#1F4E79", pad=6)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(labels, fontsize=8.2, fontweight="bold", color="#334155")
+    max_hsr = max(10.0, max(hsr_tot or [1.0]), max(hsr_av or [1.0]), max(hsr_ar or [1.0]))
+    ax2.set_ylim(0, max_hsr * 1.35)
+    ax2.grid(axis="y", linestyle="--", alpha=0.35, color="#94A3B8", zorder=1)
+
+    for i, rect in enumerate(bars2):
+        h = rect.get_height()
+        it = items_comparatif[i]
+        lbl = f"{int(round(h)):,d} m".replace(",", " ")
+        if it.get("is_current"):
+            lbl += " ★"
+        ax2.annotate(lbl, xy=(rect.get_x() + rect.get_width() / 2, h),
+                     xytext=(0, 2), textcoords="offset points", ha="center", va="bottom",
+                     fontsize=7.5, fontweight="bold", color="#D97706" if it.get("is_current") else "#A30000")
+
+    ax2.legend(loc="upper right", frameon=False, fontsize=7.0)
+
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def render_comparatif_historique_pdf_page(
+    pdf: Any,
+    items_comparatif: List[Dict[str, Any]],
+    type_label: str = "Séance",
+    target_day: str = "",
+) -> None:
+    """
+    Rend la page dédiée 'Comparatif Historique' au format A4 Paysage :
+    - En-tête / Bannière informative si historique insuffisant (< 2 éléments).
+    - Haut de page : Graphique d'évolution Matplotlib (Player Load & HSR).
+    - Bas de page : Tableau de synthèse comparative multi-séances / multi-semaines avec colonnes dynamiques (2 à 8)
+      et calcul du Delta (%) de la séance actuelle par rapport à la moyenne des séances antérieures.
+    """
+    if not items_comparatif:
+        pdf.set_xy(12.0, 30.0)
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(273.0, 10.0, safe_latin1("Aucune donnee comparative disponible."), align="C")
+        return
+
+    y_top = 19.5
+    has_priors = len(items_comparatif) >= 2
+    if not has_priors:
+        pdf.set_fill_color(254, 243, 199)
+        pdf.set_draw_color(245, 158, 11)
+        pdf.rect(12.0, y_top, 273.0, 5.0, style="FD")
+        pdf.set_xy(12.0, y_top)
+        pdf.set_font("Helvetica", "B", 7.2)
+        pdf.set_text_color(146, 64, 14)
+        info_txt = f"HISTORIQUE INSUFFISANT : Aucune {type_label.lower()} anterieure enregistree{f' pour un {target_day}' if target_day else ''}. Données actuelles affichées sans delta."
+        pdf.cell(273.0, 5.0, safe_latin1(info_txt), align="C")
+        y_chart_start = y_top + 6.0
+    else:
+        y_chart_start = y_top
+
+    # 1. Section 1 : Graphique d'évolution Matplotlib
+    pdf.set_xy(12.0, y_chart_start)
+    pdf.set_font("Helvetica", "B", 8.8)
+    pdf.set_text_color(11, 25, 44)
+    pdf.cell(273.0, 4.0, safe_latin1("1. ÉVOLUTION DE LA CHARGE (PLAYER LOAD) ET DE LA HAUTE INTENSITÉ (HSR) :"), align="L")
+
+    try:
+        buf_chart = generer_graphique_comparatif_historique_matplotlib(items_comparatif, type_label=type_label)
+        chart_h = 67.0
+        pdf.image(buf_chart, x=12.0, y=y_chart_start + 4.5, w=273.0, h=chart_h)
+    except Exception as e:
+        print(f"Erreur graphique comparatif historique PDF : {e}")
+        chart_h = 20.0
+
+    # 2. Section 2 : Tableau de synthèse comparative
+    y_table_sec = y_chart_start + 4.5 + chart_h + 2.5
+    pdf.set_xy(12.0, y_table_sec)
+    pdf.set_font("Helvetica", "B", 8.8)
+    pdf.set_text_color(11, 25, 44)
+    pdf.cell(273.0, 4.0, safe_latin1("2. TABLEAU DE SYNTHÈSE COMPARATIVE (MOYENNES COLLECTIVES & PAR LIGNE) :"), align="L")
+
+    num_items = len(items_comparatif)
+    w_label = 55.0
+    w_delta = 28.0
+    w_col = (273.0 - w_label - w_delta) / max(num_items, 1)
+
+    y_tbl_hdr = y_table_sec + 4.5
+    pdf.set_xy(12.0, y_tbl_hdr)
+    pdf.set_fill_color(31, 78, 121)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Helvetica", "B", 7.5)
+    pdf.cell(w_label, 5.2, safe_latin1("Métrique & Groupe"), 1, 0, "L", fill=True)
+
+    for it in items_comparatif:
+        is_curr = it.get("is_current", False)
+        if is_curr:
+            pdf.set_fill_color(21, 52, 82)
+            pdf.set_text_color(212, 175, 55)
+            h_text = f"{it.get('short_label', '')} (Act.)"
+        else:
+            pdf.set_fill_color(31, 78, 121)
+            pdf.set_text_color(255, 255, 255)
+            h_text = it.get("short_label", it.get("label", ""))
+        pdf.set_font("Helvetica", "B", 7.0 if w_col < 30 else 7.5)
+        pdf.cell(w_col, 5.2, safe_latin1(h_text[:14]), 1, 0, "C", fill=True)
+
+    pdf.set_fill_color(31, 78, 121)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Helvetica", "B", 7.2)
+    pdf.cell(w_delta, 5.2, safe_latin1("Écart vs Moy."), 1, 1, "C", fill=True)
+
+    metric_blocks = [
+        {
+            "title": "1. DISTANCE TOTALE (m)",
+            "key": "Distance Totale (m)",
+            "fmt": lambda v: f"{int(round(v)):,d} m".replace(",", " "),
+        },
+        {
+            "title": "2. HIGH SPEED RUNNING (> 20 km/h) (m)",
+            "key": "HSR (> 20 km/h) (m)",
+            "fmt": lambda v: f"{int(round(v)):,d} m".replace(",", " "),
+        },
+        {
+            "title": "3. ACCÉLÉRATIONS & DÉCÉLÉRATIONS INTENSES (> 3 m/s²)",
+            "key": "Acc/Dec (> 3 m/s²)",
+            "fmt": lambda v: f"{v:.1f}",
+        },
+        {
+            "title": "4. INTENSITÉ RELATIVE (m/min)",
+            "key": "m/min",
+            "fmt": lambda v: f"{v:.1f} m/min",
+        },
+        {
+            "title": "5. PLAYER LOAD (CHARGE GLOBALE)",
+            "key": "Player Load",
+            "fmt": lambda v: f"{v:.1f}",
+        },
+    ]
+
+    row_h = 3.6
+    sub_levels = [
+        ("Total (Collectif)", "Total"),
+        ("Avants (Pack)", "Avants"),
+        ("Arrières (Trois-quarts)", "Arrières"),
+    ]
+
+    for block in metric_blocks:
+        pdf.set_x(12.0)
+        pdf.set_fill_color(241, 245, 249)
+        pdf.set_text_color(31, 78, 121)
+        pdf.set_font("Helvetica", "B", 7.0)
+        pdf.cell(273.0, 3.8, safe_latin1(block["title"]), 1, 1, "L", fill=True)
+
+        for sub_label, sub_key in sub_levels:
+            pdf.set_x(12.0)
+            pdf.set_fill_color(255, 255, 255)
+            pdf.set_draw_color(226, 232, 240)
+            pdf.set_font("Helvetica", "", 6.8)
+            pdf.set_text_color(30, 41, 59)
+            pdf.cell(w_label, row_h, safe_latin1(f"   {sub_label}"), 1, 0, "L", fill=True)
+
+            curr_val = items_comparatif[-1]["metrics"][block["key"]][sub_key] if items_comparatif else 0.0
+            prior_vals = [it["metrics"][block["key"]][sub_key] for it in items_comparatif[:-1]] if len(items_comparatif) > 1 else []
+
+            for it in items_comparatif:
+                is_curr = it.get("is_current", False)
+                v = it["metrics"][block["key"]][sub_key]
+                v_txt = block["fmt"](v)
+                pdf.set_fill_color(248, 250, 252) if is_curr else (255, 255, 255)
+                pdf.set_font("Helvetica", "B" if is_curr else "", 6.8 if w_col < 30 else 7.2)
+                pdf.set_text_color(31, 78, 121) if is_curr else (30, 41, 59)
+                pdf.cell(w_col, row_h, safe_latin1(v_txt), 1, 0, "C", fill=True)
+
+            if prior_vals:
+                moy_prior = sum(prior_vals) / len(prior_vals)
+                if moy_prior > 0:
+                    delta_pct = ((curr_val - moy_prior) / moy_prior) * 100.0
+                    delta_txt = f"{delta_pct:+.1f} %"
+                    d_color = (22, 101, 52) if delta_pct >= 0 else (153, 27, 27)
+                else:
+                    delta_txt = "0.0 %"
+                    d_color = (100, 116, 139)
+            else:
+                delta_txt = "-"
+                d_color = (100, 116, 139)
+
+            pdf.set_font("Helvetica", "B", 6.8)
+            pdf.set_text_color(*d_color)
+            pdf.set_fill_color(255, 255, 255)
+            pdf.cell(w_delta, row_h, safe_latin1(delta_txt), 1, 1, "C", fill=True)
 
 
 def _render_podium_section_pdf(
@@ -1835,11 +2433,12 @@ def _render_podiums_compact_horizontal(
 
 class RCAWeeklyPDFReport(FPDF):
     """Classe FPDF Landscape dédiée au rapport hebdomadaire du RCA."""
-    def __init__(self, week_label: str, dates_label: str):
+    def __init__(self, week_label: str, dates_label: str, total_pages: int = 4):
         super().__init__(orientation="L", unit="mm", format="A4")
         self.week_label = week_label
         self.dates_label = dates_label
         self.current_subtitle = ""
+        self.total_pages = total_pages
         self.set_auto_page_break(auto=False)
         self.set_margins(left=12, top=20, right=12)
         self.alias_nb_pages()
@@ -1894,7 +2493,7 @@ class RCAWeeklyPDFReport(FPDF):
         self.set_font("Helvetica", "I", 8)
         self.set_text_color(100, 116, 139)
         self.cell(140, 6, safe_latin1("Cellule Performance & Préparation Physique RCA Amiens - Confidentiel Staff"), align="L")
-        self.cell(133, 6, safe_latin1(f"Page {self.page_no()}/4"), align="R")
+        self.cell(133, 6, safe_latin1(f"Page {self.page_no()}/{self.total_pages}"), align="R")
 
 
 def generate_weekly_pdf_report(
@@ -1904,6 +2503,8 @@ def generate_weekly_pdf_report(
     synthese_jours: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
     notes_coach: str = "",
     objectifs_config: Optional[Dict[str, Dict[str, float]]] = None,
+    inclure_comparatif: bool = False,
+    nb_comparatif: int = 4,
     **kwargs: Any,
 ) -> bytes:
     """Génère le rapport hebdomadaire PDF complet officiel RCA au format Paysage (A4)."""
@@ -1925,7 +2526,8 @@ def generate_weekly_pdf_report(
     raw_dates = [d for d in raw_dates if d]
     dates_str = f"Du {raw_dates[0]} au {raw_dates[-1]}" if len(raw_dates) >= 2 else (raw_dates[0] if raw_dates else "")
 
-    pdf = RCAWeeklyPDFReport(week_label=week_label, dates_label=dates_str)
+    total_pages = 5 if inclure_comparatif else 4
+    pdf = RCAWeeklyPDFReport(week_label=week_label, dates_label=dates_str, total_pages=total_pages)
 
     if df_hebdo is None or df_hebdo.empty:
         pdf.add_page()
@@ -2132,6 +2734,14 @@ def generate_weekly_pdf_report(
             pdf.set_text_color(15, 23, 42)
             fill_row = False
 
+            def _safe_float(v: Any, default: float = 0.0) -> float:
+                try:
+                    if v is None or pd.isna(v):
+                        return default
+                    return float(v)
+                except (ValueError, TypeError):
+                    return default
+
             for _, row in df_sub.iterrows():
                 pdf.set_x(12)
                 bg = (248, 250, 252) if fill_row else (255, 255, 255)
@@ -2139,15 +2749,15 @@ def generate_weekly_pdf_report(
 
                 p_nom = str(row.get("Nom ; Prénom", "-"))[:22]
                 p_pos = str(row.get("Poste_Detaille", row.get("Poste", "RCA")))[:13]
-                nb_s = row.get("Nombre de séances", 1)
+                nb_s = int(_safe_float(row.get("Nombre de séances", 1), 1))
                 p_pres = f"{nb_s} séance{'s' if nb_s > 1 else ''}"
-                p_tps = f"{float(row.get('Temps total (min)', 0.0)):.0f}"
-                p_dist = f"{float(row.get('Distance Totale (km)', 0.0)):.2f}"
-                p_hi = f"{int(round(float(row.get('Haute intensité (m)', 0.0)))):,d}".replace(",", " ")
-                p_vhsr = f"{int(round(float(row.get('Distance Sprint VHSR (m)', 0.0)))):,d}".replace(",", " ")
-                p_vmax = f"{float(row.get('Top Speed (km/h)', 0.0)):.1f}"
-                p_dpm = f"{float(row.get('Distance/min (m/min)', 0.0)):.1f}"
-                p_acc = f"{int(round(float(row.get('Accel/Dec total', 0.0))))}"
+                p_tps = f"{_safe_float(row.get('Temps total (min)', 0.0)):.0f}"
+                p_dist = f"{_safe_float(row.get('Distance Totale (km)', 0.0)):.2f}"
+                p_hi = f"{int(round(_safe_float(row.get('Haute intensité (m)', 0.0)))):,d}".replace(",", " ")
+                p_vhsr = f"{int(round(_safe_float(row.get('Distance Sprint VHSR (m)', 0.0)))):,d}".replace(",", " ")
+                p_vmax = f"{_safe_float(row.get('Top Speed (km/h)', 0.0)):.1f}"
+                p_dpm = f"{_safe_float(row.get('Distance/min (m/min)', 0.0)):.1f}"
+                p_acc = f"{int(round(_safe_float(row.get('Accel/Dec total', 0.0))))}"
 
                 pdf.cell(46, row_h, safe_latin1(p_nom), 1, 0, "L", fill=True)
                 pdf.cell(26, row_h, safe_latin1(p_pos), 1, 0, "C", fill=True)
@@ -2160,5 +2770,23 @@ def generate_weekly_pdf_report(
                 pdf.cell(24, row_h, safe_latin1(p_dpm), 1, 0, "C", fill=True)
                 pdf.cell(26, row_h, safe_latin1(p_acc), 1, 1, "C", fill=True)
                 fill_row = not fill_row
+
+    # =========================================================================
+    # PAGE 5 : ANALYSE COMPARATIVE HISTORIQUE (OPTIONNELLE)
+    # =========================================================================
+    if inclure_comparatif:
+        items_comp = recuperer_historique_semaines(
+            year_curr=year,
+            week_curr=week_num,
+            df_curr_hebdo=df_hebdo,
+            n_max=nb_comparatif,
+        )
+        pdf.current_subtitle = "ANALYSE COMPARATIVE HISTORIQUE — MULTI-SEMAINES"
+        pdf.add_page()
+        render_comparatif_historique_pdf_page(
+            pdf=pdf,
+            items_comparatif=items_comp,
+            type_label="Semaine",
+        )
 
     return bytes(pdf.output())
