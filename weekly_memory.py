@@ -331,7 +331,6 @@ def save_session_to_memory(
         "date": clean_date,
         "recorded_at": datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
         "notes": notes,
-        "Adversaire": adv_clean,
         "adversaire": adv_clean,
         "num_players": len(df_indiv),
         "total_distance_km": round(total_dist_km, 2),
@@ -1607,6 +1606,39 @@ def formater_libelle_seance_x(
     return f"{j_str} {d_str}".strip()
 
 
+def _filter_df_by_group(df: pd.DataFrame, grp: str) -> pd.DataFrame:
+    """Filtre un DataFrame de séance par groupe de poste (5 de devant, 3ème Ligne, Trois-quarts)."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+
+    grp_clean = grp.strip().lower()
+    if "Groupe" in df.columns:
+        if grp_clean in ["5 de devant", "devant"]:
+            mask = df["Groupe"].astype(str).str.strip().str.lower().isin(["5 de devant", "devant", "cinq de devant", "avants (5)"])
+        elif grp_clean in ["3ème ligne", "3eme ligne", "3e ligne"]:
+            mask = df["Groupe"].astype(str).str.strip().str.lower().isin(["3ème ligne", "3eme ligne", "3e ligne", "troisième ligne"])
+        elif grp_clean in ["trois-quarts", "trois quarts", "3/4", "arrieres", "arrières"]:
+            mask = df["Groupe"].astype(str).str.strip().str.lower().isin(["trois-quarts", "trois quarts", "arrières", "arrieres", "3/4"])
+        else:
+            mask = df["Groupe"].astype(str).str.strip().str.lower() == grp_clean
+        df_sub = df[mask]
+        if not df_sub.empty:
+            return df_sub
+
+    col_p = "Poste_Detaille" if "Poste_Detaille" in df.columns else ("Poste" if "Poste" in df.columns else None)
+    if col_p:
+        if grp_clean in ["5 de devant", "devant"]:
+            kw = ["pilier", "talonneur", "2ème ligne", "deuxième ligne", "première ligne", "5 de devant"]
+        elif grp_clean in ["3ème ligne", "3eme ligne", "3e ligne"]:
+            kw = ["3ème ligne", "troisième ligne", "flanker", "n8", "numéro 8"]
+        else:
+            kw = ["demi", "ouvreur", "mêlée", "centre", "ailier", "arrière", "trois-quarts"]
+        mask = df[col_p].astype(str).str.strip().str.lower().apply(lambda s: any(k in s for k in kw))
+        return df[mask]
+
+    return pd.DataFrame()
+
+
 def calculer_metriques_groupes_seance(df_s: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
     """
     Calcule les moyennes exactes par ligne de poste pour le triptyque :
@@ -1624,32 +1656,7 @@ def calculer_metriques_groupes_seance(df_s: pd.DataFrame) -> Dict[str, Dict[str,
         return res
 
     for grp in groupes:
-        # Filtrage strict par colonne 'Groupe'
-        if "Groupe" in df_s.columns:
-            if grp == "5 de devant":
-                mask = df_s["Groupe"].astype(str).str.strip().str.lower().isin(["5 de devant", "devant"])
-            elif grp == "3ème Ligne":
-                mask = df_s["Groupe"].astype(str).str.strip().str.lower().isin(["3ème ligne", "3eme ligne", "3e ligne"])
-            elif grp == "Trois-quarts":
-                mask = df_s["Groupe"].astype(str).str.strip().str.lower().isin(["trois-quarts", "trois quarts", "arrières", "arrieres", "3/4"])
-            else:
-                mask = df_s["Groupe"].astype(str).str.strip().str.lower() == grp.lower()
-            df_sub = df_s[mask]
-        else:
-            df_sub = pd.DataFrame()
-
-        # Repli si df_sub est vide
-        if df_sub.empty and ("Poste_Detaille" in df_s.columns or "Poste" in df_s.columns):
-            col_p = "Poste_Detaille" if "Poste_Detaille" in df_s.columns else "Poste"
-            if grp == "5 de devant":
-                kw = ["pilier", "talonneur", "2ème ligne", "deuxième ligne", "première ligne", "5 de devant"]
-            elif grp == "3ème Ligne":
-                kw = ["3ème ligne", "troisième ligne", "flanker", "n8", "numéro 8"]
-            else:
-                kw = ["demi", "ouvreur", "mêlée", "centre", "ailier", "arrière", "trois-quarts"]
-            mask = df_s[col_p].astype(str).str.strip().str.lower().apply(lambda s: any(k in s for k in kw))
-            df_sub = df_s[mask]
-
+        df_sub = _filter_df_by_group(df_s, grp)
         n_p = len(df_sub)
         res[grp]["num_players"] = n_p
         if n_p == 0:
@@ -1929,14 +1936,25 @@ def recuperer_historique_seances_meme_jour(
                     )
 
                     g_metrics = calculer_metriques_groupes_seance(df_s)
-                    # Consolidation avec rpe_stats enregistré au niveau de la séance
                     r_stats_s = s.get("rpe_stats", {})
-                    if r_stats_s and isinstance(r_stats_s, dict):
-                        for g_k in ["5 de devant", "3ème Ligne", "Trois-quarts"]:
-                            if g_metrics.get(g_k, {}).get("rpe") is None:
-                                r_val = r_stats_s.get(g_k) or r_stats_s.get(f"rpe_moyen_{g_k.lower().replace(' ', '_').replace('è', 'e')}")
-                                if r_val is not None and r_val > 0:
-                                    g_metrics[g_k]["rpe"] = float(r_val)
+                    for grp_key in ["5 de devant", "3ème Ligne", "Trois-quarts"]:
+                        df_group = _filter_df_by_group(df_s, grp_key)
+                        rpe_moyen = None
+                        if not df_group.empty and "RPE" in df_group.columns:
+                            s_rpe = pd.to_numeric(df_group["RPE"], errors="coerce").dropna()
+                            s_rpe = s_rpe[(s_rpe >= 1.0) & (s_rpe <= 10.0)]
+                            if not s_rpe.empty:
+                                rpe_moyen = round(float(s_rpe.mean()), 1)
+                        if rpe_moyen is None and r_stats_s and isinstance(r_stats_s, dict):
+                            r_val = r_stats_s.get(grp_key) or r_stats_s.get(f"rpe_moyen_{grp_key.lower().replace(' ', '_').replace('è', 'e')}")
+                            if r_val is not None:
+                                try:
+                                    f_r = float(r_val)
+                                    if f_r > 0:
+                                        rpe_moyen = round(f_r, 1)
+                                except Exception:
+                                    pass
+                        g_metrics[grp_key]["rpe"] = rpe_moyen
 
                     matched_sessions[date_key] = {
                         "date_key": date_key,
@@ -1964,12 +1982,24 @@ def recuperer_historique_seances_meme_jour(
     )
 
     curr_g_metrics = calculer_metriques_groupes_seance(df_current)
-    if current_rpe_stats and isinstance(current_rpe_stats, dict):
-        for g_k in ["5 de devant", "3ème Ligne", "Trois-quarts"]:
-            if curr_g_metrics.get(g_k, {}).get("rpe") is None:
-                r_val = current_rpe_stats.get(g_k) or current_rpe_stats.get(f"rpe_moyen_{g_k.lower().replace(' ', '_').replace('è', 'e')}")
-                if r_val is not None and r_val > 0:
-                    curr_g_metrics[g_k]["rpe"] = float(r_val)
+    for grp_key in ["5 de devant", "3ème Ligne", "Trois-quarts"]:
+        df_group = _filter_df_by_group(df_current, grp_key)
+        rpe_moyen = None
+        if not df_group.empty and "RPE" in df_group.columns:
+            s_rpe = pd.to_numeric(df_group["RPE"], errors="coerce").dropna()
+            s_rpe = s_rpe[(s_rpe >= 1.0) & (s_rpe <= 10.0)]
+            if not s_rpe.empty:
+                rpe_moyen = round(float(s_rpe.mean()), 1)
+        if rpe_moyen is None and current_rpe_stats and isinstance(current_rpe_stats, dict):
+            r_val = current_rpe_stats.get(grp_key) or current_rpe_stats.get(f"rpe_moyen_{grp_key.lower().replace(' ', '_').replace('è', 'e')}")
+            if r_val is not None:
+                try:
+                    f_r = float(r_val)
+                    if f_r > 0:
+                        rpe_moyen = round(f_r, 1)
+                except Exception:
+                    pass
+        curr_g_metrics[grp_key]["rpe"] = rpe_moyen
 
     matched_sessions[curr_date_key] = {
         "date_key": curr_date_key,
@@ -2305,7 +2335,7 @@ def generer_graphique_comparatif_triptyque_postes_matplotlib(
         ax_rpe.spines["bottom"].set_visible(False)
         ax_rpe.spines["right"].set_color("#CBD5E1")
         ax_rpe.grid(False)
-        ax_rpe.set_ylim(1.0, 10.5)
+        ax_rpe.set_ylim(0.0, 10.5)
         ax_rpe.set_yticks([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
         ax_rpe.set_ylabel("RPE (1-10)", fontsize=7.8, fontweight="bold", color="#C2410C")
         ax_rpe.tick_params(axis="y", labelsize=7.5, colors="#C2410C")
@@ -2321,12 +2351,11 @@ def generer_graphique_comparatif_triptyque_postes_matplotlib(
         b_vhsr = ax.bar(x + 0.5 * w, v_vhsr, width=w, color="#2ecc71", edgecolor="none", zorder=3)
 
         # 1 barre de charge interne RPE sur l'axe Y secondaire (1 à 10)
-        rpe_bar_heights = [max(0.0, (v - 1.0)) if (v is not None and v >= 1.0) else 0.0 for v in v_rpe]
+        rpe_bar_heights = [float(v) if (v is not None and v > 0) else 0.0 for v in v_rpe]
         b_rpe = ax_rpe.bar(
             x + 1.5 * w,
             rpe_bar_heights,
             width=w,
-            bottom=1.0,
             color="#E67E22",
             edgecolor="#C2410C",
             linewidth=0.8,
@@ -2372,7 +2401,7 @@ def generer_graphique_comparatif_triptyque_postes_matplotlib(
             else:
                 ax_rpe.annotate(
                     "NR",
-                    xy=(bar_center_x, 1.0),
+                    xy=(bar_center_x, 0.2),
                     xytext=(0, 3),
                     textcoords="offset points",
                     ha="center",

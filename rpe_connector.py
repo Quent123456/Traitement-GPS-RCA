@@ -463,9 +463,42 @@ def fetch_raw_rpe_data() -> pd.DataFrame:
             if worksheet is None:
                 worksheet = spreadsheet.sheet1
 
-            records = worksheet.get_all_records()
+            records = None
+            try:
+                records = worksheet.get_all_records()
+            except Exception:
+                pass
+
             if records:
                 df = pd.DataFrame(records)
+            else:
+                # Fallback get_all_values() si get_all_records() échoue (en-têtes dupliqués ou vides)
+                all_values = worksheet.get_all_values()
+                if all_values and len(all_values) > 1:
+                    headers = all_values[0]
+                    seen_h: Dict[str, int] = {}
+                    unique_headers = []
+                    for h in headers:
+                        h_str = str(h).strip()
+                        if not h_str:
+                            h_str = "col"
+                        if h_str in seen_h:
+                            seen_h[h_str] += 1
+                            unique_headers.append(f"{h_str}_{seen_h[h_str]}")
+                        else:
+                            seen_h[h_str] = 0
+                            unique_headers.append(h_str)
+                    df = pd.DataFrame(all_values[1:], columns=unique_headers)
+                else:
+                    df = pd.DataFrame()
+
+            if not df.empty:
+                try:
+                    cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+                    os.makedirs(cache_dir, exist_ok=True)
+                    df.to_csv(os.path.join(cache_dir, "rpe_cache.csv"), index=False, encoding="utf-8")
+                except Exception:
+                    pass
                 return df
         except Exception as e:
             print(f"Avertissement : Connexion Google Sheet RPE échouée ({e}).")
@@ -474,7 +507,9 @@ def fetch_raw_rpe_data() -> pd.DataFrame:
     cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "rpe_cache.csv")
     if os.path.exists(cache_path):
         try:
-            return pd.read_csv(cache_path, encoding="utf-8")
+            df_cached = pd.read_csv(cache_path, encoding="utf-8")
+            if not df_cached.empty:
+                return df_cached
         except Exception:
             pass
 
@@ -636,23 +671,54 @@ def enrich_gps_dataframe_with_rpe(
     c_gps_player = find_column_by_aliases(df_out, ["Nom ; Prénom", "Player Name", "Athlete Name", "Joueur", "Nom"])
 
     # 1. Résolution stricte des numéros de capteurs GPS vers les noms de joueurs de la séance
-    if mapping_gps and c_gps_player and c_gps_player in df_out.columns:
-        map_lookup = {}
+    if mapping_gps:
+        map_lookup: Dict[Any, str] = {}
         for k, v in mapping_gps.items():
-            if v and str(v).strip() and str(v).strip() not in ["— Sélectionner un joueur —", "-"]:
+            if v and str(v).strip() and str(v).strip() not in ["— Sélectionner un joueur —", "-", "None"]:
                 v_clean = str(v).strip()
                 k_str = str(k).strip()
+                map_lookup[k] = v_clean
                 map_lookup[k_str] = v_clean
-                try:
-                    f_k = float(k_str)
-                    if f_k.is_integer():
-                        map_lookup[str(int(f_k))] = v_clean
-                        map_lookup[int(f_k)] = v_clean
-                except Exception:
-                    pass
-        df_out[c_gps_player] = df_out[c_gps_player].apply(
-            lambda val: map_lookup.get(val, map_lookup.get(str(val).strip(), val))
-        )
+                m_dig = re.search(r"\b(\d+)\b", k_str)
+                if m_dig:
+                    n_i = int(m_dig.group(1))
+                    map_lookup[n_i] = v_clean
+                    map_lookup[str(n_i)] = v_clean
+                    map_lookup[float(n_i)] = v_clean
+                    map_lookup[f"{n_i}.0"] = v_clean
+                    map_lookup[f"GPS {n_i}"] = v_clean
+                    map_lookup[f"GPS_{n_i}"] = v_clean
+                    map_lookup[f"Capteur {n_i}"] = v_clean
+
+        def _resolve_mapped_player(val: Any) -> Any:
+            if val is None or pd.isna(val):
+                return val
+            if val in map_lookup:
+                return map_lookup[val]
+            s_val = str(val).strip()
+            if s_val in map_lookup:
+                return map_lookup[s_val]
+            m_d = re.search(r"\b(\d+)\b", s_val)
+            if m_d:
+                n = int(m_d.group(1))
+                if n in map_lookup:
+                    return map_lookup[n]
+                if str(n) in map_lookup:
+                    return map_lookup[str(n)]
+            try:
+                f_v = float(s_val)
+                if f_v in map_lookup:
+                    return map_lookup[f_v]
+                if f_v.is_integer() and int(f_v) in map_lookup:
+                    return map_lookup[int(f_v)]
+            except Exception:
+                pass
+            return val
+
+        # Appliquer la résolution sur toutes les colonnes candidates de joueurs
+        player_candidate_cols = [c for c in ["Nom ; Prénom", "Player Name", "Athlete Name", "Joueur", "Nom", "athlete_name"] if c in df_out.columns]
+        for p_col in player_candidate_cols:
+            df_out[p_col] = df_out[p_col].apply(_resolve_mapped_player)
 
     if df_rpe is None or df_rpe.empty:
         df_rpe = fetch_raw_rpe_data()
@@ -685,22 +751,39 @@ def enrich_gps_dataframe_with_rpe(
         r_day = normalize_weekday_str(r[col_day]) if col_day and col_day in r else None
         r_date = parse_and_normalize_date(r[col_date]) if col_date and col_date in r else None
 
+        # Si col_day n'a pas été capté par normalize_weekday_str mais a du texte
+        if r_day is None and col_day and col_day in r and pd.notna(r[col_day]):
+            raw_d = "".join(c for c in unicodedata.normalize("NFD", str(r[col_day]).upper()) if unicodedata.category(c) != "Mn")
+            for fr_d in JOURS_FR_STANDARDS:
+                if fr_d in raw_d:
+                    r_day = fr_d
+                    break
+
         if r_date is not None:
             if r_week is None:
                 r_week = r_date.isocalendar()[1]
             if r_day is None:
                 r_day = JOURS_FR_STANDARDS[r_date.weekday()]
 
-        # 2. Critère de correspondance de séance (Semaine + Jour prioritaires)
+        # 2. Critère de correspondance de séance (Semaine + Jour prioritaires avec fallback date)
         match_session = False
-        if r_week is not None and r_day is not None and target_week is not None and target_weekday is not None:
-            match_session = (r_week == target_week and r_day == target_weekday)
-        elif r_date is not None and target_dt is not None:
-            match_session = (r_date == target_dt)
-        elif r_day is not None and target_weekday is not None and r_day == target_weekday:
-            match_session = (r_week is None or target_week is None or r_week == target_week)
-        elif r_week is not None and target_week is not None and r_week == target_week and target_weekday is None:
-            match_session = True
+        # Règle 1 : Si Numero Semaine correspond à target_week ET que le jour normalisé correspond à target_weekday
+        if r_week is not None and target_week is not None and r_week == target_week:
+            if r_day is not None and target_weekday is not None:
+                if r_day == target_weekday or r_day in target_weekday or target_weekday in r_day:
+                    match_session = True
+            elif target_weekday is None:
+                match_session = True
+
+        # Règle 2 (Fallback) : si la date de la ligne a le même (year, month, day) que target_dt
+        if not match_session and r_date is not None and target_dt is not None:
+            if (r_date.year, r_date.month, r_date.day) == (target_dt.year, target_dt.month, target_dt.day):
+                match_session = True
+
+        # Règle 3 (Fallback souple) : si même jour et semaine non renseignée
+        if not match_session and r_day is not None and target_weekday is not None:
+            if (r_day == target_weekday or r_day in target_weekday or target_weekday in r_day) and (r_week is None or target_week is None or r_week == target_week):
+                match_session = True
 
         if not match_session:
             continue
