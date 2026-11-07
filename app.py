@@ -4009,6 +4009,7 @@ def generer_rapport_pdf_coachs(
             n_max=min(4, nb_comparatif),
             current_notes_or_tag=synthese_note or "",
             current_adversaire=adversaire,
+            current_rpe_stats=rpe_stats,
         )
         pdf.current_subtitle = f"RETOUR JOURNÉE — COMPARAISON AVEC LES DERNIERS {target_day.upper()}S (SEMAINE {curr_week})"
         pdf.add_page()
@@ -5633,6 +5634,19 @@ def main() -> None:
                         )
                         st.rerun()
 
+    # Détection de la date de séance (source unique de vérité pour le croisement RPE)
+    detected_date_raw = None
+    if df_splits_valides is not None:
+        c_date = find_column(df_splits_valides, ["Date", "Session Date", "Date de séance", "Date de seance"])
+        if c_date and c_date in df_splits_valides.columns:
+            s_d = df_splits_valides[c_date].dropna().astype(str).str.strip()
+            if not s_d.empty:
+                detected_date_raw = s_d.iloc[0]
+
+    parsed_session_dt = weekly_memory.parse_session_date(detected_date_raw)
+    init_date = parsed_session_dt if parsed_session_dt is not None else datetime.date(2026, 11, 6)
+    active_date_for_rpe = st.session_state.get("session_date_picker", init_date)
+
     with st.spinner("Calcul des métriques consolidées STAPS RCA..."):
         df_indiv = process_catapult_data(
             df_splits_valides,
@@ -5640,6 +5654,18 @@ def main() -> None:
             split_filter=selected_splits_val,
             exclude_warmup=excl_warmup_val,
         )
+        # Enrichissement RPE immédiat dès la consolidation individuelle (avec mapping des boîtiers GPS)
+        try:
+            df_rpe_raw = rpe_connector.fetch_raw_rpe_data()
+            df_indiv = rpe_connector.enrich_gps_dataframe_with_rpe(
+                df_gps=df_indiv,
+                session_date=active_date_for_rpe,
+                df_rpe=df_rpe_raw,
+                mapping_gps=mapping_gps,
+            )
+        except Exception as e:
+            print(f"Avertissement : Enrichissement RPE initial impossible : {e}")
+
         moyennes_groupes = calculer_moyennes_groupes_rca(
             df_splits_valides,
             df_indiv,
@@ -5973,6 +5999,7 @@ def main() -> None:
             df_gps=df_indiv,
             session_date=active_date_for_rpe,
             df_rpe=df_rpe_raw,
+            mapping_gps=mapping_gps,
         )
         if groupe_selectionne != "Tous les groupes":
             df_groupe_actif = df_indiv[df_indiv["Groupe"] == groupe_selectionne].copy()

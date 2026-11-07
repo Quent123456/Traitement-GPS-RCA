@@ -54,19 +54,78 @@ COMMON_WORKSHEET_NAMES = [
 def normalize_text_key(text: Any) -> str:
     """
     Normalise une chaîne de texte pour la comparaison :
-    - Passage en minuscules
+    - Nettoyage des parenthèses et préfixes boîtiers (ex: 'Jean-Étienne ( TIJ)' -> 'Jean-Étienne')
     - Suppression totale des accents (NFKD)
     - Remplacement des tirets, apostrophes, ponctuations par des espaces
-    - Suppression des espaces superflus début/milieu/fin
+    - Passage en minuscules et suppression des espaces superflus début/milieu/fin
     """
     if text is None or pd.isna(text):
         return ""
-    s = str(text).strip().lower()
+    s = str(text).strip()
+    # Supprime le contenu entre parenthèses (diminutifs, surnoms comme TIJ, annotations)
+    s = re.sub(r"\(.*?\)", " ", s)
+    s = s.strip().lower()
     # Décomposition Unicode pour éliminer les accents (é, è, ê, ï, à, etc.)
     s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
     # Remplacement des caractères non-alphanumériques par des espaces
     s = re.sub(r"[^a-z0-9]+", " ", s)
     return " ".join(s.split())
+
+
+# Alias et variantes orthographiques spécifiques à l'effectif sénior RCA
+RCA_NAME_ALIASES: Dict[str, str] = {
+    "tij": "lesueur jean etienne",
+    "jean etienne tij": "lesueur jean etienne",
+    "jean etienne": "lesueur jean etienne",
+    "gabin d": "denier gabin",
+    "d anthymme": "demonchy anthymme",
+    "anthymme d": "demonchy anthymme",
+    "vdh simon": "van der heijden simon",
+    "simon vdh": "van der heijden simon",
+}
+
+
+def are_player_names_matching(name_gps: str, name_rpe: str) -> bool:
+    """
+    Vérifie si le nom du joueur GPS (issu du mapping de séance) correspond au nom
+    saisi dans le Google Sheets RPE :
+    1. Égalité stricte après normalisation textuelle (sans accents, sans ponctuation, minuscules).
+    2. Correspondance canonique d'alias RCA (ex: 'Jean-Étienne ( TIJ)' <-> 'LESUEUR Jean-Étienne').
+    3. Permutation libre des tokens (ex: 'DUPONT Antoine' == 'Antoine DUPONT').
+    4. Inclusion mutuelle de tokens (ex: 'PECQUERY Thomas' vs 'Pecquery').
+    """
+    norm_g = normalize_text_key(name_gps)
+    norm_r = normalize_text_key(name_rpe)
+    if not norm_g or not norm_r:
+        return False
+
+    # 1. Égalité directe
+    if norm_g == norm_r:
+        return True
+
+    # 2. Alias canoniques RCA
+    canon_g = RCA_NAME_ALIASES.get(norm_g, norm_g)
+    canon_r = RCA_NAME_ALIASES.get(norm_r, norm_r)
+    if canon_g == canon_r:
+        return True
+
+    # 3. Correspondance par ensemble de tokens (tolérance totale inversion Nom/Prénom)
+    tokens_g = set(norm_g.split())
+    tokens_r = set(norm_r.split())
+    if tokens_g and tokens_r and tokens_g == tokens_r:
+        return True
+
+    # 4. Inclusion si un prénom ou un nom seul est renseigné
+    if tokens_g and tokens_r and (tokens_g.issubset(tokens_r) or tokens_r.issubset(tokens_g)):
+        return True
+
+    # 5. Tokens sur noms canonisés
+    tokens_cg = set(canon_g.split())
+    tokens_cr = set(canon_r.split())
+    if tokens_cg and tokens_cr and (tokens_cg == tokens_cr or tokens_cg.issubset(tokens_cr) or tokens_cr.issubset(tokens_cg)):
+        return True
+
+    return False
 
 
 def parse_and_normalize_date(date_val: Any) -> Optional[datetime.date]:
@@ -93,6 +152,14 @@ def parse_and_normalize_date(date_val: Any) -> Optional[datetime.date]:
     if not s or s.lower() in ["none", "nan", "nat", "-"]:
         return None
 
+    # Si c'est un numéro de série Excel sous forme de chaîne ('46332' ou '46332.0')
+    try:
+        f_val = float(s)
+        if 40000 <= f_val <= 60000:
+            return (datetime.date(1899, 12, 30) + datetime.timedelta(days=int(f_val)))
+    except Exception:
+        pass
+
     # Extraction de la partie date (supprime l'heure si '06/11/2026 19:30:00')
     s_part = s.split(" ")[0].strip()
 
@@ -111,6 +178,17 @@ def parse_and_normalize_date(date_val: Any) -> Optional[datetime.date]:
     m_iso = re.match(r"^(\d{4})[/.-](\d{1,2})[/.-](\d{1,2})$", s_part)
     if m_iso:
         y, m, d = int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3))
+        try:
+            return datetime.date(y, m, d)
+        except ValueError:
+            pass
+
+    # 3. Format textuel avec nom de jour en préfixe (ex: 'Vendredi 06/11/2026')
+    m_day_pref = re.search(r"(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})", s)
+    if m_day_pref:
+        d, m, y = int(m_day_pref.group(1)), int(m_day_pref.group(2)), int(m_day_pref.group(3))
+        if y < 100:
+            y += 2000
         try:
             return datetime.date(y, m, d)
         except ValueError:
@@ -337,36 +415,72 @@ def get_rpe_sync_status() -> Tuple[bool, str]:
 # 3. IDENTIFICATION DES COLONNES DU SHEET RPE
 # ==============================================================================
 
-def find_column_by_aliases(df: pd.DataFrame, aliases: List[str]) -> Optional[str]:
-    """Trouve la colonne correspondante dans un DataFrame selon une liste d'alias."""
+def find_column_by_aliases(
+    df: pd.DataFrame,
+    aliases: List[str],
+    exclude: Optional[List[str]] = None,
+) -> Optional[str]:
+    """
+    Trouve la colonne correspondante dans un DataFrame selon une liste d'alias.
+    Priorité absolue à la correspondance exacte normalisée pour éviter les faux positifs (ex: 'Nom' dans 'Nom et Prénom').
+    """
     if df is None or df.empty:
         return None
-    for col in df.columns:
-        col_clean = normalize_text_key(col)
-        for a in aliases:
-            a_clean = normalize_text_key(a)
-            if a_clean == col_clean or a_clean in col_clean:
+    excl_set = {normalize_text_key(e) for e in exclude if e} if exclude else set()
+
+    # Passe 1 : Correspondance EXACTE prioritaire
+    for a in aliases:
+        a_clean = normalize_text_key(a)
+        for col in df.columns:
+            col_clean = normalize_text_key(col)
+            if col_clean in excl_set:
+                continue
+            if a_clean == col_clean:
                 return col
+
+    # Passe 2 : Correspondance par mot complet délimité
+    for a in aliases:
+        a_clean = normalize_text_key(a)
+        pattern = r"\b" + re.escape(a_clean) + r"\b"
+        for col in df.columns:
+            col_clean = normalize_text_key(col)
+            if col_clean in excl_set:
+                continue
+            if re.search(pattern, col_clean):
+                return col
+
     return None
 
 
 def identify_rpe_columns(df_rpe: pd.DataFrame) -> Dict[str, Optional[str]]:
     """Détecte les colonnes de date, nom, prénom, RPE et durée dans le DataFrame RPE."""
+    # 1. Colonne Date : Priorité à la date de séance explicite avant l'horodateur de formulaire
     col_date = find_column_by_aliases(df_rpe, [
-        "Date", "Date de la séance", "Date de seance", "Date séance", "Date seance",
-        "Date de l'entraînement", "Date entrainement", "Date entraînement", "Horodateur"
+        "Date de la séance", "Date de seance", "Date séance", "Date seance",
+        "Date de l'entraînement", "Date entraînement", "Date entrainement", "Date", "Horodateur", "Timestamp"
     ])
-    col_nom = find_column_by_aliases(df_rpe, ["Nom de famille", "Nom"])
-    col_prenom = find_column_by_aliases(df_rpe, ["Prénom", "Prenom"])
-    col_joueur_unique = find_column_by_aliases(df_rpe, [
-        "Joueur", "Nom ; Prénom", "Nom et Prénom", "Nom Prénom", "Player Name", "Athlète", "Athlete"
-    ])
+
+    # 2. Colonne RPE
     col_rpe = find_column_by_aliases(df_rpe, [
-        "RPE", "Score RPE", "RPE (1-10)", "Note RPE", "Difficulté", "Intensité", "Intensite", "Difficulté de la séance"
-    ])
+        "RPE", "Score RPE", "RPE (1-10)", "Note RPE", "Difficulté de la séance", "Difficulté", "Intensité", "Intensite"
+    ], exclude=[col_date] if col_date else None)
+
+    # 3. Colonne Durée
     col_duration = find_column_by_aliases(df_rpe, [
         "Durée (min)", "Durée de la séance", "Duree (min)", "Durée", "Duree", "Duration", "Temps"
-    ])
+    ], exclude=[col_date, col_rpe] if (col_date or col_rpe) else None)
+
+    # 4. Colonne Joueur unique (Nom complet ou Nom Prénom)
+    col_joueur_unique = find_column_by_aliases(df_rpe, [
+        "Nom et Prénom", "Nom & Prénom", "Nom Prénom", "Nom ; Prénom", "Nom complet",
+        "Joueur", "Athlète", "Athlete", "Player Name"
+    ], exclude=[col_date, col_rpe, col_duration] if (col_date or col_rpe or col_duration) else None)
+
+    # 5. Colonnes Nom et Prénom séparées
+    excl_names = [c for c in [col_date, col_rpe, col_duration, col_joueur_unique] if c]
+    col_nom = find_column_by_aliases(df_rpe, ["Nom de famille", "Nom"], exclude=excl_names)
+    excl_prenom = excl_names + ([col_nom] if col_nom else [])
+    col_prenom = find_column_by_aliases(df_rpe, ["Prénom", "Prenom"], exclude=excl_prenom)
 
     return {
         "col_date": col_date,
@@ -386,10 +500,13 @@ def enrich_gps_dataframe_with_rpe(
     df_gps: pd.DataFrame,
     session_date: Any,
     df_rpe: Optional[pd.DataFrame] = None,
+    mapping_gps: Optional[Dict[Any, str]] = None,
 ) -> pd.DataFrame:
     """
     Enrichit le DataFrame GPS Catapult (df_indiv) avec les valeurs RPE individuelles :
-    - Clé de jointure : Nom + Prénom + Date normalisés.
+    - Clé de jointure : Nom résolu + Date normalisés (sécurisée contre les inversions et surnoms).
+    - Attribution des boîtiers GPS : Si un identifiant de capteur subsiste dans le tableau,
+      la table de mapping de séance le résout impérativement vers le joueur officiel.
     - Attribution des postes : Strictement conservée depuis le tableau GPS.
     - Si un joueur n'a pas répondu : RPE = np.nan, RPE_Display = 'NR'.
     - Charge Foster calculée : Session_RPE = RPE × Durée (min).
@@ -399,6 +516,27 @@ def enrich_gps_dataframe_with_rpe(
 
     df_out = df_gps.copy()
     target_dt = parse_and_normalize_date(session_date)
+
+    c_gps_player = find_column_by_aliases(df_out, ["Nom ; Prénom", "Player Name", "Athlete Name", "Joueur", "Nom"])
+
+    # 1. Résolution stricte des numéros de capteurs GPS vers les noms de joueurs de la séance
+    if mapping_gps and c_gps_player and c_gps_player in df_out.columns:
+        map_lookup = {}
+        for k, v in mapping_gps.items():
+            if v and str(v).strip() and str(v).strip() not in ["— Sélectionner un joueur —", "-"]:
+                v_clean = str(v).strip()
+                k_str = str(k).strip()
+                map_lookup[k_str] = v_clean
+                try:
+                    f_k = float(k_str)
+                    if f_k.is_integer():
+                        map_lookup[str(int(f_k))] = v_clean
+                        map_lookup[int(f_k)] = v_clean
+                except Exception:
+                    pass
+        df_out[c_gps_player] = df_out[c_gps_player].apply(
+            lambda val: map_lookup.get(val, map_lookup.get(str(val).strip(), val))
+        )
 
     if df_rpe is None or df_rpe.empty:
         df_rpe = fetch_raw_rpe_data()
@@ -419,9 +557,9 @@ def enrich_gps_dataframe_with_rpe(
     col_rpe = cols_map["col_rpe"]
     col_dur = cols_map["col_duration"]
 
-    # Construction du dictionnaire de correspondance pour la date cible
-    # Clé : normalized_name_key -> (rpe_value, session_rpe, duration)
-    rpe_by_player: Dict[str, Tuple[float, float, float]] = {}
+    # Construction de la liste des réponses RPE pour la date cible
+    # [(raw_player_name, (rpe_val, session_rpe, duration))]
+    rpe_entries_for_date: List[Tuple[str, Tuple[float, float, float]]] = []
 
     for _, r in df_rpe.iterrows():
         # 1. Vérification de la date
@@ -431,15 +569,16 @@ def enrich_gps_dataframe_with_rpe(
 
         # 2. Construction du nom complet du joueur
         full_name_str = ""
-        if col_nom and col_prenom and col_nom in r and col_prenom in r:
-            full_name_str = f"{str(r[col_nom])} {str(r[col_prenom])}".strip()
-        elif col_player and col_player in r:
+        if col_player and col_player in r and pd.notna(r[col_player]):
             full_name_str = str(r[col_player]).strip()
-        elif col_nom and col_nom in r:
+        elif col_nom and col_prenom and col_nom in r and col_prenom in r and col_nom != col_prenom:
+            val_n = str(r[col_nom]).strip() if pd.notna(r[col_nom]) else ""
+            val_p = str(r[col_prenom]).strip() if pd.notna(r[col_prenom]) else ""
+            full_name_str = f"{val_n} {val_p}".strip()
+        elif col_nom and col_nom in r and pd.notna(r[col_nom]):
             full_name_str = str(r[col_nom]).strip()
 
-        norm_key = normalize_text_key(full_name_str)
-        if not norm_key:
+        if not full_name_str:
             continue
 
         # 3. Extraction de la valeur RPE et de la durée
@@ -450,11 +589,9 @@ def enrich_gps_dataframe_with_rpe(
         dur_val = parse_duration_minutes(r[col_dur]) if col_dur and col_dur in r else 80.0
         session_rpe = round(rpe_val * dur_val, 1)
 
-        rpe_by_player[norm_key] = (rpe_val, session_rpe, dur_val)
+        rpe_entries_for_date.append((full_name_str, (rpe_val, session_rpe, dur_val)))
 
-    # 4. Jointure avec le tableau GPS
-    c_gps_player = find_column_by_aliases(df_out, ["Nom ; Prénom", "Player Name", "Athlete Name", "Joueur", "Nom"])
-
+    # 4. Jointure sécurisée avec le tableau GPS
     rpe_col_vals: List[Optional[float]] = []
     srpe_col_vals: List[Optional[float]] = []
     disp_col_vals: List[str] = []
@@ -462,21 +599,13 @@ def enrich_gps_dataframe_with_rpe(
 
     for _, row in df_out.iterrows():
         p_name = str(row[c_gps_player]).strip() if c_gps_player and c_gps_player in row else ""
-        norm_p = normalize_text_key(p_name)
-        tokens_p = set(norm_p.split())
-
         matched_entry: Optional[Tuple[float, float, float]] = None
 
-        # Recherche directe
-        if norm_p in rpe_by_player:
-            matched_entry = rpe_by_player[norm_p]
-        else:
-            # Recherche par ensemble de tokens (tolère l'inversion Nom/Prénom)
-            for r_key, entry in rpe_by_player.items():
-                tokens_r = set(r_key.split())
-                if tokens_p and tokens_r and (tokens_p == tokens_r or tokens_p.issubset(tokens_r) or tokens_r.issubset(tokens_p)):
-                    matched_entry = entry
-                    break
+        # Recherche de correspondance par algorithme tolérant nom/prénom/alias
+        for r_name_raw, entry in reversed(rpe_entries_for_date):
+            if are_player_names_matching(p_name, r_name_raw):
+                matched_entry = entry
+                break
 
         if matched_entry is not None:
             r_val, s_rpe, dur = matched_entry

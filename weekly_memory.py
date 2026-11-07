@@ -1607,17 +1607,17 @@ def formater_libelle_seance_x(
     return f"{j_str} {d_str}".strip()
 
 
-def calculer_metriques_groupes_seance(df_s: pd.DataFrame) -> Dict[str, Dict[str, float]]:
+def calculer_metriques_groupes_seance(df_s: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
     """
     Calcule les moyennes exactes par ligne de poste pour le triptyque :
     - 5 de devant
     - 3ème Ligne
     - Trois-quarts
-    Retourne {groupe: {"volume": m, "hsr": m, "vhsr": m, "num_players": n}}
+    Retourne {groupe: {"volume": m, "hsr": m, "vhsr": m, "rpe": float, "num_players": n}}
     """
     groupes = ["5 de devant", "3ème Ligne", "Trois-quarts"]
-    res: Dict[str, Dict[str, float]] = {
-        g: {"volume": 0.0, "hsr": 0.0, "vhsr": 0.0, "num_players": 0}
+    res: Dict[str, Dict[str, Any]] = {
+        g: {"volume": 0.0, "hsr": 0.0, "vhsr": 0.0, "rpe": None, "num_players": 0}
         for g in groupes
     }
     if df_s is None or not isinstance(df_s, pd.DataFrame) or df_s.empty:
@@ -1687,6 +1687,14 @@ def calculer_metriques_groupes_seance(df_s: pd.DataFrame) -> Dict[str, Dict[str,
                     pass
             vhsrs.append(vh)
         res[grp]["vhsr"] = round(float(np.mean(vhsrs)), 1) if vhsrs else 0.0
+
+        # 4. RPE Moyen du groupe (1-10)
+        rpes = []
+        for _, r in df_sub.iterrows():
+            v_rpe = _extract_metric_rpe(r)
+            if v_rpe is not None and v_rpe > 0:
+                rpes.append(v_rpe)
+        res[grp]["rpe"] = round(float(np.mean(rpes)), 1) if rpes else None
 
     return res
 
@@ -1856,6 +1864,7 @@ def recuperer_historique_seances_meme_jour(
     n_max: int = 4,
     current_notes_or_tag: str = "",
     current_adversaire: str = "",
+    current_rpe_stats: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Extrait l'historique des N dernières séances enregistrées correspondant au même jour de la semaine
@@ -1919,6 +1928,16 @@ def recuperer_historique_seances_meme_jour(
                         week_num=w,
                     )
 
+                    g_metrics = calculer_metriques_groupes_seance(df_s)
+                    # Consolidation avec rpe_stats enregistré au niveau de la séance
+                    r_stats_s = s.get("rpe_stats", {})
+                    if r_stats_s and isinstance(r_stats_s, dict):
+                        for g_k in ["5 de devant", "3ème Ligne", "Trois-quarts"]:
+                            if g_metrics.get(g_k, {}).get("rpe") is None:
+                                r_val = r_stats_s.get(g_k) or r_stats_s.get(f"rpe_moyen_{g_k.lower().replace(' ', '_').replace('è', 'e')}")
+                                if r_val is not None and r_val > 0:
+                                    g_metrics[g_k]["rpe"] = float(r_val)
+
                     matched_sessions[date_key] = {
                         "date_key": date_key,
                         "sort_date": s_dt,
@@ -1929,7 +1948,7 @@ def recuperer_historique_seances_meme_jour(
                         "is_current": False,
                         "num_players": len(df_s),
                         "metrics": calculer_moyennes_seance(df_s),
-                        "group_metrics": calculer_metriques_groupes_seance(df_s),
+                        "group_metrics": g_metrics,
                     }
 
     # Intégration de la séance actuelle (exclue ou écrasant l'historique du même jour)
@@ -1944,6 +1963,14 @@ def recuperer_historique_seances_meme_jour(
         week_num=curr_iso_week,
     )
 
+    curr_g_metrics = calculer_metriques_groupes_seance(df_current)
+    if current_rpe_stats and isinstance(current_rpe_stats, dict):
+        for g_k in ["5 de devant", "3ème Ligne", "Trois-quarts"]:
+            if curr_g_metrics.get(g_k, {}).get("rpe") is None:
+                r_val = current_rpe_stats.get(g_k) or current_rpe_stats.get(f"rpe_moyen_{g_k.lower().replace(' ', '_').replace('è', 'e')}")
+                if r_val is not None and r_val > 0:
+                    curr_g_metrics[g_k]["rpe"] = float(r_val)
+
     matched_sessions[curr_date_key] = {
         "date_key": curr_date_key,
         "sort_date": dt_curr,
@@ -1954,7 +1981,7 @@ def recuperer_historique_seances_meme_jour(
         "is_current": True,
         "num_players": len(df_current) if df_current is not None else 0,
         "metrics": calculer_moyennes_seance(df_current),
-        "group_metrics": calculer_metriques_groupes_seance(df_current),
+        "group_metrics": curr_g_metrics,
     }
 
     sorted_sessions = sorted(matched_sessions.values(), key=lambda x: x["sort_date"])
@@ -1968,6 +1995,50 @@ def recuperer_historique_seances_meme_jour(
             it["is_current"] = False
 
     return final_sessions
+
+
+def _calculate_rpe_groups_for_week(
+    df_week: pd.DataFrame,
+    sessions_dict: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Optional[float]]:
+    """Calcule les moyennes RPE de la semaine pour l'équipe et les 3 groupes de postes."""
+    res: Dict[str, Optional[float]] = {
+        "Total": None,
+        "5 de devant": None,
+        "3ème Ligne": None,
+        "Trois-quarts": None,
+    }
+    # 1. Depuis les sessions via rpe_connector
+    if sessions_dict and rpe_connector:
+        try:
+            w_rpe = rpe_connector.calculate_weekly_rpe_from_sessions(sessions_dict)
+            if w_rpe:
+                res["Total"] = w_rpe.get("rpe_moyen_equipe")
+                res["5 de devant"] = w_rpe.get("rpe_5_devant")
+                res["3ème Ligne"] = w_rpe.get("rpe_3eme_ligne")
+                res["Trois-quarts"] = w_rpe.get("rpe_trois_quarts")
+        except Exception:
+            pass
+
+    # 2. Complément depuis df_week si présent
+    if df_week is not None and not df_week.empty and "RPE" in df_week.columns:
+        r_all = pd.to_numeric(df_week["RPE"], errors="coerce").dropna()
+        if not r_all.empty and res["Total"] is None:
+            res["Total"] = round(float(r_all.mean()), 1)
+        for g_k, g_aliases in [
+            ("5 de devant", ["5 de devant", "devant"]),
+            ("3ème Ligne", ["3ème ligne", "3eme ligne"]),
+            ("Trois-quarts", ["trois-quarts", "trois quarts", "3/4"]),
+        ]:
+            if res[g_k] is None and "Groupe" in df_week.columns:
+                m_g = df_week["Groupe"].astype(str).str.strip().str.lower().apply(
+                    lambda s: any(a in s for a in g_aliases)
+                )
+                sub_r = pd.to_numeric(df_week.loc[m_g, "RPE"], errors="coerce").dropna()
+                if not sub_r.empty:
+                    res[g_k] = round(float(sub_r.mean()), 1)
+
+    return res
 
 
 def recuperer_historique_semaines(
@@ -1992,6 +2063,20 @@ def recuperer_historique_semaines(
             df_w, _ = aggregate_weekly_sessions(w_data)
             label_str = f"Semaine {w:02d}"
             short_str = f"S{w:02d}"
+            metrics_w = calculer_moyennes_seance(df_w)
+            rpe_grp_w = _calculate_rpe_groups_for_week(df_w, w_data.get("sessions", {}))
+            
+            # Enrichissement des métriques de RPE par groupe pour le tableau comparatif
+            r_av = [v for v in [rpe_grp_w.get("5 de devant"), rpe_grp_w.get("3ème Ligne")] if v is not None]
+            metrics_w["RPE Moyen (1-10)"] = {
+                "Total": rpe_grp_w.get("Total") or 0.0,
+                "Avants": round(float(np.mean(r_av)), 1) if r_av else 0.0,
+                "Arrières": rpe_grp_w.get("Trois-quarts") or 0.0,
+                "5 de devant": rpe_grp_w.get("5 de devant") or 0.0,
+                "3ème Ligne": rpe_grp_w.get("3ème Ligne") or 0.0,
+                "Trois-quarts": rpe_grp_w.get("Trois-quarts") or 0.0,
+            }
+
             weeks_dict[w_key] = {
                 "key": w_key,
                 "year": y,
@@ -2000,12 +2085,25 @@ def recuperer_historique_semaines(
                 "short_label": short_str,
                 "is_current": False,
                 "num_players": len(df_w),
-                "metrics": calculer_moyennes_seance(df_w),
+                "metrics": metrics_w,
+                "rpe_groups": rpe_grp_w,
             }
 
     curr_key = f"{year_curr}-W{week_curr:02d}"
     curr_label = f"Semaine {week_curr:02d}"
     curr_short = f"S{week_curr:02d}"
+    curr_metrics = calculer_moyennes_seance(df_curr_hebdo)
+    curr_rpe_grp = _calculate_rpe_groups_for_week(df_curr_hebdo, None)
+    curr_r_av = [v for v in [curr_rpe_grp.get("5 de devant"), curr_rpe_grp.get("3ème Ligne")] if v is not None]
+    curr_metrics["RPE Moyen (1-10)"] = {
+        "Total": curr_rpe_grp.get("Total") or 0.0,
+        "Avants": round(float(np.mean(curr_r_av)), 1) if curr_r_av else 0.0,
+        "Arrières": curr_rpe_grp.get("Trois-quarts") or 0.0,
+        "5 de devant": curr_rpe_grp.get("5 de devant") or 0.0,
+        "3ème Ligne": curr_rpe_grp.get("3ème Ligne") or 0.0,
+        "Trois-quarts": curr_rpe_grp.get("Trois-quarts") or 0.0,
+    }
+
     weeks_dict[curr_key] = {
         "key": curr_key,
         "year": year_curr,
@@ -2014,7 +2112,8 @@ def recuperer_historique_semaines(
         "short_label": curr_short,
         "is_current": True,
         "num_players": len(df_curr_hebdo) if df_curr_hebdo is not None else 0,
-        "metrics": calculer_moyennes_seance(df_curr_hebdo),
+        "metrics": curr_metrics,
+        "rpe_groups": curr_rpe_grp,
     }
 
     sorted_weeks = sorted(weeks_dict.values(), key=lambda x: (x["year"], x["week_num"]))
@@ -2031,15 +2130,17 @@ def recuperer_historique_semaines(
 
 def generer_graphique_comparatif_historique_matplotlib(
     items_comparatif: List[Dict[str, Any]],
-    type_label: str = "Séance",
+    type_label: str = "Semaine",
 ) -> io.BytesIO:
     """
-    Génère un graphique d'évolution épuré 2 en 1 via Matplotlib :
-    - Subplot 1 (Gauche) : Player Load Moyen (Charge Globale) par date/semaine avec courbes Avants & Arrières.
-    - Subplot 2 (Droite) : High Speed Running (> 20 km/h) Moyen par date/semaine avec courbes Avants & Arrières.
+    Génère un graphique d'évolution 3 en 1 via Matplotlib :
+    - Subplot 1 (Gauche) : Player Load Moyen par date/semaine avec courbes Avants & Arrières.
+    - Subplot 2 (Centre) : High Speed Running (> 20 km/h) par date/semaine avec courbes Avants & Arrières.
+    - Subplot 3 (Droite) : Évolution du RPE Moyen (1-10) — Fatigue Ressentie déclinée par ligne de poste
+                           (5 de devant, 3ème Ligne, Trois-quarts, Équipe).
     Met en valeur la séance ou semaine actuelle (mise en avant dorée/or, badge ★ Actuelle).
     """
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.5, 2.7), dpi=180)
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(14.2, 3.2), dpi=180)
     fig.patch.set_facecolor("#FFFFFF")
 
     labels = [it.get("short_label", it.get("label", "")) for it in items_comparatif]
@@ -2062,7 +2163,7 @@ def generer_graphique_comparatif_historique_matplotlib(
     ax1.plot(x, pl_av, color="#A30000", linestyle="--", marker="o", markersize=4, label="Avants (Pack)", zorder=5)
     ax1.plot(x, pl_ar, color="#2E5A88", linestyle=":", marker="s", markersize=4, label="Arrières (3/4)", zorder=5)
 
-    ax1.set_title(f"Évolution Player Load Moyen ({type_label}s)", fontsize=9.2, fontweight="bold", color="#1F4E79", pad=6)
+    ax1.set_title(f"Évolution Player Load ({type_label}s)", fontsize=9.2, fontweight="bold", color="#1F4E79", pad=6)
     ax1.set_xticks(x)
     ax1.set_xticklabels(labels, fontsize=8.2, fontweight="bold", color="#334155")
     max_pl = max(1.0, max(pl_tot or [1.0]), max(pl_av or [1.0]), max(pl_ar or [1.0]))
@@ -2077,26 +2178,9 @@ def generer_graphique_comparatif_historique_matplotlib(
             lbl += " ★"
         ax1.annotate(lbl, xy=(rect.get_x() + rect.get_width() / 2, h),
                      xytext=(0, 2), textcoords="offset points", ha="center", va="bottom",
-                     fontsize=7.5, fontweight="bold", color="#D97706" if it.get("is_current") else "#1F4E79")
+                     fontsize=7.2, fontweight="bold", color="#D97706" if it.get("is_current") else "#1F4E79")
 
-    # Courbe d'évolution RPE Moyen superposée (Axe secondaire Y2 - Charge Interne croisée à la Charge Externe)
-    rpe_tot = [it.get("metrics", {}).get("RPE Moyen (1-10)", {}).get("Total", 0.0) for it in items_comparatif]
-    has_rpe = any(v is not None and v > 0 for v in rpe_tot)
-    if has_rpe:
-        ax1_rpe = ax1.twinx()
-        ax1_rpe.plot(x, rpe_tot, color="#E67E22", linewidth=2.0, marker="D", markersize=4.5, label="RPE Moyen (Équipe)", zorder=6)
-        ax1_rpe.set_ylabel("RPE Moyen (1-10)", color="#E67E22", fontweight="bold", fontsize=7.8)
-        ax1_rpe.set_ylim(0, 10.5)
-        ax1_rpe.tick_params(axis="y", labelcolor="#E67E22", labelsize=7.5)
-        for i, val in enumerate(rpe_tot):
-            if val and val > 0:
-                ax1_rpe.annotate(f"{val:.1f}", xy=(x[i], val), xytext=(0, 3), textcoords="offset points",
-                                 ha="center", va="bottom", fontsize=7.2, fontweight="bold", color="#D35400")
-        lines_1, labs_1 = ax1.get_legend_handles_labels()
-        lines_2, labs_2 = ax1_rpe.get_legend_handles_labels()
-        ax1.legend(lines_1 + lines_2, labs_1 + labs_2, loc="upper right", frameon=False, fontsize=6.5)
-    else:
-        ax1.legend(loc="upper right", frameon=False, fontsize=7.0)
+    ax1.legend(loc="upper right", frameon=False, fontsize=6.5)
 
     # --- AX2 : HSR ---
     ax2.set_facecolor("#F8FAFC")
@@ -2104,7 +2188,7 @@ def generer_graphique_comparatif_historique_matplotlib(
     ax2.plot(x, hsr_av, color="#A30000", linestyle="--", marker="o", markersize=4, label="Avants (Pack)", zorder=5)
     ax2.plot(x, hsr_ar, color="#2E5A88", linestyle=":", marker="s", markersize=4, label="Arrières (3/4)", zorder=5)
 
-    ax2.set_title(f"Évolution High Speed Running (> 20 km/h) ({type_label}s)", fontsize=9.2, fontweight="bold", color="#1F4E79", pad=6)
+    ax2.set_title(f"Évolution HSR (> 20 km/h) ({type_label}s)", fontsize=9.2, fontweight="bold", color="#1F4E79", pad=6)
     ax2.set_xticks(x)
     ax2.set_xticklabels(labels, fontsize=8.2, fontweight="bold", color="#334155")
     max_hsr = max(10.0, max(hsr_tot or [1.0]), max(hsr_av or [1.0]), max(hsr_ar or [1.0]))
@@ -2119,9 +2203,51 @@ def generer_graphique_comparatif_historique_matplotlib(
             lbl += " ★"
         ax2.annotate(lbl, xy=(rect.get_x() + rect.get_width() / 2, h),
                      xytext=(0, 2), textcoords="offset points", ha="center", va="bottom",
-                     fontsize=7.5, fontweight="bold", color="#D97706" if it.get("is_current") else "#A30000")
+                     fontsize=7.2, fontweight="bold", color="#D97706" if it.get("is_current") else "#A30000")
 
-    ax2.legend(loc="upper right", frameon=False, fontsize=7.0)
+    ax2.legend(loc="upper right", frameon=False, fontsize=6.5)
+
+    # --- AX3 : Évolution RPE Moyen par Groupe (Fatigue Ressentie) ---
+    ax3.set_facecolor("#F8FAFC")
+    rpe_5dev = [it.get("rpe_groups", {}).get("5 de devant") or it.get("metrics", {}).get("RPE Moyen (1-10)", {}).get("5 de devant") for it in items_comparatif]
+    rpe_3eme = [it.get("rpe_groups", {}).get("3ème Ligne") or it.get("metrics", {}).get("RPE Moyen (1-10)", {}).get("3ème Ligne") for it in items_comparatif]
+    rpe_3quarts = [it.get("rpe_groups", {}).get("Trois-quarts") or it.get("metrics", {}).get("RPE Moyen (1-10)", {}).get("Trois-quarts") for it in items_comparatif]
+    rpe_equipe = [it.get("rpe_groups", {}).get("Total") or it.get("metrics", {}).get("RPE Moyen (1-10)", {}).get("Total") for it in items_comparatif]
+
+    has_any_rpe = any(v is not None and v > 0 for v in (rpe_5dev + rpe_3eme + rpe_3quarts + rpe_equipe))
+
+    if has_any_rpe:
+        # Tracé des courbes des 3 groupes de postes
+        for line_data, col, marker, lbl in [
+            (rpe_5dev, "#C0392B", "o", "5 de devant"),
+            (rpe_3eme, "#D97706", "s", "3ème Ligne"),
+            (rpe_3quarts, "#2980B9", "^", "Trois-quarts"),
+        ]:
+            valid_x = [i for i, v in enumerate(line_data) if v is not None and v > 0]
+            valid_y = [line_data[i] for i in valid_x]
+            if valid_y:
+                ax3.plot(valid_x, valid_y, color=col, linewidth=1.8, marker=marker, markersize=4.5, label=lbl, zorder=4)
+                for px, py in zip(valid_x, valid_y):
+                    ax3.annotate(f"{py:.1f}", xy=(px, py), xytext=(0, 3), textcoords="offset points",
+                                 ha="center", va="bottom", fontsize=6.8, fontweight="bold", color=col)
+
+        # Courbe moyenne équipe (repère global en trait pointillé plus épais)
+        valid_eq_x = [i for i, v in enumerate(rpe_equipe) if v is not None and v > 0]
+        valid_eq_y = [rpe_equipe[i] for i in valid_eq_x]
+        if valid_eq_y:
+            ax3.plot(valid_eq_x, valid_eq_y, color="#1E293B", linestyle="--", linewidth=2.0, marker="D", markersize=4.0, label="Équipe", zorder=5)
+
+        ax3.legend(loc="upper right", frameon=False, fontsize=6.2)
+    else:
+        ax3.text(0.5, 0.5, "Aucune saisie RPE disponible", ha="center", va="center", transform=ax3.transAxes,
+                 fontsize=8.5, color="#94A3B8", fontstyle="italic")
+
+    ax3.set_title(f"Évolution RPE Moyen par Groupe ({type_label}s)", fontsize=9.2, fontweight="bold", color="#1F4E79", pad=6)
+    ax3.set_xticks(x)
+    ax3.set_xticklabels(labels, fontsize=8.2, fontweight="bold", color="#334155")
+    ax3.set_ylim(0, 10.5)
+    ax3.set_ylabel("RPE (1-10)", fontsize=7.8, fontweight="bold", color="#1F4E79")
+    ax3.grid(axis="y", linestyle="--", alpha=0.35, color="#94A3B8", zorder=1)
 
     fig.tight_layout()
     buf = io.BytesIO()
@@ -2195,13 +2321,37 @@ def generer_graphique_comparatif_triptyque_postes_matplotlib(
                         color="#1E293B",
                     )
 
+        # Badges RPE Moyen du groupe par séance
+        v_rpe = [it.get("group_metrics", {}).get(grp_key, {}).get("rpe") for it in items_comparatif]
+        for i_idx, rpe_val in enumerate(v_rpe):
+            if rpe_val is not None and rpe_val > 0:
+                cluster_top = max(v_vol[i_idx], v_hsr[i_idx], v_vhsr[i_idx], 100.0)
+                ax.annotate(
+                    f"RPE {rpe_val:.1f}/10",
+                    xy=(x[i_idx], cluster_top),
+                    xytext=(0, 14),
+                    textcoords="offset points",
+                    ha="center",
+                    va="bottom",
+                    fontsize=7.6,
+                    fontweight="bold",
+                    color="#C2410C",
+                    bbox=dict(
+                        boxstyle="round,pad=0.25",
+                        facecolor="#FFF7ED",
+                        edgecolor="#EA580C",
+                        linewidth=1.0,
+                    ),
+                    zorder=6,
+                )
+
         ax.set_title(grp_title, fontsize=11.5, fontweight="bold", color="#1F4E79", pad=12)
         ax.set_xticks(x)
         x_labels = [it.get("label_x", it.get("label", "")) for it in items_comparatif]
         ax.set_xticklabels([lbl.replace(" (", "\n(") for lbl in x_labels], fontsize=8.2, fontweight="bold", color="#334155")
 
         max_v = max(max(v_vol or [100.0]), 100.0)
-        ax.set_ylim(0, max_v * 1.18)
+        ax.set_ylim(0, max_v * 1.28)
         ax.tick_params(axis="x", length=0)
         ax.tick_params(axis="y", labelsize=8, color="#94A3B8")
 
@@ -2209,14 +2359,15 @@ def generer_graphique_comparatif_triptyque_postes_matplotlib(
         Line2D([0], [0], marker="o", color="w", markerfacecolor="#3498db", markersize=9, label="Volume (m)"),
         Line2D([0], [0], marker="o", color="w", markerfacecolor="#c0392b", markersize=9, label="HSR (> 20 km/h) (m)"),
         Line2D([0], [0], marker="o", color="w", markerfacecolor="#2ecc71", markersize=9, label="VHSR (> 25 km/h) (m)"),
+        Line2D([0], [0], marker="s", color="w", markerfacecolor="#EA580C", markersize=8, label="RPE Moyen Ligne (1-10)"),
     ]
     fig.legend(
         handles=leg_elements,
         loc="upper center",
         bbox_to_anchor=(0.5, 0.98),
-        ncol=3,
+        ncol=4,
         frameon=False,
-        fontsize=10.0,
+        fontsize=9.5,
     )
 
     fig.subplots_adjust(top=0.88, bottom=0.14, left=0.06, right=0.97, wspace=0.25)
@@ -2311,18 +2462,18 @@ def render_comparatif_historique_pdf_page(
     pdf.set_xy(12.0, y_chart_start)
     pdf.set_font("Helvetica", "B", 8.8)
     pdf.set_text_color(11, 25, 44)
-    pdf.cell(273.0, 4.0, safe_latin1("1. ÉVOLUTION DE LA CHARGE (PLAYER LOAD) ET DE LA HAUTE INTENSITÉ (HSR) :"), align="L")
+    pdf.cell(273.0, 4.0, safe_latin1("1. ÉVOLUTION DE LA CHARGE (PLAYER LOAD), HAUTE INTENSITÉ (HSR) ET FATIGUE RPE :"), align="L")
 
     try:
         buf_chart = generer_graphique_comparatif_historique_matplotlib(items_comparatif, type_label=type_label)
-        chart_h = 67.0
+        chart_h = 65.0
         pdf.image(buf_chart, x=12.0, y=y_chart_start + 4.5, w=273.0, h=chart_h)
     except Exception as e:
         print(f"Erreur graphique comparatif historique PDF : {e}")
         chart_h = 20.0
 
     # 2. Section 2 : Tableau de synthèse comparative
-    y_table_sec = y_chart_start + 4.5 + chart_h + 2.5
+    y_table_sec = y_chart_start + 4.5 + chart_h + 2.0
     pdf.set_xy(12.0, y_table_sec)
     pdf.set_font("Helvetica", "B", 8.8)
     pdf.set_text_color(11, 25, 44)
@@ -2333,12 +2484,12 @@ def render_comparatif_historique_pdf_page(
     w_delta = 28.0
     w_col = (273.0 - w_label - w_delta) / max(num_items, 1)
 
-    y_tbl_hdr = y_table_sec + 4.5
+    y_tbl_hdr = y_table_sec + 4.2
     pdf.set_xy(12.0, y_tbl_hdr)
     pdf.set_fill_color(31, 78, 121)
     pdf.set_text_color(255, 255, 255)
     pdf.set_font("Helvetica", "B", 7.5)
-    pdf.cell(w_label, 5.2, safe_latin1("Métrique & Groupe"), 1, 0, "L", fill=True)
+    pdf.cell(w_label, 5.0, safe_latin1("Métrique & Groupe"), 1, 0, "L", fill=True)
 
     for it in items_comparatif:
         is_curr = it.get("is_current", False)
@@ -2351,12 +2502,12 @@ def render_comparatif_historique_pdf_page(
             pdf.set_text_color(255, 255, 255)
             h_text = it.get("short_label", it.get("label", ""))
         pdf.set_font("Helvetica", "B", 7.0 if w_col < 30 else 7.5)
-        pdf.cell(w_col, 5.2, safe_latin1(h_text[:14]), 1, 0, "C", fill=True)
+        pdf.cell(w_col, 5.0, safe_latin1(h_text[:14]), 1, 0, "C", fill=True)
 
     pdf.set_fill_color(31, 78, 121)
     pdf.set_text_color(255, 255, 255)
     pdf.set_font("Helvetica", "B", 7.2)
-    pdf.cell(w_delta, 5.2, safe_latin1("Écart vs Moy."), 1, 1, "C", fill=True)
+    pdf.cell(w_delta, 5.0, safe_latin1("Écart vs Moy."), 1, 1, "C", fill=True)
 
     metric_blocks = [
         {
@@ -2384,9 +2535,14 @@ def render_comparatif_historique_pdf_page(
             "key": "Player Load",
             "fmt": lambda v: f"{v:.1f}",
         },
+        {
+            "title": "6. CHARGE INTERNE & FATIGUE (RPE 1-10)",
+            "key": "RPE Moyen (1-10)",
+            "fmt": lambda v: f"{v:.1f}/10" if (v is not None and v > 0) else "NR",
+        },
     ]
 
-    row_h = 3.6
+    row_h = 3.2
     sub_levels = [
         ("Total (Collectif)", "Total"),
         ("Avants (Pack)", "Avants"),
@@ -2397,14 +2553,14 @@ def render_comparatif_historique_pdf_page(
         pdf.set_x(12.0)
         pdf.set_fill_color(241, 245, 249)
         pdf.set_text_color(31, 78, 121)
-        pdf.set_font("Helvetica", "B", 7.0)
-        pdf.cell(273.0, 3.8, safe_latin1(block["title"]), 1, 1, "L", fill=True)
+        pdf.set_font("Helvetica", "B", 6.8)
+        pdf.cell(273.0, 3.4, safe_latin1(block["title"]), 1, 1, "L", fill=True)
 
         for sub_label, sub_key in sub_levels:
             pdf.set_x(12.0)
             pdf.set_fill_color(255, 255, 255)
             pdf.set_draw_color(226, 232, 240)
-            pdf.set_font("Helvetica", "", 6.8)
+            pdf.set_font("Helvetica", "", 6.6)
             pdf.set_text_color(30, 41, 59)
             pdf.cell(w_label, row_h, safe_latin1(f"   {sub_label}"), 1, 0, "L", fill=True)
 
@@ -2416,24 +2572,28 @@ def render_comparatif_historique_pdf_page(
                 v = it["metrics"][block["key"]][sub_key]
                 v_txt = block["fmt"](v)
                 pdf.set_fill_color(248, 250, 252) if is_curr else (255, 255, 255)
-                pdf.set_font("Helvetica", "B" if is_curr else "", 6.8 if w_col < 30 else 7.2)
+                pdf.set_font("Helvetica", "B" if is_curr else "", 6.6 if w_col < 30 else 7.0)
                 pdf.set_text_color(31, 78, 121) if is_curr else (30, 41, 59)
                 pdf.cell(w_col, row_h, safe_latin1(v_txt), 1, 0, "C", fill=True)
 
             if prior_vals:
-                moy_prior = sum(prior_vals) / len(prior_vals)
-                if moy_prior > 0:
+                valid_priors = [pv for pv in prior_vals if pv is not None and pv > 0]
+                if valid_priors and curr_val is not None and curr_val > 0:
+                    moy_prior = sum(valid_priors) / len(valid_priors)
                     delta_pct = ((curr_val - moy_prior) / moy_prior) * 100.0
                     delta_txt = f"{delta_pct:+.1f} %"
                     d_color = (22, 101, 52) if delta_pct >= 0 else (153, 27, 27)
+                elif curr_val is not None and curr_val > 0 and not valid_priors:
+                    delta_txt = "-"
+                    d_color = (100, 116, 139)
                 else:
-                    delta_txt = "0.0 %"
+                    delta_txt = "-"
                     d_color = (100, 116, 139)
             else:
                 delta_txt = "-"
                 d_color = (100, 116, 139)
 
-            pdf.set_font("Helvetica", "B", 6.8)
+            pdf.set_font("Helvetica", "B", 6.6)
             pdf.set_text_color(*d_color)
             pdf.set_fill_color(255, 255, 255)
             pdf.cell(w_delta, row_h, safe_latin1(delta_txt), 1, 1, "C", fill=True)
