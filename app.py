@@ -4052,17 +4052,19 @@ def generer_rapport_pdf_coachs(
                 # Séance en cours : calcul direct depuis df_indiv
                 for grp in ["5 de devant", "3ème Ligne", "Trois-quarts"]:
                     df_group = weekly_memory._filter_df_by_group(df_indiv, grp)
-                    if "RPE" in df_group.columns:
-                        rpe_group = pd.to_numeric(df_group["RPE"], errors="coerce").dropna()
-                        rpe_group = rpe_group[(rpe_group >= 1.0) & (rpe_group <= 10.0)]
-                        if not rpe_group.empty:
-                            it_g_metrics.setdefault(grp, {})["rpe"] = round(float(rpe_group.mean()), 1)
-                        elif it_g_metrics.get(grp, {}).get("rpe") is None and rpe_stats:
-                            v_r = rpe_stats.get(grp) or rpe_stats.get(f"rpe_moyen_{grp.lower().replace(' ', '_').replace('è', 'e')}")
-                            if v_r is not None and float(v_r) > 0:
-                                it_g_metrics.setdefault(grp, {})["rpe"] = round(float(v_r), 1)
-                    elif it_g_metrics.get(grp, {}).get("rpe") is None and rpe_stats:
+                    rpe_moyen = None
+                    if not df_group.empty and "RPE" in df_group.columns:
+                        rpe_moyen = df_group["RPE"].dropna().mean()
+                    if (rpe_moyen is None or pd.isna(rpe_moyen)) and rpe_stats and isinstance(rpe_stats, dict):
                         v_r = rpe_stats.get(grp) or rpe_stats.get(f"rpe_moyen_{grp.lower().replace(' ', '_').replace('è', 'e')}")
+                        if v_r is not None and float(v_r) > 0:
+                            rpe_moyen = float(v_r)
+                    it_g_metrics.setdefault(grp, {})["rpe"] = round(rpe_moyen, 1) if pd.notna(rpe_moyen) else None
+            else:
+                for grp in ["5 de devant", "3ème Ligne", "Trois-quarts"]:
+                    if it_g_metrics.get(grp, {}).get("rpe") is None:
+                        r_stats_it = it.get("rpe_stats") or {}
+                        v_r = r_stats_it.get(grp) or r_stats_it.get(f"rpe_moyen_{grp.lower().replace(' ', '_').replace('è', 'e')}")
                         if v_r is not None and float(v_r) > 0:
                             it_g_metrics.setdefault(grp, {})["rpe"] = round(float(v_r), 1)
 
@@ -4073,6 +4075,7 @@ def generer_rapport_pdf_coachs(
             items_comparatif=items_comp,
             target_day=target_day,
             week_num=curr_week,
+            df_current=df_indiv,
         )
 
     return bytes(pdf.output())

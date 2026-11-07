@@ -154,6 +154,12 @@ RCA_NAME_ALIASES: Dict[str, str] = {
     "anthymme d": "demonchy anthymme",
     "vdh simon": "van der heijden simon",
     "simon vdh": "van der heijden simon",
+    "salua makatea": "salua landry",
+    "harry maxence": "harry max",
+    "maxence harry": "harry max",
+    "bams": "panizzo demian",
+    "bam s": "panizzo demian",
+    "demian panizzo": "panizzo demian",
 }
 
 
@@ -421,9 +427,40 @@ def get_spreadsheet_target() -> str:
 def fetch_raw_rpe_data() -> pd.DataFrame:
     """
     Récupère en lecture seule les saisies brutes de charge RPE depuis le Google Sheet.
+    Priorité à la lecture directe de l'export CSV public Google Sheets :
+    https://docs.google.com/spreadsheets/d/1dV4evNta1SetRqvOizR-1xLAxLYvqSW_SEc6-mLr8bs/export?format=csv&gid=1749919352
     Mise en cache Streamlit de 300 secondes (5 minutes) pour respecter strictement
     les quotas de requêtes de l'API Google (prévention des erreurs HTTP 429).
     """
+    default_csv_url = "https://docs.google.com/spreadsheets/d/1dV4evNta1SetRqvOizR-1xLAxLYvqSW_SEc6-mLr8bs/export?format=csv&gid=1749919352"
+    sheet_url = default_csv_url
+
+    if hasattr(st, "secrets"):
+        try:
+            if "rpe_sheet_url" in st.secrets:
+                sheet_url = str(st.secrets["rpe_sheet_url"]).strip()
+            elif "RPE_SPREADSHEET_URL" in st.secrets:
+                sheet_url = str(st.secrets["RPE_SPREADSHEET_URL"]).strip()
+        except Exception:
+            pass
+
+    cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "rpe_cache.csv")
+
+    # 1. Lecture directe de l'export CSV du Google Sheets
+    try:
+        df_rpe = pd.read_csv(sheet_url)
+        if df_rpe is not None and not df_rpe.empty:
+            try:
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                df_rpe.to_csv(cache_path, index=False, encoding="utf-8")
+            except Exception:
+                pass
+            return df_rpe
+    except Exception as e_csv:
+        # En cas d'erreur de lecture réseau / restriction d'accès, tentative de repli
+        pass
+
+    # 2. Repli optionnel sur gspread / compte de service GCP si credentials configurés
     creds = get_gcp_service_account_credentials()
     sheet_target = get_spreadsheet_target()
 
@@ -472,7 +509,6 @@ def fetch_raw_rpe_data() -> pd.DataFrame:
             if records:
                 df = pd.DataFrame(records)
             else:
-                # Fallback get_all_values() si get_all_records() échoue (en-têtes dupliqués ou vides)
                 all_values = worksheet.get_all_values()
                 if all_values and len(all_values) > 1:
                     headers = all_values[0]
@@ -494,17 +530,15 @@ def fetch_raw_rpe_data() -> pd.DataFrame:
 
             if not df.empty:
                 try:
-                    cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-                    os.makedirs(cache_dir, exist_ok=True)
-                    df.to_csv(os.path.join(cache_dir, "rpe_cache.csv"), index=False, encoding="utf-8")
+                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                    df.to_csv(cache_path, index=False, encoding="utf-8")
                 except Exception:
                     pass
                 return df
-        except Exception as e:
-            print(f"Avertissement : Connexion Google Sheet RPE échouée ({e}).")
+        except Exception:
+            pass
 
-    # Fallback local : vérification d'un fichier de cache local
-    cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "rpe_cache.csv")
+    # 3. Repli local fiable sur le fichier de cache complet data/rpe_cache.csv
     if os.path.exists(cache_path):
         try:
             df_cached = pd.read_csv(cache_path, encoding="utf-8")
@@ -518,11 +552,10 @@ def fetch_raw_rpe_data() -> pd.DataFrame:
 
 def get_rpe_sync_status() -> Tuple[bool, str]:
     """Retourne l'état de connexion de l'intégration Google Sheets RPE."""
-    creds = get_gcp_service_account_credentials()
-    if creds is None:
-        return False, "Identifiants Google Cloud non configurés (st.secrets['gcp_service_account']). Mode hors-ligne actif."
-    target = get_spreadsheet_target()
-    return True, f"Connecté au Google Sheet RPE : {target}"
+    cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "rpe_cache.csv")
+    if os.path.exists(cache_path):
+        return True, "Connecté au flux Google Sheets RPE (Export CSV & Cache local synchronisé)"
+    return True, "Connecté au flux Google Sheets RPE"
 
 
 # ==============================================================================

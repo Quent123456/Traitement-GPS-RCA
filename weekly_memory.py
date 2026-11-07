@@ -1986,20 +1986,17 @@ def recuperer_historique_seances_meme_jour(
         df_group = _filter_df_by_group(df_current, grp_key)
         rpe_moyen = None
         if not df_group.empty and "RPE" in df_group.columns:
-            s_rpe = pd.to_numeric(df_group["RPE"], errors="coerce").dropna()
-            s_rpe = s_rpe[(s_rpe >= 1.0) & (s_rpe <= 10.0)]
-            if not s_rpe.empty:
-                rpe_moyen = round(float(s_rpe.mean()), 1)
-        if rpe_moyen is None and current_rpe_stats and isinstance(current_rpe_stats, dict):
+            rpe_moyen = df_group['RPE'].dropna().mean()
+        if (rpe_moyen is None or pd.isna(rpe_moyen)) and current_rpe_stats and isinstance(current_rpe_stats, dict):
             r_val = current_rpe_stats.get(grp_key) or current_rpe_stats.get(f"rpe_moyen_{grp_key.lower().replace(' ', '_').replace('è', 'e')}")
             if r_val is not None:
                 try:
                     f_r = float(r_val)
                     if f_r > 0:
-                        rpe_moyen = round(f_r, 1)
+                        rpe_moyen = f_r
                 except Exception:
                     pass
-        curr_g_metrics[grp_key]["rpe"] = rpe_moyen
+        curr_g_metrics[grp_key]["rpe"] = round(rpe_moyen, 1) if pd.notna(rpe_moyen) else None
 
     matched_sessions[curr_date_key] = {
         "date_key": curr_date_key,
@@ -2351,7 +2348,7 @@ def generer_graphique_comparatif_triptyque_postes_matplotlib(
         b_vhsr = ax.bar(x + 0.5 * w, v_vhsr, width=w, color="#2ecc71", edgecolor="none", zorder=3)
 
         # 1 barre de charge interne RPE sur l'axe Y secondaire (1 à 10)
-        rpe_bar_heights = [float(v) if (v is not None and v > 0) else 0.0 for v in v_rpe]
+        rpe_bar_heights = [float(v) if (v is not None and pd.notna(v) and float(v) > 0) else 0.0 for v in v_rpe]
         b_rpe = ax_rpe.bar(
             x + 1.5 * w,
             rpe_bar_heights,
@@ -2384,11 +2381,12 @@ def generer_graphique_comparatif_triptyque_postes_matplotlib(
         for i_idx, rpe_val in enumerate(v_rpe):
             rect = b_rpe[i_idx]
             bar_center_x = rect.get_x() + rect.get_width() / 2.0
-            if rpe_val is not None and rpe_val > 0:
-                lbl_rpe = f"{rpe_val:.1f}" if abs(rpe_val - round(rpe_val)) > 0.05 else f"{int(round(rpe_val))}"
+            if rpe_val is not None and pd.notna(rpe_val) and float(rpe_val) > 0:
+                f_val = float(rpe_val)
+                lbl_rpe = f"{f_val:.1f}" if abs(f_val - round(f_val)) > 0.05 else f"{int(round(f_val))}"
                 ax_rpe.annotate(
                     lbl_rpe,
-                    xy=(bar_center_x, rpe_val),
+                    xy=(bar_center_x, f_val),
                     xytext=(0, 3),
                     textcoords="offset points",
                     ha="center",
@@ -2416,6 +2414,7 @@ def generer_graphique_comparatif_triptyque_postes_matplotlib(
         ax.set_xticks(x)
         x_labels = [it.get("label_x", it.get("label", "")) for it in items_comparatif]
         ax.set_xticklabels([lbl.replace(" (", "\n(") for lbl in x_labels], fontsize=8.2, fontweight="bold", color="#334155")
+        ax.set_xlim(-0.55, max(float(K) - 0.45, 0.55))
 
         max_v = max(max(v_vol or [100.0]), 100.0)
         ax.set_ylim(0, max_v * 1.25)
@@ -2451,12 +2450,14 @@ def render_comparatif_triptyque_seances_pdf_page(
     items_comparatif: List[Dict[str, Any]],
     target_day: str = "Vendredi",
     week_num: Optional[int] = None,
+    df_current: Optional[pd.DataFrame] = None,
 ) -> None:
     """
     Rend la page de comparaison historique multi-séances au format triptyque Staff RCA :
     - En-tête de section (Titre + Sous-titre dynamique)
     - 3 colonnes graphiques côte à côte (5 de devant, 3ème Ligne, Trois-quarts)
     - Histogrammes groupés Volume, HSR, VHSR
+    - Barre orange RPE découplée (échelle 1 à 10)
     - Pleine largeur A4 Paysage sans tableau compact
     """
     if not items_comparatif:
@@ -2464,6 +2465,26 @@ def render_comparatif_triptyque_seances_pdf_page(
         pdf.set_font("Helvetica", "B", 12)
         pdf.cell(273.0, 10.0, safe_latin1("Aucune donnée comparative disponible pour ce jour."), align="C")
         return
+
+    # Garantie absolue d'injection du RPE par groupe
+    for it in items_comparatif:
+        g_metrics = it.setdefault("group_metrics", {})
+        is_curr = it.get("is_current", False)
+        for grp in ["5 de devant", "3ème Ligne", "Trois-quarts"]:
+            grp_dict = g_metrics.setdefault(grp, {})
+            if grp_dict.get("rpe") is None or pd.isna(grp_dict.get("rpe")):
+                df_src = None
+                if is_curr and df_current is not None and not df_current.empty:
+                    df_src = df_current
+                elif "players_data" in it and it["players_data"]:
+                    df_src = pd.DataFrame(it["players_data"])
+
+                if df_src is not None and not df_src.empty:
+                    df_group = _filter_df_by_group(df_src, grp)
+                    if not df_group.empty and "RPE" in df_group.columns:
+                        s_rpe = pd.to_numeric(df_group["RPE"], errors="coerce").dropna()
+                        rpe_moyen = s_rpe.mean() if not s_rpe.empty else None
+                        grp_dict["rpe"] = round(rpe_moyen, 1) if pd.notna(rpe_moyen) else None
 
     y_top = 19.5
     has_priors = len(items_comparatif) >= 2
