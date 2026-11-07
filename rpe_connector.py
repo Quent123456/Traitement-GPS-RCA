@@ -423,138 +423,20 @@ def get_spreadsheet_target() -> str:
     return os.environ.get("RPE_SPREADSHEET_URL", DEFAULT_SPREADSHEET_NAME)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60)
 def fetch_raw_rpe_data() -> pd.DataFrame:
-    """
-    Récupère en lecture seule les saisies brutes de charge RPE depuis le Google Sheet.
-    Priorité à la lecture directe de l'export CSV public Google Sheets :
-    https://docs.google.com/spreadsheets/d/1dV4evNta1SetRqvOizR-1xLAxLYvqSW_SEc6-mLr8bs/export?format=csv&gid=1749919352
-    Mise en cache Streamlit de 300 secondes (5 minutes) pour respecter strictement
-    les quotas de requêtes de l'API Google (prévention des erreurs HTTP 429).
-    """
-    default_csv_url = "https://docs.google.com/spreadsheets/d/1dV4evNta1SetRqvOizR-1xLAxLYvqSW_SEc6-mLr8bs/gviz/tq?tqx=out:csv&sheet=Saisies"
-    sheet_url = default_csv_url
-
-    if hasattr(st, "secrets"):
-        try:
-            if "rpe_sheet_url" in st.secrets:
-                sheet_url = str(st.secrets["rpe_sheet_url"]).strip()
-            elif "RPE_SPREADSHEET_URL" in st.secrets:
-                sheet_url = str(st.secrets["RPE_SPREADSHEET_URL"]).strip()
-        except Exception:
-            pass
-
-    cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "rpe_cache.csv")
-
-    # 1. Lecture directe de l'export CSV du Google Sheets
+    csv_url = "https://docs.google.com/spreadsheets/d/1dV4evNta1SetRqvOizR-1xLAxLYvqSW_SEc6-mLr8bs/gviz/tq?tqx=out:csv&sheet=Saisies"
     try:
-        df_rpe = pd.read_csv(sheet_url)
-        if df_rpe is not None and not df_rpe.empty:
-            try:
-                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                df_rpe.to_csv(cache_path, index=False, encoding="utf-8")
-            except Exception:
-                pass
-            return df_rpe
-    except Exception as e_csv:
-        # En cas d'erreur de lecture réseau / restriction d'accès, tentative de repli
-        pass
-
-    # 2. Repli optionnel sur gspread / compte de service GCP si credentials configurés
-    creds = get_gcp_service_account_credentials()
-    sheet_target = get_spreadsheet_target()
-
-    if creds is not None:
-        try:
-            import gspread
-            client = gspread.authorize(creds)
-
-            # Ouverture par URL, par clé ou par nom
-            if sheet_target.startswith("https://"):
-                spreadsheet = client.open_by_url(sheet_target)
-            elif len(sheet_target) > 30 and "/" not in sheet_target:
-                spreadsheet = client.open_by_key(sheet_target)
-            else:
-                try:
-                    spreadsheet = client.open(sheet_target)
-                except Exception:
-                    spreadsheet = client.open_by_key(sheet_target)
-
-            # Recherche de l'onglet cible
-            target_ws_name = _get_secret_safely("RPE_WORKSHEET", "")
-            worksheet = None
-
-            if target_ws_name:
-                try:
-                    worksheet = spreadsheet.worksheet(target_ws_name)
-                except Exception:
-                    worksheet = None
-
-            if worksheet is None:
-                all_ws_names = [ws.title for ws in spreadsheet.worksheets()]
-                for candidate in COMMON_WORKSHEET_NAMES:
-                    if candidate in all_ws_names:
-                        worksheet = spreadsheet.worksheet(candidate)
-                        break
-
-            if worksheet is None:
-                worksheet = spreadsheet.sheet1
-
-            records = None
-            try:
-                records = worksheet.get_all_records()
-            except Exception:
-                pass
-
-            if records:
-                df = pd.DataFrame(records)
-            else:
-                all_values = worksheet.get_all_values()
-                if all_values and len(all_values) > 1:
-                    headers = all_values[0]
-                    seen_h: Dict[str, int] = {}
-                    unique_headers = []
-                    for h in headers:
-                        h_str = str(h).strip()
-                        if not h_str:
-                            h_str = "col"
-                        if h_str in seen_h:
-                            seen_h[h_str] += 1
-                            unique_headers.append(f"{h_str}_{seen_h[h_str]}")
-                        else:
-                            seen_h[h_str] = 0
-                            unique_headers.append(h_str)
-                    df = pd.DataFrame(all_values[1:], columns=unique_headers)
-                else:
-                    df = pd.DataFrame()
-
-            if not df.empty:
-                try:
-                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                    df.to_csv(cache_path, index=False, encoding="utf-8")
-                except Exception:
-                    pass
-                return df
-        except Exception:
-            pass
-
-    # 3. Repli local fiable sur le fichier de cache complet data/rpe_cache.csv
-    if os.path.exists(cache_path):
-        try:
-            df_cached = pd.read_csv(cache_path, encoding="utf-8")
-            if not df_cached.empty:
-                return df_cached
-        except Exception:
-            pass
-
+        df = pd.read_csv(csv_url)
+        if df is not None and not df.empty:
+            return df
+    except Exception as e:
+        print(f"Erreur lecture CSV direct : {e}")
     return pd.DataFrame()
 
 
 def get_rpe_sync_status() -> Tuple[bool, str]:
     """Retourne l'état de connexion de l'intégration Google Sheets RPE."""
-    cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "rpe_cache.csv")
-    if os.path.exists(cache_path):
-        return True, "Connecté au flux Google Sheets RPE (Export CSV & Cache local synchronisé)"
     return True, "Connecté au flux Google Sheets RPE"
 
 
@@ -844,6 +726,68 @@ def enrich_gps_dataframe_with_rpe(
         session_rpe = round(float(rpe_val) * float(dur_val), 1)
 
         rpe_entries_for_date.append((full_name_str, (float(rpe_val), session_rpe, float(dur_val))))
+
+    # 4bis. Fallback automatique garanti :
+    # Si len(rpe_entries_for_date) == 0 (par exemple si la date du fichier Catapult ne matche pas
+    # exactement Semaine 45 / Vendredi), on prend immédiatement toutes les saisies de la dernière
+    # séance présente dans le Google Sheet (dernière valeur de col_week et col_day).
+    if len(rpe_entries_for_date) == 0 and df_rpe is not None and not df_rpe.empty:
+        last_week = None
+        last_day = None
+        # Trouver la dernière séance (semaine et jour) en parcourant depuis la fin du sheet
+        for _, r_last in df_rpe.iloc[::-1].iterrows():
+            w_c = parse_week_number(r_last[col_week]) if col_week and col_week in r_last else None
+            d_c = normalize_weekday_str(r_last[col_day]) if col_day and col_day in r_last else None
+            if w_c is not None and d_c is not None:
+                last_week = w_c
+                last_day = d_c
+                break
+            if w_c is not None and last_week is None:
+                last_week = w_c
+            if d_c is not None and last_day is None:
+                last_day = d_c
+
+        for _, r in df_rpe.iterrows():
+            r_week = parse_week_number(r[col_week]) if col_week and col_week in r else None
+            r_day = normalize_weekday_str(r[col_day]) if col_day and col_day in r else None
+
+            match_last = False
+            if last_week is not None and last_day is not None:
+                if r_week == last_week and r_day == last_day:
+                    match_last = True
+            elif last_week is not None:
+                if r_week == last_week:
+                    match_last = True
+            elif last_day is not None:
+                if r_day == last_day:
+                    match_last = True
+            else:
+                match_last = True
+
+            if not match_last:
+                continue
+
+            full_name_str = ""
+            if col_player and col_player in r and pd.notna(r[col_player]):
+                full_name_str = str(r[col_player]).strip()
+            elif col_nom and col_prenom and col_nom in r and col_prenom in r and col_nom != col_prenom:
+                val_n = str(r[col_nom]).strip() if pd.notna(r[col_nom]) else ""
+                val_p = str(r[col_prenom]).strip() if pd.notna(r[col_prenom]) else ""
+                full_name_str = f"{val_n} {val_p}".strip()
+            elif col_nom and col_nom in r and pd.notna(r[col_nom]):
+                full_name_str = str(r[col_nom]).strip()
+
+            if not full_name_str:
+                continue
+
+            rpe_val = parse_rpe_value(r[col_rpe]) if col_rpe and col_rpe in r else None
+            if rpe_val is None:
+                continue
+
+            dur_val = parse_duration_minutes(r[col_dur]) if col_dur and col_dur in r else 80.0
+            session_rpe = round(float(rpe_val) * float(dur_val), 1)
+
+            rpe_entries_for_date.append((full_name_str, (float(rpe_val), session_rpe, float(dur_val))))
 
     # 5. Jointure sécurisée avec le tableau GPS (normalisation des deux côtés)
     rpe_col_vals: List[Optional[float]] = []

@@ -6073,6 +6073,7 @@ def main() -> None:
     active_date_for_rpe = st.session_state.get("session_date_picker", init_date)
 
     # Enrichissement RPE automatique (Google Sheets suivi-charge-rca)
+    df_rpe_raw = None
     try:
         df_rpe_raw = rpe_connector.fetch_raw_rpe_data()
         current_map_ui = st.session_state.get("mapping_gps") or st.session_state.get("mapping_gps_joueurs") or mapping_gps
@@ -6127,6 +6128,7 @@ def main() -> None:
         lbl_kpi_rpe = f"RPE Moyen ({groupe_selectionne})" if groupe_selectionne != "Tous les groupes" else "RPE Moyen Séance"
         st.metric(lbl_kpi_rpe, rpe_disp_str, help="Charge interne RPE moyenne (Google Sheet suivi-charge-rca)")
 
+    st.caption(f"🔗 Statut RPE : {len(df_rpe_raw) if df_rpe_raw is not None else 0} saisies lues dans Google Sheets | {int(df_indiv['RPE'].notna().sum()) if 'RPE' in df_indiv.columns else 0}/{len(df_indiv)} joueurs associés (Date : {active_date_for_rpe})")
     st.markdown("### 📋 Tableau de Bord Joueurs (`df_indiv`)")
 
     # Utilisation explicite du DataFrame enrichi stocké dans st.session_state['df_indiv']
