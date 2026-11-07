@@ -3764,23 +3764,22 @@ def generer_rapport_pdf_coachs(
     if pd.isna(hsr_moy):
         hsr_moy = 0.0
 
-    # 1. Calcul strict du RPE pour la page de garde
+    # 1. Calcul strict du RPE pour la page de garde (Page 1)
     if "RPE" in df_indiv.columns:
-        s_rpe_all = pd.to_numeric(df_indiv["RPE"], errors="coerce").dropna()
-        s_rpe_all = s_rpe_all[(s_rpe_all >= 1.0) & (s_rpe_all <= 10.0)]
-        rpe_mean_str_eq = f"{round(s_rpe_all.mean(), 1)}" if not s_rpe_all.empty else "NR"
+        s_rpe = pd.to_numeric(df_indiv["RPE"], errors="coerce").dropna()
+        rpe_moy_str = f"{s_rpe.mean():.1f}" if not s_rpe.empty else "NR"
     else:
-        rpe_mean_str_eq = "NR"
+        rpe_moy_str = "NR"
 
-    if rpe_mean_str_eq == "NR" and rpe_stats and rpe_stats.get("equipe") is not None:
+    if rpe_moy_str == "NR" and rpe_stats and rpe_stats.get("equipe") is not None:
         try:
             val_eq = float(rpe_stats["equipe"])
             if val_eq > 0:
-                rpe_mean_str_eq = f"{round(val_eq, 1)}"
+                rpe_moy_str = f"{val_eq:.1f}"
         except Exception:
             pass
 
-    rpe_val_str = f"{rpe_mean_str_eq} / 10" if rpe_mean_str_eq != "NR" else "NR"
+    rpe_val_str = f"{rpe_moy_str} / 10" if rpe_moy_str != "NR" else "NR"
 
     kpis = [
         ("Joueurs Analyses", f"{nb_joueurs}"),
@@ -3979,24 +3978,20 @@ def generer_rapport_pdf_coachs(
 
         # RPE Réalisé pour le groupe (Pages 2, 4, 6)
         df_group = weekly_memory._filter_df_by_group(df_indiv, grp)
-        if "RPE" in df_group.columns:
-            rpe_group = pd.to_numeric(df_group["RPE"], errors="coerce").dropna()
-            rpe_group = rpe_group[(rpe_group >= 1.0) & (rpe_group <= 10.0)]
-            rpe_mean_str = f"{round(rpe_group.mean(), 1)}" if not rpe_group.empty else "NR"
-        else:
-            rpe_mean_str = "NR"
+        s_rpe = pd.to_numeric(df_group['RPE'], errors='coerce').dropna() if "RPE" in df_group.columns else pd.Series(dtype=float)
+        rpe_moy_str = f"{s_rpe.mean():.1f}" if not s_rpe.empty else "NR"
 
-        if rpe_mean_str == "NR" and rpe_stats:
+        if rpe_moy_str == "NR" and rpe_stats:
             v_grp = rpe_stats.get(grp) or rpe_stats.get(f"rpe_moyen_{grp.lower().replace(' ', '_').replace('è', 'e')}")
             if v_grp is not None:
                 try:
                     f_grp = float(v_grp)
                     if f_grp > 0:
-                        rpe_mean_str = f"{round(f_grp, 1)}"
+                        rpe_moy_str = f"{f_grp:.1f}"
                 except Exception:
                     pass
 
-        rpe_grp_str = f"{rpe_mean_str} / 10" if rpe_mean_str != "NR" else "NR"
+        rpe_grp_str = f"{rpe_moy_str} / 10" if rpe_moy_str != "NR" else "NR"
         pdf.cell(col_w_num, 6.8, safe_latin1(rpe_grp_str), border=1, align="C", fill=True)
 
         # 2. Graphiques : 4 barres comparatives en pleine largeur 2x2
@@ -4052,21 +4047,24 @@ def generer_rapport_pdf_coachs(
                 # Séance en cours : calcul direct depuis df_indiv
                 for grp in ["5 de devant", "3ème Ligne", "Trois-quarts"]:
                     df_group = weekly_memory._filter_df_by_group(df_indiv, grp)
-                    rpe_moyen = None
-                    if not df_group.empty and "RPE" in df_group.columns:
-                        rpe_moyen = df_group["RPE"].dropna().mean()
-                    if (rpe_moyen is None or pd.isna(rpe_moyen)) and rpe_stats and isinstance(rpe_stats, dict):
-                        v_r = rpe_stats.get(grp) or rpe_stats.get(f"rpe_moyen_{grp.lower().replace(' ', '_').replace('è', 'e')}")
-                        if v_r is not None and float(v_r) > 0:
-                            rpe_moyen = float(v_r)
-                    it_g_metrics.setdefault(grp, {})["rpe"] = round(rpe_moyen, 1) if pd.notna(rpe_moyen) else None
+                    s_rpe = pd.to_numeric(df_group['RPE'], errors='coerce').dropna() if "RPE" in df_group.columns else pd.Series(dtype=float)
+                    it_g_metrics.setdefault(grp, {})["rpe"] = round(float(s_rpe.mean()), 1) if not s_rpe.empty else None
             else:
                 for grp in ["5 de devant", "3ème Ligne", "Trois-quarts"]:
                     if it_g_metrics.get(grp, {}).get("rpe") is None:
-                        r_stats_it = it.get("rpe_stats") or {}
-                        v_r = r_stats_it.get(grp) or r_stats_it.get(f"rpe_moyen_{grp.lower().replace(' ', '_').replace('è', 'e')}")
-                        if v_r is not None and float(v_r) > 0:
-                            it_g_metrics.setdefault(grp, {})["rpe"] = round(float(v_r), 1)
+                        df_grp_hist = None
+                        if "players_data" in it and it["players_data"]:
+                            df_p = pd.DataFrame(it["players_data"])
+                            df_grp_hist = weekly_memory._filter_df_by_group(df_p, grp)
+                        if df_grp_hist is not None and not df_grp_hist.empty and "RPE" in df_grp_hist.columns:
+                            s_rpe_h = pd.to_numeric(df_grp_hist['RPE'], errors='coerce').dropna()
+                            if not s_rpe_h.empty:
+                                it_g_metrics.setdefault(grp, {})["rpe"] = round(float(s_rpe_h.mean()), 1)
+                        if it_g_metrics.get(grp, {}).get("rpe") is None:
+                            r_stats_it = it.get("rpe_stats") or {}
+                            v_r = r_stats_it.get(grp) or r_stats_it.get(f"rpe_moyen_{grp.lower().replace(' ', '_').replace('è', 'e')}")
+                            if v_r is not None and float(v_r) > 0:
+                                it_g_metrics.setdefault(grp, {})["rpe"] = round(float(v_r), 1)
 
         pdf.current_subtitle = f"RETOUR JOURNÉE — COMPARAISON AVEC LES DERNIERS {target_day.upper()}S (SEMAINE {curr_week})"
         pdf.add_page()
@@ -5745,6 +5743,9 @@ def main() -> None:
         except Exception as e:
             print(f"Avertissement : Enrichissement RPE initial impossible : {e}")
 
+        # Réassignation explicite dans la session pour l'affichage et les exports
+        st.session_state["df_indiv"] = df_indiv
+
         moyennes_groupes = calculer_moyennes_groupes_rca(
             df_splits_valides,
             df_indiv,
@@ -6096,6 +6097,8 @@ def main() -> None:
                 week_number=45,
                 weekday="Vendredi",
             )
+        # Réassignation explicite dans st.session_state['df_indiv']
+        st.session_state["df_indiv"] = df_indiv
         if groupe_selectionne != "Tous les groupes":
             df_groupe_actif = df_indiv[df_indiv["Groupe"] == groupe_selectionne].copy()
         else:
@@ -6268,6 +6271,8 @@ def main() -> None:
                 week_number=45,
                 weekday="Vendredi",
             )
+        # Sauvegarde explicite du DataFrame enrichi dans l'état de session
+        st.session_state["df_indiv"] = df_indiv
         rpe_metrics_seance = rpe_connector.calculate_rpe_group_metrics(df_indiv)
 
         pdf_bytes = generer_rapport_pdf_coachs(
