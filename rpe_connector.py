@@ -51,6 +51,19 @@ COMMON_WORKSHEET_NAMES = [
 # 1. NORMALISATION DU TEXTE & DES DATES (CORRESPONDANCE ULTRA-ROBUSTE)
 # ==============================================================================
 
+JOURS_FR_STANDARDS: List[str] = ["LUNDI", "MARDI", "MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE"]
+
+JOURS_MAP_CLEAN: Dict[str, str] = {
+    "lundi": "LUNDI", "lun": "LUNDI", "monday": "LUNDI", "mon": "LUNDI",
+    "mardi": "MARDI", "mar": "MARDI", "tuesday": "MARDI", "tue": "MARDI",
+    "mercredi": "MERCREDI", "mer": "MERCREDI", "wednesday": "MERCREDI", "wed": "MERCREDI",
+    "jeudi": "JEUDI", "jeu": "JEUDI", "thursday": "JEUDI", "thu": "JEUDI",
+    "vendredi": "VENDREDI", "ven": "VENDREDI", "friday": "VENDREDI", "fri": "VENDREDI",
+    "samedi": "SAMEDI", "sam": "SAMEDI", "saturday": "SAMEDI", "sat": "SAMEDI",
+    "dimanche": "DIMANCHE", "dim": "DIMANCHE", "sunday": "DIMANCHE", "sun": "DIMANCHE",
+}
+
+
 def normalize_text_key(text: Any) -> str:
     """
     Normalise une chaîne de texte pour la comparaison :
@@ -70,6 +83,65 @@ def normalize_text_key(text: Any) -> str:
     # Remplacement des caractères non-alphanumériques par des espaces
     s = re.sub(r"[^a-z0-9]+", " ", s)
     return " ".join(s.split())
+
+
+def normalize_player_name_key(name: Any) -> str:
+    """
+    Normalise impérativement le nom du joueur en majuscules sans accents ni ponctuation :
+    ex. 'LESUEUR Jean-Étienne' -> 'LESUEUR JEAN ETIENNE'
+    ex. 'Jean-Étienne ( TIJ)' -> 'JEAN ETIENNE'
+    """
+    if name is None or pd.isna(name):
+        return ""
+    s = str(name).strip()
+    s = re.sub(r"\(.*?\)", " ", s)
+    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+    s = re.sub(r"[^A-Za-z0-9]+", " ", s)
+    return " ".join(s.strip().upper().split())
+
+
+def parse_week_number(val: Any) -> Optional[int]:
+    """
+    Extrait le numéro de semaine (entier entre 1 et 53).
+    Gère: 45, '45', 'S45', 'Semaine 45', 'Semaine n° 45', etc.
+    """
+    if val is None or pd.isna(val):
+        return None
+    if isinstance(val, (int, float)):
+        try:
+            w = int(val)
+            if 1 <= w <= 53:
+                return w
+        except Exception:
+            pass
+    s = str(val).strip()
+    m = re.search(r"\b(\d{1,2})\b", s) or re.search(r"(\d{1,2})", s)
+    if m:
+        try:
+            w = int(m.group(1))
+            if 1 <= w <= 53:
+                return w
+        except Exception:
+            pass
+    return None
+
+
+def normalize_weekday_str(val: Any) -> Optional[str]:
+    """
+    Normalise le jour de la séance en chaîne majuscule standard :
+    'LUNDI', 'MARDI', 'MERCREDI', 'JEUDI', 'VENDREDI', 'SAMEDI', 'DIMANCHE'.
+    """
+    if val is None or pd.isna(val):
+        return None
+    if isinstance(val, (datetime.date, datetime.datetime)):
+        return JOURS_FR_STANDARDS[val.weekday()]
+    s = str(val).strip().lower()
+    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+    s = re.sub(r"[^a-z0-9]+", " ", s).strip()
+    for token in s.split():
+        if token in JOURS_MAP_CLEAN:
+            return JOURS_MAP_CLEAN[token]
+    return None
 
 
 # Alias et variantes orthographiques spécifiques à l'effectif sénior RCA
@@ -207,23 +279,30 @@ def parse_and_normalize_date(date_val: Any) -> Optional[datetime.date]:
 
 def parse_rpe_value(val: Any) -> Optional[float]:
     """
-    Extrait la valeur numérique du RPE (échelle de Foster 1 à 10).
-    Supporte '7', '7.5', '7/10', '7 - Très difficile', etc.
+    Extrait et caste impérativement en float la note numérique de difficulté de séance (RPE 1-10).
+    Supporte: 7, 7.5, '7', '7.5', '7/10', '7 - Très difficile', 'Score: 8', etc.
     Retourne None si la valeur est absente ou invalide.
     """
     if val is None or pd.isna(val):
         return None
+    if isinstance(val, (int, float)):
+        try:
+            f_val = float(val)
+            if 0.0 <= f_val <= 10.0:
+                return round(f_val, 1)
+        except Exception:
+            pass
     s = str(val).strip()
     if not s or s.upper() in ["NR", "NON RENSEIGNÉ", "NON RENSEIGNE", "-", "NAN", "NULL"]:
         return None
 
-    # Recherche du premier nombre dans la chaîne
-    m = re.match(r"^(\d+(?:[.,]\d+)?)", s)
+    # Recherche directe d'un nombre (entier ou décimal avec virgule ou point)
+    m = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:/\s*10)?", s)
     if m:
         try:
             v = float(m.group(1).replace(",", "."))
             if 0.0 <= v <= 10.0:
-                return v
+                return round(v, 1)
         except Exception:
             pass
     return None
@@ -453,36 +532,58 @@ def find_column_by_aliases(
 
 
 def identify_rpe_columns(df_rpe: pd.DataFrame) -> Dict[str, Optional[str]]:
-    """Détecte les colonnes de date, nom, prénom, RPE et durée dans le DataFrame RPE."""
-    # 1. Colonne Date : Priorité à la date de séance explicite avant l'horodateur de formulaire
-    col_date = find_column_by_aliases(df_rpe, [
-        "Date de la séance", "Date de seance", "Date séance", "Date seance",
-        "Date de l'entraînement", "Date entraînement", "Date entrainement", "Date", "Horodateur", "Timestamp"
+    """Détecte les colonnes de semaine, jour, date, nom, prénom, RPE et durée dans le DataFrame RPE."""
+    # 1. Colonne Numéro de Semaine
+    col_week = find_column_by_aliases(df_rpe, [
+        "Numéro de Semaine", "Numero de Semaine", "Numéro Semaine", "Numero Semaine",
+        "Semaine n°", "Semaine N°", "N° Semaine", "Semaine", "Week", "Week Number", "Week_Number", "Semaine ISO", "S"
     ])
 
-    # 2. Colonne RPE
+    # 2. Colonne Jour de la séance
+    col_day = find_column_by_aliases(df_rpe, [
+        "Jour de la séance", "Jour de la seance", "Jour de séance", "Jour de seance",
+        "Jour d'entraînement", "Jour d'entrainement", "Jour entraînement", "Jour entrainement",
+        "Jour de la semaine", "Jour", "Weekday", "Day"
+    ], exclude=[col_week] if col_week else None)
+
+    # 3. Colonne Date / Horodateur
+    col_date = find_column_by_aliases(df_rpe, [
+        "Date de la séance", "Date de seance", "Date séance", "Date seance",
+        "Date de l'entraînement", "Date entraînement", "Date entrainement", "Date",
+        "Horodateur", "Timestamp", "Date & Heure"
+    ], exclude=[c for c in [col_week, col_day] if c])
+
+    # 4. Colonne RPE (Priorité stricte à 'RPE (Chiffre)' et 'RPE')
+    excl_meta = [c for c in [col_week, col_day, col_date] if c]
     col_rpe = find_column_by_aliases(df_rpe, [
-        "RPE", "Score RPE", "RPE (1-10)", "Note RPE", "Difficulté de la séance", "Difficulté", "Intensité", "Intensite"
-    ], exclude=[col_date] if col_date else None)
+        "RPE (Chiffre)", "RPE (chiffre)", "RPE", "Score RPE", "RPE (1-10)", "Note RPE",
+        "Difficulté de la séance", "Difficulte de la seance", "Difficulté", "Difficulte",
+        "Intensité", "Intensite", "Charge RPE", "Note"
+    ], exclude=excl_meta)
 
-    # 3. Colonne Durée
+    # 5. Colonne Durée
+    excl_meta_rpe = excl_meta + ([col_rpe] if col_rpe else [])
     col_duration = find_column_by_aliases(df_rpe, [
-        "Durée (min)", "Durée de la séance", "Duree (min)", "Durée", "Duree", "Duration", "Temps"
-    ], exclude=[col_date, col_rpe] if (col_date or col_rpe) else None)
+        "Durée de la séance (min)", "Durée (min)", "Duree (min)",
+        "Durée de la séance", "Duree de la seance", "Durée", "Duree", "Duration", "Temps (min)", "Temps"
+    ], exclude=excl_meta_rpe)
 
-    # 4. Colonne Joueur unique (Nom complet ou Nom Prénom)
+    # 6. Colonne Joueur unique (Nom complet ou Nom Prénom)
+    excl_all = excl_meta_rpe + ([col_duration] if col_duration else [])
     col_joueur_unique = find_column_by_aliases(df_rpe, [
         "Nom et Prénom", "Nom & Prénom", "Nom Prénom", "Nom ; Prénom", "Nom complet",
-        "Joueur", "Athlète", "Athlete", "Player Name"
-    ], exclude=[col_date, col_rpe, col_duration] if (col_date or col_rpe or col_duration) else None)
+        "Nom du Joueur", "Nom Joueur", "Joueur", "Athlète", "Athlete", "Player Name", "Player"
+    ], exclude=excl_all)
 
-    # 5. Colonnes Nom et Prénom séparées
-    excl_names = [c for c in [col_date, col_rpe, col_duration, col_joueur_unique] if c]
+    # 7. Colonnes Nom et Prénom séparées
+    excl_names = excl_all + ([col_joueur_unique] if col_joueur_unique else [])
     col_nom = find_column_by_aliases(df_rpe, ["Nom de famille", "Nom"], exclude=excl_names)
     excl_prenom = excl_names + ([col_nom] if col_nom else [])
     col_prenom = find_column_by_aliases(df_rpe, ["Prénom", "Prenom"], exclude=excl_prenom)
 
     return {
+        "col_week": col_week,
+        "col_day": col_day,
         "col_date": col_date,
         "col_nom": col_nom,
         "col_prenom": col_prenom,
@@ -493,7 +594,7 @@ def identify_rpe_columns(df_rpe: pd.DataFrame) -> Dict[str, Optional[str]]:
 
 
 # ==============================================================================
-# 4. FUSION GPS & RPE (JOINTURE SUR NOM + PRÉNOM + DATE)
+# 4. FUSION GPS & RPE (JOINTURE SUR NOM DU JOUEUR + SEMAINE + JOUR)
 # ==============================================================================
 
 def enrich_gps_dataframe_with_rpe(
@@ -501,13 +602,15 @@ def enrich_gps_dataframe_with_rpe(
     session_date: Any,
     df_rpe: Optional[pd.DataFrame] = None,
     mapping_gps: Optional[Dict[Any, str]] = None,
+    week_number: Optional[int] = None,
+    weekday: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Enrichit le DataFrame GPS Catapult (df_indiv) avec les valeurs RPE individuelles :
-    - Clé de jointure : Nom résolu + Date normalisés (sécurisée contre les inversions et surnoms).
-    - Attribution des boîtiers GPS : Si un identifiant de capteur subsiste dans le tableau,
-      la table de mapping de séance le résout impérativement vers le joueur officiel.
-    - Attribution des postes : Strictement conservée depuis le tableau GPS.
+    - Correspondance obligatoire par croisement du Nom du Joueur (résolu via le mapping de séance),
+      du Numéro de Semaine (week_number, ex. 45) et du Jour de séance (weekday, ex. 'Vendredi').
+    - Normalisation stricte des chaînes des deux côtés (majuscules, suppression des accents et des espaces superflus).
+    - Note de difficulté RPE castée impérativement en float numérique.
     - Si un joueur n'a pas répondu : RPE = np.nan, RPE_Display = 'NR'.
     - Charge Foster calculée : Session_RPE = RPE × Durée (min).
     """
@@ -516,6 +619,19 @@ def enrich_gps_dataframe_with_rpe(
 
     df_out = df_gps.copy()
     target_dt = parse_and_normalize_date(session_date)
+    target_week = week_number
+    target_weekday = normalize_weekday_str(weekday) if weekday else None
+
+    if target_dt is not None:
+        if target_week is None:
+            target_week = target_dt.isocalendar()[1]
+        if target_weekday is None:
+            target_weekday = JOURS_FR_STANDARDS[target_dt.weekday()]
+    elif isinstance(session_date, str):
+        if target_weekday is None:
+            target_weekday = normalize_weekday_str(session_date)
+        if target_week is None:
+            target_week = parse_week_number(session_date) or 45
 
     c_gps_player = find_column_by_aliases(df_out, ["Nom ; Prénom", "Player Name", "Athlete Name", "Joueur", "Nom"])
 
@@ -541,8 +657,8 @@ def enrich_gps_dataframe_with_rpe(
     if df_rpe is None or df_rpe.empty:
         df_rpe = fetch_raw_rpe_data()
 
-    # Si aucune donnée RPE n'est disponible
-    if df_rpe is None or df_rpe.empty or target_dt is None:
+    # Si aucune donnée RPE n'est disponible ou que la séance ne peut être qualifiée
+    if df_rpe is None or df_rpe.empty or (target_dt is None and target_week is None and target_weekday is None):
         df_out["RPE"] = np.nan
         df_out["Session_RPE"] = np.nan
         df_out["RPE_Display"] = "NR"
@@ -550,6 +666,8 @@ def enrich_gps_dataframe_with_rpe(
         return df_out
 
     cols_map = identify_rpe_columns(df_rpe)
+    col_week = cols_map["col_week"]
+    col_day = cols_map["col_day"]
     col_date = cols_map["col_date"]
     col_nom = cols_map["col_nom"]
     col_prenom = cols_map["col_prenom"]
@@ -557,17 +675,37 @@ def enrich_gps_dataframe_with_rpe(
     col_rpe = cols_map["col_rpe"]
     col_dur = cols_map["col_duration"]
 
-    # Construction de la liste des réponses RPE pour la date cible
+    # Construction de la liste des réponses RPE pour la séance cible
     # [(raw_player_name, (rpe_val, session_rpe, duration))]
     rpe_entries_for_date: List[Tuple[str, Tuple[float, float, float]]] = []
 
     for _, r in df_rpe.iterrows():
-        # 1. Vérification de la date
+        # 1. Extraction et dérivation Semaine / Jour / Date
+        r_week = parse_week_number(r[col_week]) if col_week and col_week in r else None
+        r_day = normalize_weekday_str(r[col_day]) if col_day and col_day in r else None
         r_date = parse_and_normalize_date(r[col_date]) if col_date and col_date in r else None
-        if r_date is None or r_date != target_dt:
+
+        if r_date is not None:
+            if r_week is None:
+                r_week = r_date.isocalendar()[1]
+            if r_day is None:
+                r_day = JOURS_FR_STANDARDS[r_date.weekday()]
+
+        # 2. Critère de correspondance de séance (Semaine + Jour prioritaires)
+        match_session = False
+        if r_week is not None and r_day is not None and target_week is not None and target_weekday is not None:
+            match_session = (r_week == target_week and r_day == target_weekday)
+        elif r_date is not None and target_dt is not None:
+            match_session = (r_date == target_dt)
+        elif r_day is not None and target_weekday is not None and r_day == target_weekday:
+            match_session = (r_week is None or target_week is None or r_week == target_week)
+        elif r_week is not None and target_week is not None and r_week == target_week and target_weekday is None:
+            match_session = True
+
+        if not match_session:
             continue
 
-        # 2. Construction du nom complet du joueur
+        # 3. Construction du nom complet du joueur
         full_name_str = ""
         if col_player and col_player in r and pd.notna(r[col_player]):
             full_name_str = str(r[col_player]).strip()
@@ -581,17 +719,17 @@ def enrich_gps_dataframe_with_rpe(
         if not full_name_str:
             continue
 
-        # 3. Extraction de la valeur RPE et de la durée
+        # 4. Extraction de la valeur RPE (castée en float) et de la durée
         rpe_val = parse_rpe_value(r[col_rpe]) if col_rpe and col_rpe in r else None
         if rpe_val is None:
             continue
 
         dur_val = parse_duration_minutes(r[col_dur]) if col_dur and col_dur in r else 80.0
-        session_rpe = round(rpe_val * dur_val, 1)
+        session_rpe = round(float(rpe_val) * float(dur_val), 1)
 
-        rpe_entries_for_date.append((full_name_str, (rpe_val, session_rpe, dur_val)))
+        rpe_entries_for_date.append((full_name_str, (float(rpe_val), session_rpe, float(dur_val))))
 
-    # 4. Jointure sécurisée avec le tableau GPS
+    # 5. Jointure sécurisée avec le tableau GPS (normalisation des deux côtés)
     rpe_col_vals: List[Optional[float]] = []
     srpe_col_vals: List[Optional[float]] = []
     disp_col_vals: List[str] = []
@@ -599,11 +737,13 @@ def enrich_gps_dataframe_with_rpe(
 
     for _, row in df_out.iterrows():
         p_name = str(row[c_gps_player]).strip() if c_gps_player and c_gps_player in row else ""
+        norm_g = normalize_player_name_key(p_name)
         matched_entry: Optional[Tuple[float, float, float]] = None
 
         # Recherche de correspondance par algorithme tolérant nom/prénom/alias
         for r_name_raw, entry in reversed(rpe_entries_for_date):
-            if are_player_names_matching(p_name, r_name_raw):
+            norm_r = normalize_player_name_key(r_name_raw)
+            if norm_g and norm_r and (norm_g == norm_r or set(norm_g.split()) == set(norm_r.split()) or are_player_names_matching(p_name, r_name_raw)):
                 matched_entry = entry
                 break
 

@@ -2267,13 +2267,13 @@ def generer_graphique_comparatif_triptyque_postes_matplotlib(
     - Colonne 2 : 3ème Ligne
     - Colonne 3 : Trois-quarts (3/4)
     Histogramme à barres groupées pour chaque séance historique :
-    - Barre Bleue (#3498db / Bleu roi) : Volume / Distance totale (m)
-    - Barre Rouge / Bordeaux (#c0392b) : HSR (> 20 km/h ou Z3) (m)
-    - Barre Verte (#2ecc71 / Vert flash) : VHSR / Sprint (> 25 km/h ou Z5) (m)
-    Étiquettes exactes de valeurs en gras au-dessus de chaque barre (ex: 2238, 188, 119).
+    - Barre Bleue (#3498db / Bleu roi) : Volume / Distance totale (m) (Axe Y gauche)
+    - Barre Rouge / Bordeaux (#c0392b) : HSR (> 20 km/h ou Z3) (m) (Axe Y gauche)
+    - Barre Verte (#2ecc71 / Vert flash) : VHSR / Sprint (> 25 km/h ou Z5) (m) (Axe Y gauche)
+    - Barre Orange / Ambre (#E67E22) : RPE Moyen de séance (Axe Y secondaire droit twinx, échelle 1-10)
+    Étiquettes exactes de valeurs en gras au-dessus de chaque barre (ex: 2238, 188, 119, 7.2).
     Axe X avec date et adversaire (ex: vendredi 10/10 (RHEU), vendredi 06/11 (VERSAILLES)).
-    Grille horizontale légère alpha=0.2, sans bordure supérieure ni droite.
-    Légende commune en haut : ● Volume  ● HSR  ● VHSR.
+    Légende commune en haut : ● Volume  ● HSR  ● VHSR  ■ RPE.
     """
     fig, axes = plt.subplots(1, 3, figsize=(14.5, 6.8), dpi=200)
     fig.patch.set_facecolor("#FFFFFF")
@@ -2286,7 +2286,7 @@ def generer_graphique_comparatif_triptyque_postes_matplotlib(
 
     K = len(items_comparatif)
     x = np.arange(K)
-    w = 0.23 if K >= 4 else (0.25 if K == 3 else 0.28)
+    w = 0.18 if K >= 4 else (0.19 if K == 3 else 0.20)
 
     for idx, (grp_key, grp_title) in enumerate(group_defs):
         ax = axes[idx]
@@ -2297,14 +2297,44 @@ def generer_graphique_comparatif_triptyque_postes_matplotlib(
         ax.spines["bottom"].set_color("#CBD5E1")
         ax.grid(axis="y", linestyle="--", alpha=0.2, color="#94A3B8", zorder=1)
 
+        # Axe Y secondaire découplé dédié exclusivement au RPE (1 à 10)
+        ax_rpe = ax.twinx()
+        ax_rpe.set_facecolor("none")
+        ax_rpe.spines["top"].set_visible(False)
+        ax_rpe.spines["left"].set_visible(False)
+        ax_rpe.spines["bottom"].set_visible(False)
+        ax_rpe.spines["right"].set_color("#CBD5E1")
+        ax_rpe.grid(False)
+        ax_rpe.set_ylim(1.0, 10.5)
+        ax_rpe.set_yticks([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+        ax_rpe.set_ylabel("RPE (1-10)", fontsize=7.8, fontweight="bold", color="#C2410C")
+        ax_rpe.tick_params(axis="y", labelsize=7.5, colors="#C2410C")
+
         v_vol = [it.get("group_metrics", {}).get(grp_key, {}).get("volume", 0.0) for it in items_comparatif]
         v_hsr = [it.get("group_metrics", {}).get(grp_key, {}).get("hsr", 0.0) for it in items_comparatif]
         v_vhsr = [it.get("group_metrics", {}).get(grp_key, {}).get("vhsr", 0.0) for it in items_comparatif]
+        v_rpe = [it.get("group_metrics", {}).get(grp_key, {}).get("rpe") for it in items_comparatif]
 
-        b_vol = ax.bar(x - w, v_vol, width=w, color="#3498db", edgecolor="none", zorder=3)
-        b_hsr = ax.bar(x, v_hsr, width=w, color="#c0392b", edgecolor="none", zorder=3)
-        b_vhsr = ax.bar(x + w, v_vhsr, width=w, color="#2ecc71", edgecolor="none", zorder=3)
+        # 3 barres de charge externe sur l'axe Y principal (mètres)
+        b_vol = ax.bar(x - 1.5 * w, v_vol, width=w, color="#3498db", edgecolor="none", zorder=3)
+        b_hsr = ax.bar(x - 0.5 * w, v_hsr, width=w, color="#c0392b", edgecolor="none", zorder=3)
+        b_vhsr = ax.bar(x + 0.5 * w, v_vhsr, width=w, color="#2ecc71", edgecolor="none", zorder=3)
 
+        # 1 barre de charge interne RPE sur l'axe Y secondaire (1 à 10)
+        rpe_bar_heights = [max(0.0, (v - 1.0)) if (v is not None and v >= 1.0) else 0.0 for v in v_rpe]
+        b_rpe = ax_rpe.bar(
+            x + 1.5 * w,
+            rpe_bar_heights,
+            width=w,
+            bottom=1.0,
+            color="#E67E22",
+            edgecolor="#C2410C",
+            linewidth=0.8,
+            alpha=0.92,
+            zorder=4,
+        )
+
+        # Annotations numériques des métriques GPS (Volume, HSR, VHSR)
         for bars, vals in [(b_vol, v_vol), (b_hsr, v_hsr), (b_vhsr, v_vhsr)]:
             for rect, val in zip(bars, vals):
                 if val > 0:
@@ -2316,32 +2346,40 @@ def generer_graphique_comparatif_triptyque_postes_matplotlib(
                         textcoords="offset points",
                         ha="center",
                         va="bottom",
-                        fontsize=7.8,
+                        fontsize=7.5,
                         fontweight="bold",
                         color="#1E293B",
                     )
 
-        # Badges RPE Moyen du groupe par séance
-        v_rpe = [it.get("group_metrics", {}).get(grp_key, {}).get("rpe") for it in items_comparatif]
+        # Annotations numériques de la note RPE directement au-dessus de sa colonne dédiée
         for i_idx, rpe_val in enumerate(v_rpe):
+            rect = b_rpe[i_idx]
+            bar_center_x = rect.get_x() + rect.get_width() / 2.0
             if rpe_val is not None and rpe_val > 0:
-                cluster_top = max(v_vol[i_idx], v_hsr[i_idx], v_vhsr[i_idx], 100.0)
-                ax.annotate(
-                    f"RPE {rpe_val:.1f}/10",
-                    xy=(x[i_idx], cluster_top),
-                    xytext=(0, 14),
+                lbl_rpe = f"{rpe_val:.1f}" if abs(rpe_val - round(rpe_val)) > 0.05 else f"{int(round(rpe_val))}"
+                ax_rpe.annotate(
+                    lbl_rpe,
+                    xy=(bar_center_x, rpe_val),
+                    xytext=(0, 3),
                     textcoords="offset points",
                     ha="center",
                     va="bottom",
-                    fontsize=7.6,
+                    fontsize=7.8,
                     fontweight="bold",
                     color="#C2410C",
-                    bbox=dict(
-                        boxstyle="round,pad=0.25",
-                        facecolor="#FFF7ED",
-                        edgecolor="#EA580C",
-                        linewidth=1.0,
-                    ),
+                    zorder=6,
+                )
+            else:
+                ax_rpe.annotate(
+                    "NR",
+                    xy=(bar_center_x, 1.0),
+                    xytext=(0, 3),
+                    textcoords="offset points",
+                    ha="center",
+                    va="bottom",
+                    fontsize=6.8,
+                    fontweight="bold",
+                    color="#94A3B8",
                     zorder=6,
                 )
 
@@ -2351,15 +2389,16 @@ def generer_graphique_comparatif_triptyque_postes_matplotlib(
         ax.set_xticklabels([lbl.replace(" (", "\n(") for lbl in x_labels], fontsize=8.2, fontweight="bold", color="#334155")
 
         max_v = max(max(v_vol or [100.0]), 100.0)
-        ax.set_ylim(0, max_v * 1.28)
+        ax.set_ylim(0, max_v * 1.25)
+        ax.set_ylabel("Mètres (m)", fontsize=7.8, fontweight="bold", color="#1F4E79")
         ax.tick_params(axis="x", length=0)
-        ax.tick_params(axis="y", labelsize=8, color="#94A3B8")
+        ax.tick_params(axis="y", labelsize=7.5, color="#94A3B8")
 
     leg_elements = [
         Line2D([0], [0], marker="o", color="w", markerfacecolor="#3498db", markersize=9, label="Volume (m)"),
         Line2D([0], [0], marker="o", color="w", markerfacecolor="#c0392b", markersize=9, label="HSR (> 20 km/h) (m)"),
         Line2D([0], [0], marker="o", color="w", markerfacecolor="#2ecc71", markersize=9, label="VHSR (> 25 km/h) (m)"),
-        Line2D([0], [0], marker="s", color="w", markerfacecolor="#EA580C", markersize=8, label="RPE Moyen Ligne (1-10)"),
+        Line2D([0], [0], marker="s", color="w", markerfacecolor="#E67E22", markeredgecolor="#C2410C", markersize=8, label="RPE (1-10)"),
     ]
     fig.legend(
         handles=leg_elements,
@@ -2370,7 +2409,7 @@ def generer_graphique_comparatif_triptyque_postes_matplotlib(
         fontsize=9.5,
     )
 
-    fig.subplots_adjust(top=0.88, bottom=0.14, left=0.06, right=0.97, wspace=0.25)
+    fig.subplots_adjust(top=0.88, bottom=0.14, left=0.05, right=0.96, wspace=0.32)
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight")
     plt.close(fig)

@@ -3764,7 +3764,11 @@ def generer_rapport_pdf_coachs(
         rpe_stats = {}
 
     rpe_eq = rpe_stats.get("equipe") if rpe_stats else None
-    rpe_val_str = f"{rpe_eq:.1f}/10" if rpe_eq is not None else "NR"
+    if (rpe_eq is None or rpe_eq <= 0) and "RPE" in df_indiv.columns:
+        s_eq = pd.to_numeric(df_indiv["RPE"], errors="coerce").dropna()
+        if not s_eq.empty and (s_eq > 0).any():
+            rpe_eq = round(float(s_eq[s_eq > 0].mean()), 1)
+    rpe_val_str = f"{rpe_eq:.1f} / 10" if (rpe_eq is not None and rpe_eq > 0) else "NR"
 
     kpis = [
         ("Joueurs Analyses", f"{nb_joueurs}"),
@@ -3961,9 +3965,15 @@ def generer_rapport_pdf_coachs(
         pdf.cell(col_w_num, 6.8, f"{real_dpm:.1f} m/min", border=1, align="C", fill=True)
         pdf.cell(col_w_num, 6.8, f"{int(round(real_acc)):,d} ({pct_acc:.0f}%)".replace(",", " "), border=1, align="C", fill=True)
 
-        # RPE Réalisé pour le groupe
+        # RPE Réalisé pour le groupe (fiabilisation sans historique avec repli direct sur df_indiv)
         rpe_grp_val = rpe_stats.get(grp) if rpe_stats else None
-        rpe_grp_str = f"{rpe_grp_val:.1f}/10" if rpe_grp_val is not None else "NR"
+        if (rpe_grp_val is None or rpe_grp_val <= 0) and "RPE" in df_indiv.columns:
+            df_sub_rpe = df_indiv[df_indiv["Groupe"] == grp]
+            if not df_sub_rpe.empty:
+                s_r = pd.to_numeric(df_sub_rpe["RPE"], errors="coerce").dropna()
+                if not s_r.empty and (s_r > 0).any():
+                    rpe_grp_val = round(float(s_r[s_r > 0].mean()), 1)
+        rpe_grp_str = f"{rpe_grp_val:.1f} / 10" if (rpe_grp_val is not None and rpe_grp_val > 0) else "NR"
         pdf.cell(col_w_num, 6.8, safe_latin1(rpe_grp_str), border=1, align="C", fill=True)
 
         # 2. Graphiques : 4 barres comparatives en pleine largeur 2x2
@@ -5657,11 +5667,15 @@ def main() -> None:
         # Enrichissement RPE immédiat dès la consolidation individuelle (avec mapping des boîtiers GPS)
         try:
             df_rpe_raw = rpe_connector.fetch_raw_rpe_data()
+            w_num_init = active_date_for_rpe.isocalendar()[1] if isinstance(active_date_for_rpe, (datetime.date, datetime.datetime)) else None
+            w_day_init = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"][active_date_for_rpe.weekday()] if isinstance(active_date_for_rpe, (datetime.date, datetime.datetime)) else None
             df_indiv = rpe_connector.enrich_gps_dataframe_with_rpe(
                 df_gps=df_indiv,
                 session_date=active_date_for_rpe,
                 df_rpe=df_rpe_raw,
                 mapping_gps=mapping_gps,
+                week_number=w_num_init,
+                weekday=w_day_init,
             )
         except Exception as e:
             print(f"Avertissement : Enrichissement RPE initial impossible : {e}")
@@ -5995,11 +6009,15 @@ def main() -> None:
     # Enrichissement RPE automatique (Google Sheets suivi-charge-rca)
     try:
         df_rpe_raw = rpe_connector.fetch_raw_rpe_data()
+        w_num = active_date_for_rpe.isocalendar()[1] if isinstance(active_date_for_rpe, (datetime.date, datetime.datetime)) else None
+        w_day = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"][active_date_for_rpe.weekday()] if isinstance(active_date_for_rpe, (datetime.date, datetime.datetime)) else None
         df_indiv = rpe_connector.enrich_gps_dataframe_with_rpe(
             df_gps=df_indiv,
             session_date=active_date_for_rpe,
             df_rpe=df_rpe_raw,
             mapping_gps=mapping_gps,
+            week_number=w_num,
+            weekday=w_day,
         )
         if groupe_selectionne != "Tous les groupes":
             df_groupe_actif = df_indiv[df_indiv["Groupe"] == groupe_selectionne].copy()
@@ -6020,9 +6038,14 @@ def main() -> None:
     with kpi_cols[3]:
         st.metric("Total Haute Intensité", f"{df_groupe_actif[' Distance haute intensité (m)'].sum():.0f} m")
     with kpi_cols[4]:
-        rpe_kpi_val = rpe_metrics_seance.get("equipe")
-        rpe_disp_str = f"{rpe_kpi_val:.1f}/10" if rpe_kpi_val is not None else "NR"
-        st.metric("RPE Moyen Séance", rpe_disp_str, help="Charge interne RPE moyenne de l'équipe (Google Sheet suivi-charge-rca)")
+        rpe_kpi_val = rpe_metrics_seance.get(groupe_selectionne) if (groupe_selectionne != "Tous les groupes" and groupe_selectionne in rpe_metrics_seance) else rpe_metrics_seance.get("equipe")
+        if (rpe_kpi_val is None or rpe_kpi_val <= 0) and "RPE" in df_groupe_actif.columns:
+            s_ui = pd.to_numeric(df_groupe_actif["RPE"], errors="coerce").dropna()
+            if not s_ui.empty and (s_ui > 0).any():
+                rpe_kpi_val = round(float(s_ui[s_ui > 0].mean()), 1)
+        rpe_disp_str = f"{rpe_kpi_val:.1f} / 10" if (rpe_kpi_val is not None and rpe_kpi_val > 0) else "NR"
+        lbl_kpi_rpe = f"RPE Moyen ({groupe_selectionne})" if groupe_selectionne != "Tous les groupes" else "RPE Moyen Séance"
+        st.metric(lbl_kpi_rpe, rpe_disp_str, help="Charge interne RPE moyenne (Google Sheet suivi-charge-rca)")
 
     st.markdown("### 📋 Tableau de Bord Joueurs (`df_indiv`)")
 
