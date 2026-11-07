@@ -432,7 +432,7 @@ def fetch_raw_rpe_data() -> pd.DataFrame:
     Mise en cache Streamlit de 300 secondes (5 minutes) pour respecter strictement
     les quotas de requêtes de l'API Google (prévention des erreurs HTTP 429).
     """
-    default_csv_url = "https://docs.google.com/spreadsheets/d/1dV4evNta1SetRqvOizR-1xLAxLYvqSW_SEc6-mLr8bs/export?format=csv&gid=1749919352"
+    default_csv_url = "https://docs.google.com/spreadsheets/d/1dV4evNta1SetRqvOizR-1xLAxLYvqSW_SEc6-mLr8bs/gviz/tq?tqx=out:csv&sheet=Saisies"
     sheet_url = default_csv_url
 
     if hasattr(st, "secrets"):
@@ -603,22 +603,22 @@ def identify_rpe_columns(df_rpe: pd.DataFrame) -> Dict[str, Optional[str]]:
     """Détecte les colonnes de semaine, jour, date, nom, prénom, RPE et durée dans le DataFrame RPE."""
     # 1. Colonne Numéro de Semaine
     col_week = find_column_by_aliases(df_rpe, [
-        "Numéro de Semaine", "Numero de Semaine", "Numéro Semaine", "Numero Semaine",
+        "Numero Semaine", "Numéro de Semaine", "Numero de Semaine", "Numéro Semaine",
         "Semaine n°", "Semaine N°", "N° Semaine", "Semaine", "Week", "Week Number", "Week_Number", "Semaine ISO", "S"
     ])
 
     # 2. Colonne Jour de la séance
     col_day = find_column_by_aliases(df_rpe, [
-        "Jour de la séance", "Jour de la seance", "Jour de séance", "Jour de seance",
+        "Jour seance", "Jour de la séance", "Jour de la seance", "Jour de séance", "Jour de seance",
         "Jour d'entraînement", "Jour d'entrainement", "Jour entraînement", "Jour entrainement",
         "Jour de la semaine", "Jour", "Weekday", "Day"
     ], exclude=[col_week] if col_week else None)
 
     # 3. Colonne Date / Horodateur
     col_date = find_column_by_aliases(df_rpe, [
-        "Date de la séance", "Date de seance", "Date séance", "Date seance",
+        "Horodateur", "Date de la séance", "Date de seance", "Date séance", "Date seance",
         "Date de l'entraînement", "Date entraînement", "Date entrainement", "Date",
-        "Horodateur", "Timestamp", "Date & Heure"
+        "Timestamp", "Date & Heure"
     ], exclude=[c for c in [col_week, col_day] if c])
 
     # 4. Colonne RPE (Priorité stricte à 'RPE (Chiffre)' et 'RPE')
@@ -632,14 +632,14 @@ def identify_rpe_columns(df_rpe: pd.DataFrame) -> Dict[str, Optional[str]]:
     # 5. Colonne Durée
     excl_meta_rpe = excl_meta + ([col_rpe] if col_rpe else [])
     col_duration = find_column_by_aliases(df_rpe, [
-        "Durée de la séance (min)", "Durée (min)", "Duree (min)",
+        "Duree (min)", "Durée de la séance (min)", "Durée (min)",
         "Durée de la séance", "Duree de la seance", "Durée", "Duree", "Duration", "Temps (min)", "Temps"
     ], exclude=excl_meta_rpe)
 
     # 6. Colonne Joueur unique (Nom complet ou Nom Prénom)
     excl_all = excl_meta_rpe + ([col_duration] if col_duration else [])
     col_joueur_unique = find_column_by_aliases(df_rpe, [
-        "Nom et Prénom", "Nom & Prénom", "Nom Prénom", "Nom ; Prénom", "Nom complet",
+        "Nom / Prenom", "Nom / Prénom", "Nom et Prénom", "Nom & Prénom", "Nom Prénom", "Nom ; Prénom", "Nom complet",
         "Nom du Joueur", "Nom Joueur", "Joueur", "Athlète", "Athlete", "Player Name", "Player"
     ], exclude=excl_all)
 
