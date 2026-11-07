@@ -35,6 +35,10 @@ import numpy as np
 import pandas as pd
 
 import photo_manager
+try:
+    import rpe_connector
+except Exception:
+    rpe_connector = None
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.resolve()
 DATA_DIR = PROJECT_ROOT / "data"
@@ -253,6 +257,7 @@ def save_session_to_memory(
     pdf_bytes: Optional[bytes] = None,
     group_stats: Optional[Dict[str, Any]] = None,
     adversaire: str = "",
+    rpe_stats: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str]:
     """
     Sauvegarde manuellement une séance validée dans la mémoire hebdomadaire.
@@ -335,6 +340,7 @@ def save_session_to_memory(
         "has_pdf": has_pdf,
         "pdf_filename": pdf_filename,
         "group_stats": group_stats or {},
+        "rpe_stats": rpe_stats or {},
         "players_data": serialized_players,
     }
 
@@ -484,6 +490,9 @@ def aggregate_weekly_sessions(
             "total_distance_km": s.get("total_distance_km", 0.0),
             "total_hi_m": s.get("total_hi_m", 0.0),
             "avg_dpm": s.get("avg_dpm", 0.0),
+            "adversaire": s.get("adversaire", ""),
+            "rpe_stats": s.get("rpe_stats", {}),
+            "players_data": s.get("players_data", []),
         }
 
     # 2. Consolidation individuelle par joueur
@@ -525,6 +534,21 @@ def aggregate_weekly_sessions(
     if hi_col_target not in df_all.columns and " Distance haute intensité (m)" in df_all.columns:
         df_all[hi_col_target] = df_all[" Distance haute intensité (m)"]
 
+    # Normalisation du nom de joueur
+    if "Nom ; Prénom" not in df_all.columns:
+        if "Nom" in df_all.columns and "Prénom" in df_all.columns:
+            df_all["Nom ; Prénom"] = df_all["Nom"].astype(str).str.strip() + " " + df_all["Prénom"].astype(str).str.strip()
+        elif "Nom" in df_all.columns:
+            df_all["Nom ; Prénom"] = df_all["Nom"].astype(str).str.strip()
+        elif "Player Name" in df_all.columns:
+            df_all["Nom ; Prénom"] = df_all["Player Name"].astype(str).str.strip()
+        elif "Athlete Name" in df_all.columns:
+            df_all["Nom ; Prénom"] = df_all["Athlete Name"].astype(str).str.strip()
+        elif "Joueur" in df_all.columns:
+            df_all["Nom ; Prénom"] = df_all["Joueur"].astype(str).str.strip()
+        else:
+            df_all["Nom ; Prénom"] = "Joueur Inconnu"
+
     grouped = df_all.groupby(p_col)
 
     agg_records = []
@@ -558,6 +582,10 @@ def aggregate_weekly_sessions(
         dpm = (tot_dist_m / tot_time) if tot_time > 0 else 0.0
         hsr_pm = (tot_hi_m / tot_time) if tot_time > 0 else 0.0
         pct_marche = float(group["%Marche "].mean()) if "%Marche " in group.columns else 0.0
+
+        # RPE INDIVIDUEL (MOYENNE) & SESSION-RPE / FOSTER (CUMUL HEBDO)
+        rpe_mean = float(pd.to_numeric(group["RPE"], errors="coerce").dropna().mean()) if "RPE" in group.columns and pd.to_numeric(group["RPE"], errors="coerce").notna().any() else np.nan
+        foster_tot = float(pd.to_numeric(group["Session_RPE"], errors="coerce").dropna().sum()) if "Session_RPE" in group.columns and pd.to_numeric(group["Session_RPE"], errors="coerce").notna().any() else np.nan
 
         agg_records.append({
             "Nom ; Prénom": name,
@@ -593,6 +621,8 @@ def aggregate_weekly_sessions(
             "Décélérations >3m/s²": int(round(tot_dec_34 + tot_dec_gt4)),
             "% de marche moyen": round(pct_marche, 1),
             "%Marche ": round(pct_marche, 1),
+            "RPE": round(rpe_mean, 1) if pd.notna(rpe_mean) else np.nan,
+            "Session_RPE": round(foster_tot, 1) if pd.notna(foster_tot) else np.nan,
         })
 
     df_hebdo = pd.DataFrame(agg_records)
@@ -1732,15 +1762,41 @@ def _extract_metric_player_load(row: Any) -> float:
     return round(d_m * 0.08 + acc * 1.8, 1)
 
 
+def _extract_metric_rpe(row: Any) -> Optional[float]:
+    for col in ["RPE", "Score RPE", "rpe"]:
+        if col in row and row[col] is not None and not pd.isna(row[col]):
+            try:
+                v = float(row[col])
+                if 0.0 <= v <= 10.0:
+                    return v
+            except Exception:
+                pass
+    return None
+
+
+def _extract_metric_session_rpe(row: Any) -> Optional[float]:
+    for col in ["Session_RPE", "Session RPE", "Charge RPE", "Foster", "session_rpe"]:
+        if col in row and row[col] is not None and not pd.isna(row[col]):
+            try:
+                v = float(row[col])
+                if v > 0:
+                    return v
+            except Exception:
+                pass
+    return None
+
+
 def calculer_moyennes_seance(df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
     """
     Calcule les moyennes collectives globales et par groupe (Avants vs Arrières)
-    sur les 5 métriques clés spécifiées :
+    sur les métriques clés spécifiées :
     1. Distance Totale (m)
     2. High Speed Running (> 20 km/h) (m)
     3. Accélérations & Décélérations intenses (> 3 m/s²)
     4. Mètres par minute (m/min)
     5. Player Load / Charge globale
+    6. RPE Moyen (1-10)
+    7. Session-RPE (Foster = RPE × Durée)
     """
     res: Dict[str, Dict[str, float]] = {
         "Distance Totale (m)": {"Total": 0.0, "Avants": 0.0, "Arrières": 0.0},
@@ -1748,6 +1804,8 @@ def calculer_moyennes_seance(df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
         "Acc/Dec (> 3 m/s²)": {"Total": 0.0, "Avants": 0.0, "Arrières": 0.0},
         "m/min": {"Total": 0.0, "Avants": 0.0, "Arrières": 0.0},
         "Player Load": {"Total": 0.0, "Avants": 0.0, "Arrières": 0.0},
+        "RPE Moyen (1-10)": {"Total": 0.0, "Avants": 0.0, "Arrières": 0.0},
+        "Session-RPE (Foster)": {"Total": 0.0, "Avants": 0.0, "Arrières": 0.0},
     }
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return res
@@ -1768,6 +1826,8 @@ def calculer_moyennes_seance(df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
         ("Acc/Dec (> 3 m/s²)", _extract_metric_acc_dec),
         ("m/min", _extract_metric_dpm),
         ("Player Load", _extract_metric_player_load),
+        ("RPE Moyen (1-10)", _extract_metric_rpe),
+        ("Session-RPE (Foster)", _extract_metric_session_rpe),
     ]
 
     for m_name, extractor in metric_extractors:
@@ -1775,9 +1835,17 @@ def calculer_moyennes_seance(df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
         vals_av = [extractor(r) for _, r in df_av.iterrows()] if not df_av.empty else []
         vals_ar = [extractor(r) for _, r in df_ar.iterrows()] if not df_ar.empty else []
 
-        res[m_name]["Total"] = round(float(np.mean(vals_tot)), 1) if vals_tot else 0.0
-        res[m_name]["Avants"] = round(float(np.mean(vals_av)), 1) if vals_av else 0.0
-        res[m_name]["Arrières"] = round(float(np.mean(vals_ar)), 1) if vals_ar else 0.0
+        if "RPE" in m_name:
+            v_tot = [v for v in vals_tot if v is not None and not pd.isna(v) and float(v) > 0]
+            v_av = [v for v in vals_av if v is not None and not pd.isna(v) and float(v) > 0]
+            v_ar = [v for v in vals_ar if v is not None and not pd.isna(v) and float(v) > 0]
+            res[m_name]["Total"] = round(float(np.mean(v_tot)), 1) if v_tot else 0.0
+            res[m_name]["Avants"] = round(float(np.mean(v_av)), 1) if v_av else 0.0
+            res[m_name]["Arrières"] = round(float(np.mean(v_ar)), 1) if v_ar else 0.0
+        else:
+            res[m_name]["Total"] = round(float(np.mean(vals_tot)), 1) if vals_tot else 0.0
+            res[m_name]["Avants"] = round(float(np.mean(vals_av)), 1) if vals_av else 0.0
+            res[m_name]["Arrières"] = round(float(np.mean(vals_ar)), 1) if vals_ar else 0.0
 
     return res
 
@@ -2011,7 +2079,24 @@ def generer_graphique_comparatif_historique_matplotlib(
                      xytext=(0, 2), textcoords="offset points", ha="center", va="bottom",
                      fontsize=7.5, fontweight="bold", color="#D97706" if it.get("is_current") else "#1F4E79")
 
-    ax1.legend(loc="upper right", frameon=False, fontsize=7.0)
+    # Courbe d'évolution RPE Moyen superposée (Axe secondaire Y2 - Charge Interne croisée à la Charge Externe)
+    rpe_tot = [it.get("metrics", {}).get("RPE Moyen (1-10)", {}).get("Total", 0.0) for it in items_comparatif]
+    has_rpe = any(v is not None and v > 0 for v in rpe_tot)
+    if has_rpe:
+        ax1_rpe = ax1.twinx()
+        ax1_rpe.plot(x, rpe_tot, color="#E67E22", linewidth=2.0, marker="D", markersize=4.5, label="RPE Moyen (Équipe)", zorder=6)
+        ax1_rpe.set_ylabel("RPE Moyen (1-10)", color="#E67E22", fontweight="bold", fontsize=7.8)
+        ax1_rpe.set_ylim(0, 10.5)
+        ax1_rpe.tick_params(axis="y", labelcolor="#E67E22", labelsize=7.5)
+        for i, val in enumerate(rpe_tot):
+            if val and val > 0:
+                ax1_rpe.annotate(f"{val:.1f}", xy=(x[i], val), xytext=(0, 3), textcoords="offset points",
+                                 ha="center", va="bottom", fontsize=7.2, fontweight="bold", color="#D35400")
+        lines_1, labs_1 = ax1.get_legend_handles_labels()
+        lines_2, labs_2 = ax1_rpe.get_legend_handles_labels()
+        ax1.legend(lines_1 + lines_2, labs_1 + labs_2, loc="upper right", frameon=False, fontsize=6.5)
+    else:
+        ax1.legend(loc="upper right", frameon=False, fontsize=7.0)
 
     # --- AX2 : HSR ---
     ax2.set_facecolor("#F8FAFC")
@@ -2950,6 +3035,13 @@ def generate_weekly_pdf_report(
     max_speed = float(df_hebdo["Top Speed (km/h)"].max()) if not df_hebdo.empty and "Top Speed (km/h)" in df_hebdo.columns else 0.0
     nb_seances = len(synthese_dict)
 
+    weekly_rpe = {}
+    if rpe_connector:
+        try:
+            weekly_rpe = rpe_connector.calculate_weekly_rpe_from_sessions(synthese_dict)
+        except Exception:
+            pass
+
     kpis = [
         ("Volume Cumulé Équipe", f"{tot_km:.1f} km"),
         ("Haute Intensité Cumulée", f"{int(round(tot_hi)):,d} m".replace(",", " ")),
@@ -2958,7 +3050,13 @@ def generate_weekly_pdf_report(
         ("Séances Fusionnées", f"{nb_seances} séances"),
     ]
 
-    col_w = 52.8
+    if weekly_rpe.get("rpe_moyen_equipe") is not None:
+        kpis.append(("RPE Moyen Semaine", f"{weekly_rpe['rpe_moyen_equipe']:.1f}/10"))
+    elif "RPE" in df_hebdo.columns and pd.to_numeric(df_hebdo["RPE"], errors="coerce").notna().any():
+        r_mean = float(pd.to_numeric(df_hebdo["RPE"], errors="coerce").dropna().mean())
+        kpis.append(("RPE Moyen Semaine", f"{r_mean:.1f}/10"))
+
+    col_w = (273.0 - (len(kpis) - 1) * 2.25) / len(kpis)
     for idx, (label, val) in enumerate(kpis):
         x = 12 + idx * (col_w + 2.25)
         pdf.set_fill_color(248, 250, 252)
@@ -3104,16 +3202,17 @@ def generate_weekly_pdf_report(
         pdf.set_font("Helvetica", "B", 7.5)
 
         cols_def = [
-            ("Joueur", 46, "L"),
-            ("Poste", 26, "C"),
-            ("Présences", 30, "C"),
-            ("Temps (min)", 22, "C"),
-            ("Dist. (km)", 24, "C"),
-            ("H.I. (m)", 26, "C"),
-            ("Sprint (m)", 24, "C"),
-            ("Vmax (km/h)", 25, "C"),
-            ("m/min", 24, "C"),
-            ("Acc/Dec", 26, "C"),
+            ("Joueur", 44, "L"),
+            ("Poste", 24, "C"),
+            ("Présences", 26, "C"),
+            ("Temps (min)", 20, "C"),
+            ("Dist. (km)", 23, "C"),
+            ("H.I. (m)", 24, "C"),
+            ("Sprint (m)", 22, "C"),
+            ("Vmax (km/h)", 23, "C"),
+            ("m/min", 22, "C"),
+            ("Acc/Dec", 23, "C"),
+            ("RPE", 22, "C"),
         ]
 
         for title, w, align in cols_def:
@@ -3160,16 +3259,26 @@ def generate_weekly_pdf_report(
                 p_dpm = f"{_safe_float(row.get('Distance/min (m/min)', 0.0)):.1f}"
                 p_acc = f"{int(round(_safe_float(row.get('Accel/Dec total', 0.0))))}"
 
-                pdf.cell(46, row_h, safe_latin1(p_nom), 1, 0, "L", fill=True)
-                pdf.cell(26, row_h, safe_latin1(p_pos), 1, 0, "C", fill=True)
-                pdf.cell(30, row_h, safe_latin1(p_pres), 1, 0, "C", fill=True)
-                pdf.cell(22, row_h, safe_latin1(p_tps), 1, 0, "C", fill=True)
-                pdf.cell(24, row_h, safe_latin1(p_dist), 1, 0, "C", fill=True)
-                pdf.cell(26, row_h, safe_latin1(p_hi), 1, 0, "C", fill=True)
-                pdf.cell(24, row_h, safe_latin1(p_vhsr), 1, 0, "C", fill=True)
-                pdf.cell(25, row_h, safe_latin1(p_vmax), 1, 0, "C", fill=True)
-                pdf.cell(24, row_h, safe_latin1(p_dpm), 1, 0, "C", fill=True)
-                pdf.cell(26, row_h, safe_latin1(p_acc), 1, 1, "C", fill=True)
+                p_rpe_raw = row.get("RPE")
+                if p_rpe_raw is not None and not pd.isna(p_rpe_raw) and str(p_rpe_raw).upper() not in ["NR", "NONE", "NAN"]:
+                    try:
+                        p_rpe = f"{float(p_rpe_raw):.1f}"
+                    except Exception:
+                        p_rpe = str(p_rpe_raw)[:4]
+                else:
+                    p_rpe = "NR"
+
+                pdf.cell(44, row_h, safe_latin1(p_nom), 1, 0, "L", fill=True)
+                pdf.cell(24, row_h, safe_latin1(p_pos), 1, 0, "C", fill=True)
+                pdf.cell(26, row_h, safe_latin1(p_pres), 1, 0, "C", fill=True)
+                pdf.cell(20, row_h, safe_latin1(p_tps), 1, 0, "C", fill=True)
+                pdf.cell(23, row_h, safe_latin1(p_dist), 1, 0, "C", fill=True)
+                pdf.cell(24, row_h, safe_latin1(p_hi), 1, 0, "C", fill=True)
+                pdf.cell(22, row_h, safe_latin1(p_vhsr), 1, 0, "C", fill=True)
+                pdf.cell(23, row_h, safe_latin1(p_vmax), 1, 0, "C", fill=True)
+                pdf.cell(22, row_h, safe_latin1(p_dpm), 1, 0, "C", fill=True)
+                pdf.cell(23, row_h, safe_latin1(p_acc), 1, 0, "C", fill=True)
+                pdf.cell(22, row_h, safe_latin1(p_rpe), 1, 1, "C", fill=True)
                 fill_row = not fill_row
 
     # =========================================================================

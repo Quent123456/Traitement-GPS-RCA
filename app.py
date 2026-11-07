@@ -56,11 +56,13 @@ import photo_manager
 
 # Module indépendant de Mémoire sélective & Rapports Hebdomadaires RCA
 import weekly_memory
+import rpe_connector
 import importlib
 
-# Forcer le rechargement de weekly_memory pour éliminer tout cache stale sous Streamlit Cloud
+# Forcer le rechargement de weekly_memory et rpe_connector pour éliminer tout cache stale sous Streamlit Cloud
 try:
     importlib.reload(weekly_memory)
+    importlib.reload(rpe_connector)
 except Exception:
     pass
 
@@ -3626,6 +3628,7 @@ def generer_rapport_pdf_coachs(
     inclure_comparatif: bool = False,
     nb_comparatif: int = 4,
     adversaire: str = "",
+    rpe_stats: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     """
     Génère un rapport PDF multi-pages complet et aéré de 7 pages au format Paysage (Landscape),
@@ -3752,15 +3755,27 @@ def generer_rapport_pdf_coachs(
     if pd.isna(hsr_moy):
         hsr_moy = 0.0
 
+    if rpe_stats is None and "RPE" in df_indiv.columns:
+        try:
+            rpe_stats = rpe_connector.calculate_rpe_group_metrics(df_indiv)
+        except Exception:
+            rpe_stats = {}
+    elif rpe_stats is None:
+        rpe_stats = {}
+
+    rpe_eq = rpe_stats.get("equipe") if rpe_stats else None
+    rpe_val_str = f"{rpe_eq:.1f}/10" if rpe_eq is not None else "NR"
+
     kpis = [
         ("Joueurs Analyses", f"{nb_joueurs}"),
         ("Distance Cumulee", f"{dist_tot:.1f} km"),
         ("Moyenne / Joueur", f"{dist_moy:.2f} km"),
         ("Vitesse Max Seance", f"{vmax:.1f} km/h"),
         ("HSR Z3 / Joueur", f"{int(round(hsr_moy)):,d} m".replace(",", " ")),
+        ("RPE Moyen Equipe", rpe_val_str),
     ]
 
-    card_w = (273.0 - (len(kpis) - 1) * 2.5) / len(kpis)  # 52.6 mm
+    card_w = (273.0 - (len(kpis) - 1) * 2.5) / len(kpis)  # 43.4 mm pour 6 KPIs
     pdf.set_y(19.5)
     for title, val in kpis:
         x_curr = pdf.get_x()
@@ -3801,7 +3816,17 @@ def generer_rapport_pdf_coachs(
     pdf.set_xy(18, y_note + 1.2)
     pdf.set_font("Helvetica", "B", 7.5)
     pdf.set_text_color(31, 78, 121)
-    pdf.cell(w_note - 10, 3.5, safe_latin1("NOTE DU PRÉPARATEUR PHYSIQUE | SYNTHÈSE ATHLÉTIQUE"), align="L")
+    pdf.cell(140, 3.5, safe_latin1("NOTE DU PRÉPARATEUR PHYSIQUE | SYNTHÈSE ATHLÉTIQUE"), align="L")
+
+    # Badge discret Charge Interne (RPE) vs Charge Externe (Intensité m/min)
+    dpm_moy = float(df_indiv["Distance Per Min (m/min)"].mean()) if "Distance Per Min (m/min)" in df_indiv.columns else (float(df_indiv["Distance/min (m/min)"].mean()) if "Distance/min (m/min)" in df_indiv.columns else 0.0)
+    badge_txt = f"CHARGE INT. / EXT. : RPE {rpe_val_str}  |  {dpm_moy:.1f} m/min"
+    pdf.set_xy(160, y_note + 1.0)
+    pdf.set_fill_color(241, 245, 249)
+    pdf.set_draw_color(59, 130, 246)
+    pdf.set_font("Helvetica", "B", 7.0)
+    pdf.set_text_color(31, 78, 121)
+    pdf.cell(120, 3.8, safe_latin1(badge_txt), border=1, align="R", fill=True)
 
     # Corps du texte nettoyé pour compatibilité Latin-1
     pdf.set_xy(18, y_note + 4.8)
@@ -3879,8 +3904,8 @@ def generer_rapport_pdf_coachs(
         # 1. Haut de page : Tableau « RETOUR JOURNÉE - Données par groupe »
         table_x = 12.0
         table_y = 21.0
-        col_w_grp = 48.0
-        col_w_num = 45.0  # 48.0 + 5 * 45.0 = 273.0 mm
+        col_w_grp = 45.0
+        col_w_num = 38.0  # 45.0 + 6 * 38.0 = 273.0 mm
 
         # Ligne d'en-tête
         pdf.set_xy(table_x, table_y)
@@ -3896,6 +3921,7 @@ def generer_rapport_pdf_coachs(
             (col_w_num, "DISTANCE VHSR (Sprint)", "C"),
             (col_w_num, "m/min", "C"),
             (col_w_num, "ACC / DEC n°", "C"),
+            (col_w_num, "RPE MOYEN", "C"),
         ]
         for w, h_title, align in headers:
             pdf.cell(w, 6.5, safe_latin1(h_title), border=1, align=align, fill=True)
@@ -3917,6 +3943,8 @@ def generer_rapport_pdf_coachs(
         pdf.cell(col_w_num, 6.0, "/", border=1, align="C", fill=True)
         pdf.set_text_color(31, 78, 121)
         pdf.cell(col_w_num, 6.0, f"{int(round(obj_acc)):,d}".replace(",", " "), border=1, align="C", fill=True)
+        pdf.set_text_color(148, 163, 184)
+        pdf.cell(col_w_num, 6.0, "/", border=1, align="C", fill=True)
 
         # Ligne 2 : Réalisée
         pdf.set_xy(table_x, table_y + 12.5)
@@ -3932,6 +3960,11 @@ def generer_rapport_pdf_coachs(
         pdf.cell(col_w_num, 6.8, f"{int(round(real_vhsr)):,d} m ({pct_vhsr:.0f}%)".replace(",", " "), border=1, align="C", fill=True)
         pdf.cell(col_w_num, 6.8, f"{real_dpm:.1f} m/min", border=1, align="C", fill=True)
         pdf.cell(col_w_num, 6.8, f"{int(round(real_acc)):,d} ({pct_acc:.0f}%)".replace(",", " "), border=1, align="C", fill=True)
+
+        # RPE Réalisé pour le groupe
+        rpe_grp_val = rpe_stats.get(grp) if rpe_stats else None
+        rpe_grp_str = f"{rpe_grp_val:.1f}/10" if rpe_grp_val is not None else "NR"
+        pdf.cell(col_w_num, 6.8, safe_latin1(rpe_grp_str), border=1, align="C", fill=True)
 
         # 2. Graphiques : 4 barres comparatives en pleine largeur 2x2
         grp_metrics = {
@@ -5920,7 +5953,37 @@ def main() -> None:
             "L'export s'effectuera en mode de secours sans les formules et onglets annexes du club."
         )
 
-    kpi_cols = st.columns(4)
+    # Détection de la date de séance (source unique de vérité pour le croisement RPE)
+    detected_date_raw = None
+    if df_splits_valides is not None:
+        c_date = find_column(df_splits_valides, ["Date", "Session Date", "Date de séance", "Date de seance"])
+        if c_date and c_date in df_splits_valides.columns:
+            s_d = df_splits_valides[c_date].dropna().astype(str).str.strip()
+            if not s_d.empty:
+                detected_date_raw = s_d.iloc[0]
+
+    parsed_session_dt = weekly_memory.parse_session_date(detected_date_raw)
+    init_date = parsed_session_dt if parsed_session_dt is not None else datetime.date(2026, 11, 6)
+    active_date_for_rpe = st.session_state.get("session_date_picker", init_date)
+
+    # Enrichissement RPE automatique (Google Sheets suivi-charge-rca)
+    try:
+        df_rpe_raw = rpe_connector.fetch_raw_rpe_data()
+        df_indiv = rpe_connector.enrich_gps_dataframe_with_rpe(
+            df_gps=df_indiv,
+            session_date=active_date_for_rpe,
+            df_rpe=df_rpe_raw,
+        )
+        if groupe_selectionne != "Tous les groupes":
+            df_groupe_actif = df_indiv[df_indiv["Groupe"] == groupe_selectionne].copy()
+        else:
+            df_groupe_actif = df_indiv.copy()
+        rpe_metrics_seance = rpe_connector.calculate_rpe_group_metrics(df_indiv)
+    except Exception as e:
+        print(f"Avertissement : Enrichissement RPE impossible : {e}")
+        rpe_metrics_seance = {}
+
+    kpi_cols = st.columns(5)
     with kpi_cols[0]:
         st.metric("Joueurs Analysés", len(df_groupe_actif))
     with kpi_cols[1]:
@@ -5929,14 +5992,20 @@ def main() -> None:
         st.metric("Vitesse Max Séance", f"{df_groupe_actif['Top Speed (km/h)'].max():.1f} km/h")
     with kpi_cols[3]:
         st.metric("Total Haute Intensité", f"{df_groupe_actif[' Distance haute intensité (m)'].sum():.0f} m")
+    with kpi_cols[4]:
+        rpe_kpi_val = rpe_metrics_seance.get("equipe")
+        rpe_disp_str = f"{rpe_kpi_val:.1f}/10" if rpe_kpi_val is not None else "NR"
+        st.metric("RPE Moyen Séance", rpe_disp_str, help="Charge interne RPE moyenne de l'équipe (Google Sheet suivi-charge-rca)")
 
     st.markdown("### 📋 Tableau de Bord Joueurs (`df_indiv`)")
 
     df_display = df_groupe_actif.copy()
+    if "RPE_Display" in df_display.columns:
+        df_display["RPE"] = df_display["RPE_Display"]
     numeric_cols = df_display.select_dtypes(include=[np.number]).columns
     df_display[numeric_cols] = df_display[numeric_cols].round(2)
 
-    cols_order = ["Nom ; Prénom", "Groupe"] + (["Poste_Detaille"] if "Poste_Detaille" in df_display.columns else []) + [c for c in FINAL_COLUMNS if c != "Nom ; Prénom" and c in df_display.columns]
+    cols_order = ["Nom ; Prénom", "Groupe"] + (["Poste_Detaille"] if "Poste_Detaille" in df_display.columns else []) + (["RPE"] if "RPE" in df_display.columns else []) + [c for c in FINAL_COLUMNS if c != "Nom ; Prénom" and c in df_display.columns]
     df_display = df_display[[c for c in cols_order if c in df_display.columns]]
 
     st.dataframe(df_display, use_container_width=True, hide_index=True)
@@ -6059,6 +6128,7 @@ def main() -> None:
             inclure_comparatif=inclure_comp_d,
             nb_comparatif=nb_seances_comp,
             adversaire=adversaire_input,
+            rpe_stats=rpe_metrics_seance,
         )
         clean_date_tag = session_date_val.strftime("%d_%m_%Y") if isinstance(session_date_val, (datetime.date, datetime.datetime)) else re.sub(r"[^0-9a-zA-Z]", "_", str(session_date_val))
         pdf_filename = f"Rapport_Seance_GPS_RCA_{clean_date_tag}.pdf"
@@ -6170,6 +6240,7 @@ def main() -> None:
                     pdf_bytes=pdf_bytes,
                     group_stats=moyennes_groupes,
                     adversaire=adversaire_input,
+                    rpe_stats=rpe_metrics_seance,
                 )
                 if success:
                     st.success(f"🎉 {msg}")
