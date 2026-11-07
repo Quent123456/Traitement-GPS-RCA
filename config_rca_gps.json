@@ -23,9 +23,9 @@
     "22": "CARPENTIER Simon",
     "18": "SAINTOMER Lucas"
   },
-  "derniere_mise_a_jour": "07/11/2026 12:09:59",
+  "derniere_mise_a_jour": "07/11/2026 12:10:00",
   "nb_boitiers": 22,
-  "last_validated_file_sig": "DB 041126.xlsx_101997",
+  "last_validated_file_sig": "DB 061126.xlsx_68169",
   "splits_participation": {
     "PECQUERY Thomas:::Split 1": true,
     "PECQUERY Thomas:::Split 2": true,
@@ -33,7 +33,7 @@
     "PECQUERY Thomas:::Split 4": true,
     "Jean-Étienne ( TIJ):::Split 1": true,
     "Jean-Étienne ( TIJ):::Split 2": true,
-    "Jean-Étienne ( TIJ):::Split 3": false,
+    "Jean-Étienne ( TIJ):::Split 3": true,
     "Jean-Étienne ( TIJ):::Split 4": false,
     "COZIC Adrien:::Split 1": true,
     "COZIC Adrien:::Split 2": true,
@@ -267,6 +267,9 @@
     "TREMBLAY Brieuc:::Split 6": true,
     "MARTIN Benjamin:::Split 6": true,
     "SELTZER Antoine:::Split 6": true,
-    "MZE Mouhayam:::Split 6": true
+    "MZE Mouhayam:::Split 6": true,
+    "SALUA Landry:::Split 1": true,
+    "SALUA Landry:::Split 2": true,
+    "SALUA Landry:::Split 3": true
   }
 }
