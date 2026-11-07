@@ -30,6 +30,7 @@ from fpdf import FPDF
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 
@@ -1376,80 +1377,284 @@ def calculer_sous_titres_podium(
 # MOTEUR D'ANALYSE COMPARATIVE MULTI-SÉANCES & MULTI-SEMAINES (HISTORIQUE)
 # ==============================================================================
 
+CALENDRIER_ADVERSAIRES_RCA: Dict[Any, str] = {
+    (2026, 41): "RHEU",
+    (2026, 42): "SALLES",
+    (2026, 43): "EVREUX",
+    (2026, 44): "REPOS",
+    (2026, 45): "VERSAILLES",
+    (2026, 46): "GENNEVILLIERS",
+    (2026, 47): "COURBEVOIE",
+    "10/10": "RHEU",
+    "11/10": "RHEU",
+    "16/10": "SALLES",
+    "17/10": "SALLES",
+    "18/10": "SALLES",
+    "23/10": "EVREUX",
+    "24/10": "EVREUX",
+    "25/10": "EVREUX",
+    "06/11": "VERSAILLES",
+    "07/11": "VERSAILLES",
+    "08/11": "VERSAILLES",
+}
+
+
+def parse_session_date(val: Any) -> Optional[datetime.date]:
+    """
+    Convertit de manière déterministe une valeur de date quelconque en objet datetime.date.
+    Supporte :
+    - datetime.date, datetime.datetime, pd.Timestamp
+    - Numéros de série Excel (ex: 46332 ou "46332" ou 46270)
+    - Chaînes ISO (YYYY-MM-DD) et françaises (JJ/MM/AAAA ou JJ-MM-AAAA)
+    - Ne bascule JAMAIS vers datetime.now() ou date.today().
+    """
+    if val is None or pd.isna(val):
+        return None
+    if isinstance(val, (datetime.datetime, pd.Timestamp)):
+        return val.date()
+    if isinstance(val, datetime.date):
+        return val
+
+    val_str = str(val).strip()
+    if not val_str or val_str.lower() in ["nan", "none", "nat", ""]:
+        return None
+
+    # Test si numéro de série Excel (ex: 46332 ou 46332.0)
+    try:
+        f = float(val_str.replace(",", "."))
+        if 30000 <= f <= 80000:
+            return pd.to_datetime(f, unit="D", origin="1899-12-30").date()
+    except (ValueError, TypeError):
+        pass
+
+    # Format ISO : YYYY-MM-DD ou YYYY/MM/DD
+    m_iso = re.search(r"(\d{4})[/.-](\d{1,2})[/.-](\d{1,2})", val_str)
+    if m_iso:
+        try:
+            y, m, d = int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3))
+            return datetime.date(y, m, d)
+        except Exception:
+            pass
+
+    # Format français : JJ/MM/AAAA ou JJ-MM-AAAA
+    m_fr = re.search(r"(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})", val_str)
+    if m_fr:
+        try:
+            d, m, y = int(m_fr.group(1)), int(m_fr.group(2)), int(m_fr.group(3))
+            if y < 100:
+                y += 2000
+            return datetime.date(y, m, d)
+        except Exception:
+            pass
+
+    try:
+        dt = pd.to_datetime(val_str, errors="coerce", dayfirst=True)
+        if pd.notna(dt):
+            return dt.date()
+    except Exception:
+        pass
+
+    return None
+
+
 def detect_day_of_week(val: Any) -> str:
     """
     Détecte le jour de la semaine en français (Lundi, Mardi, Mercredi, Jeudi, Vendredi, Samedi, Dimanche).
-    Fonctionne avec un nom de jour, une chaîne de date (JJ/MM/AAAA, AAAA-MM-JJ), ou un objet date/datetime.
+    Fonctionne avec une date, un numéro de série Excel (ex: 46332), ou un nom de jour textuel.
+    Ne bascule JAMAIS sur la date système today().
     """
     JOURS = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
     if val is None:
-        return JOURS[datetime.date.today().weekday()]
+        return ""
 
-    if isinstance(val, (datetime.date, datetime.datetime)):
-        return JOURS[val.weekday()]
+    dt = parse_session_date(val)
+    if dt is not None:
+        return JOURS[dt.weekday()]
 
     val_str = str(val).strip().lower()
     for j in JOURS:
         if j.lower() in val_str:
             return j
 
-    # Recherche format JJ/MM/AAAA ou JJ-MM-AAAA
-    m_fr = re.search(r"(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})", val_str)
-    if m_fr:
-        try:
-            d, m, y = int(m_fr.group(1)), int(m_fr.group(2)), int(m_fr.group(3))
-            if y < 100:
-                y += 2000
-            dt = datetime.date(y, m, d)
-            return JOURS[dt.weekday()]
-        except Exception:
-            pass
-
-    # Recherche format AAAA-MM-JJ
-    m_iso = re.search(r"(\d{4})[/.-](\d{1,2})[/.-](\d{1,2})", val_str)
-    if m_iso:
-        try:
-            y, m, d = int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3))
-            dt = datetime.date(y, m, d)
-            return JOURS[dt.weekday()]
-        except Exception:
-            pass
-
-    return JOURS[datetime.date.today().weekday()]
+    return ""
 
 
-def _parse_date_to_obj(date_val: Any, fallback_year: int = 2026, fallback_week: int = 1, fallback_day_name: str = "Mardi") -> datetime.date:
-    """Convertit une valeur de date quelconque en objet datetime.date pour tri chronologique strict."""
-    if isinstance(date_val, datetime.datetime):
-        return date_val.date()
-    if isinstance(date_val, datetime.date):
-        return date_val
-
-    val_str = str(date_val or "").strip()
-    m_fr = re.search(r"(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})", val_str)
-    if m_fr:
-        try:
-            d, m, y = int(m_fr.group(1)), int(m_fr.group(2)), int(m_fr.group(3))
-            if y < 100:
-                y += 2000
-            return datetime.date(y, m, d)
-        except Exception:
-            pass
-
-    m_iso = re.search(r"(\d{4})[/.-](\d{1,2})[/.-](\d{1,2})", val_str)
-    if m_iso:
-        try:
-            y, m, d = int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3))
-            return datetime.date(y, m, d)
-        except Exception:
-            pass
+def _parse_date_to_obj(
+    date_val: Any,
+    fallback_year: int = 2026,
+    fallback_week: int = 1,
+    fallback_day_name: str = "",
+) -> Optional[datetime.date]:
+    """
+    Convertit une valeur de date quelconque en objet datetime.date pour tri chronologique strict.
+    Ne bascule JAMAIS sur la date système today().
+    """
+    dt = parse_session_date(date_val)
+    if dt is not None:
+        return dt
 
     JOURS_MAP = {"lundi": 1, "mardi": 2, "mercredi": 3, "jeudi": 4, "vendredi": 5, "samedi": 6, "dimanche": 7}
-    day_num = JOURS_MAP.get(fallback_day_name.lower(), 2)
-    try:
-        return datetime.date.fromisocalendar(fallback_year, max(1, min(53, fallback_week)), day_num)
-    except Exception:
-        return datetime.date.today()
+    day_num = JOURS_MAP.get(str(fallback_day_name or "").strip().lower(), None)
+    if day_num is not None:
+        try:
+            return datetime.date.fromisocalendar(fallback_year, max(1, min(53, fallback_week)), day_num)
+        except Exception:
+            pass
+
+    return None
+
+
+def extraire_adversaire_seance(
+    date_obj: Optional[datetime.date],
+    day_name: str,
+    notes: str = "",
+    week_num: Optional[int] = None,
+) -> str:
+    """
+    Extrait l'adversaire ou le tag de la séance (ex: VERSAILLES, EVREUX, SALLES, RHEU, AURAY)
+    à partir des notes/titres ou du calendrier officiel RCA.
+    """
+    notes_clean = str(notes or "").strip()
+
+    # 1. Recherche d'un tag entre parenthèses dans les notes (ex: "(VERSAILLES)")
+    m_par = re.search(r"\(([A-Za-zÀ-ÿ0-9_ -]+)\)", notes_clean)
+    if m_par:
+        tag = m_par.group(1).strip()
+        if tag.lower() not in ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]:
+            return tag.upper()
+
+    # 2. Recherche d'un pattern après "vs" ou "-" (ex: "- AURAY", "vs Versailles")
+    m_vs = re.search(r"(?:vs\.?|-)\s*([A-Za-zÀ-ÿ0-9_-]+)", notes_clean, re.IGNORECASE)
+    if m_vs:
+        tag = m_vs.group(1).strip()
+        if tag.lower() not in ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]:
+            return tag.upper()
+
+    # 3. Recherche de mots-clés d'adversaires connus dans les notes
+    for kw in ["versailles", "evreux", "salles", "rheu", "auray", "gennevilliers", "courbevoie"]:
+        if kw in notes_clean.lower():
+            return kw.upper()
+
+    # 4. Résolution par date exacte JJ/MM dans le calendrier RCA
+    if date_obj is not None:
+        d_key = date_obj.strftime("%d/%m")
+        if d_key in CALENDRIER_ADVERSAIRES_RCA:
+            return CALENDRIER_ADVERSAIRES_RCA[d_key]
+
+        w_calc = week_num or date_obj.isocalendar()[1]
+        cal_key = (date_obj.year, w_calc)
+        if cal_key in CALENDRIER_ADVERSAIRES_RCA:
+            return CALENDRIER_ADVERSAIRES_RCA[cal_key]
+
+    # 5. Repli sur le numéro de semaine si disponible
+    if week_num is not None:
+        cal_key = (2026, week_num)
+        if cal_key in CALENDRIER_ADVERSAIRES_RCA:
+            return CALENDRIER_ADVERSAIRES_RCA[cal_key]
+        return f"S{week_num}"
+
+    return ""
+
+
+def formater_libelle_seance_x(
+    date_obj: datetime.date,
+    day_name: str,
+    notes: str = "",
+    week_num: Optional[int] = None,
+) -> str:
+    """
+    Formate le libellé pour l'axe X des graphiques (ex: 'vendredi 10/10 (RHEU)', 'vendredi 06/11 (VERSAILLES)').
+    """
+    j_str = (day_name or "séance").strip().lower()
+    d_str = date_obj.strftime("%d/%m") if date_obj else ""
+    opp = extraire_adversaire_seance(date_obj, day_name, notes, week_num=week_num)
+    if opp:
+        return f"{j_str} {d_str} ({opp})"
+    return f"{j_str} {d_str}".strip()
+
+
+def calculer_metriques_groupes_seance(df_s: pd.DataFrame) -> Dict[str, Dict[str, float]]:
+    """
+    Calcule les moyennes exactes par ligne de poste pour le triptyque :
+    - 5 de devant
+    - 3ème Ligne
+    - Trois-quarts
+    Retourne {groupe: {"volume": m, "hsr": m, "vhsr": m, "num_players": n}}
+    """
+    groupes = ["5 de devant", "3ème Ligne", "Trois-quarts"]
+    res: Dict[str, Dict[str, float]] = {
+        g: {"volume": 0.0, "hsr": 0.0, "vhsr": 0.0, "num_players": 0}
+        for g in groupes
+    }
+    if df_s is None or not isinstance(df_s, pd.DataFrame) or df_s.empty:
+        return res
+
+    for grp in groupes:
+        # Filtrage strict par colonne 'Groupe'
+        if "Groupe" in df_s.columns:
+            if grp == "5 de devant":
+                mask = df_s["Groupe"].astype(str).str.strip().str.lower().isin(["5 de devant", "devant"])
+            elif grp == "3ème Ligne":
+                mask = df_s["Groupe"].astype(str).str.strip().str.lower().isin(["3ème ligne", "3eme ligne", "3e ligne"])
+            elif grp == "Trois-quarts":
+                mask = df_s["Groupe"].astype(str).str.strip().str.lower().isin(["trois-quarts", "trois quarts", "arrières", "arrieres", "3/4"])
+            else:
+                mask = df_s["Groupe"].astype(str).str.strip().str.lower() == grp.lower()
+            df_sub = df_s[mask]
+        else:
+            df_sub = pd.DataFrame()
+
+        # Repli si df_sub est vide
+        if df_sub.empty and ("Poste_Detaille" in df_s.columns or "Poste" in df_s.columns):
+            col_p = "Poste_Detaille" if "Poste_Detaille" in df_s.columns else "Poste"
+            if grp == "5 de devant":
+                kw = ["pilier", "talonneur", "2ème ligne", "deuxième ligne", "première ligne", "5 de devant"]
+            elif grp == "3ème Ligne":
+                kw = ["3ème ligne", "troisième ligne", "flanker", "n8", "numéro 8"]
+            else:
+                kw = ["demi", "ouvreur", "mêlée", "centre", "ailier", "arrière", "trois-quarts"]
+            mask = df_s[col_p].astype(str).str.strip().str.lower().apply(lambda s: any(k in s for k in kw))
+            df_sub = df_s[mask]
+
+        n_p = len(df_sub)
+        res[grp]["num_players"] = n_p
+        if n_p == 0:
+            continue
+
+        # 1. Volume / Distance totale (m)
+        vols = []
+        for _, r in df_sub.iterrows():
+            d = _extract_metric_dist_m(r)
+            vols.append(d)
+        res[grp]["volume"] = round(float(np.mean(vols)), 1) if vols else 0.0
+
+        # 2. HSR (> 20 km/h ou Z3) (m)
+        hsrs = []
+        for _, r in df_sub.iterrows():
+            h = _extract_metric_hsr_m(r)
+            hsrs.append(h)
+        res[grp]["hsr"] = round(float(np.mean(hsrs)), 1) if hsrs else 0.0
+
+        # 3. VHSR / Sprint (> 25 km/h ou Z5) (m)
+        vhsrs = []
+        for _, r in df_sub.iterrows():
+            vh = 0.0
+            for col in ["VHSR (m)", "Distance Sprint VHSR (m)", "VHSR_m"]:
+                if col in r and r[col] is not None and not pd.isna(r[col]):
+                    try:
+                        vh = float(r[col])
+                        break
+                    except Exception:
+                        pass
+            if vh == 0.0 and "Distance in Speed Zone 5  (km)" in r and pd.notna(r["Distance in Speed Zone 5  (km)"]):
+                try:
+                    vh = float(r["Distance in Speed Zone 5  (km)"]) * 1000.0
+                except Exception:
+                    pass
+            vhsrs.append(vh)
+        res[grp]["vhsr"] = round(float(np.mean(vhsrs)), 1) if vhsrs else 0.0
+
+    return res
 
 
 def _is_avant(row: Any) -> bool:
@@ -1577,13 +1782,33 @@ def recuperer_historique_seances_meme_jour(
     session_date_or_day: Any,
     df_current: pd.DataFrame,
     n_max: int = 4,
+    current_notes_or_tag: str = "",
 ) -> List[Dict[str, Any]]:
     """
     Extrait l'historique des N dernières séances enregistrées correspondant au même jour de la semaine
-    (ex. si séance du mardi -> les N derniers mardis disponibles, séance du jour incluse).
+    (ex. si séance du vendredi -> les N derniers vendredis disponibles, séance du jour incluse).
+    Gère automatiquement les semaines creuses sans entraînement.
+    Ne dépend JAMAIS de la date système du jour.
     """
+    dt_curr = parse_session_date(session_date_or_day)
     target_day = detect_day_of_week(session_date_or_day)
-    dt_curr = _parse_date_to_obj(session_date_or_day, fallback_day_name=target_day)
+
+    if dt_curr is not None:
+        target_weekday = dt_curr.weekday()
+        if not target_day:
+            JOURS = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+            target_day = JOURS[target_weekday]
+        curr_iso_year, curr_iso_week, _ = dt_curr.isocalendar()
+    else:
+        # Si session_date_or_day est un nom de jour textuel (ex: "Vendredi")
+        JOURS_MAP = {"lundi": 0, "mardi": 1, "mercredi": 2, "jeudi": 3, "vendredi": 4, "samedi": 5, "dimanche": 6}
+        target_weekday = JOURS_MAP.get(str(target_day or "").strip().lower(), 4)
+        if not target_day:
+            target_day = "Vendredi"
+        curr_iso_year, curr_iso_week = 2026, 45
+        dt_curr = _parse_date_to_obj(session_date_or_day, fallback_year=curr_iso_year, fallback_week=curr_iso_week, fallback_day_name=target_day)
+        if dt_curr is None:
+            dt_curr = datetime.date(curr_iso_year, 11, 6)
 
     matched_sessions: Dict[str, Dict[str, Any]] = {}
     saved_weeks = list_saved_weeks()
@@ -1597,42 +1822,58 @@ def recuperer_historique_seances_meme_jour(
                 continue
             s_day_raw = s.get("day_type", "") + " " + s.get("date", "")
             s_day = detect_day_of_week(s_day_raw)
-            if s_day.lower() == target_day.lower():
-                s_dt = _parse_date_to_obj(s.get("date"), fallback_year=y, fallback_week=w, fallback_day_name=s_day)
+            s_dt = _parse_date_to_obj(s.get("date"), fallback_year=y, fallback_week=w, fallback_day_name=s_day or target_day)
+            if s_dt is None:
+                continue
+
+            # Filtrage strict sur le même jour de la semaine
+            is_same_weekday = (s_dt.weekday() == target_weekday)
+            is_same_dayname = bool(s_day and s_day.lower() == target_day.lower())
+
+            if is_same_weekday or is_same_dayname:
                 date_key = s_dt.strftime("%Y-%m-%d")
                 p_list = s.get("players_data", [])
                 if p_list:
                     df_s = pd.DataFrame(p_list)
                     label_str = f"{target_day} {s_dt.strftime('%d/%m')}"
                     short_str = f"{s_dt.strftime('%d/%m')}"
+                    label_x = formater_libelle_seance_x(s_dt, target_day, s.get("notes", ""), week_num=w)
+
                     matched_sessions[date_key] = {
                         "date_key": date_key,
                         "sort_date": s_dt,
                         "label": label_str,
                         "short_label": short_str,
+                        "label_x": label_x,
                         "full_date": s_dt.strftime("%d/%m/%Y"),
                         "is_current": False,
                         "num_players": len(df_s),
                         "metrics": calculer_moyennes_seance(df_s),
+                        "group_metrics": calculer_metriques_groupes_seance(df_s),
                     }
 
-    # Intégration de la séance actuelle
+    # Intégration de la séance actuelle (exclue ou écrasant l'historique du même jour)
     curr_date_key = dt_curr.strftime("%Y-%m-%d")
     curr_label = f"{target_day} {dt_curr.strftime('%d/%m')}"
     curr_short = f"{dt_curr.strftime('%d/%m')}"
+    curr_label_x = formater_libelle_seance_x(dt_curr, target_day, current_notes_or_tag, week_num=curr_iso_week)
+
     matched_sessions[curr_date_key] = {
         "date_key": curr_date_key,
         "sort_date": dt_curr,
         "label": curr_label,
         "short_label": curr_short,
+        "label_x": curr_label_x,
         "full_date": dt_curr.strftime("%d/%m/%Y"),
         "is_current": True,
         "num_players": len(df_current) if df_current is not None else 0,
         "metrics": calculer_moyennes_seance(df_current),
+        "group_metrics": calculer_metriques_groupes_seance(df_current),
     }
 
     sorted_sessions = sorted(matched_sessions.values(), key=lambda x: x["sort_date"])
-    n_clamped = max(1, min(8, n_max))
+    # Conserver les 3 ou 4 dernières séances (séance actuelle incluse)
+    n_clamped = max(1, min(4, n_max))
     final_sessions = sorted_sessions[-n_clamped:]
 
     if final_sessions:
@@ -1785,6 +2026,148 @@ def generer_graphique_comparatif_historique_matplotlib(
     plt.close(fig)
     buf.seek(0)
     return buf
+
+
+def generer_graphique_comparatif_triptyque_postes_matplotlib(
+    items_comparatif: List[Dict[str, Any]],
+    target_day: str = "Vendredi",
+) -> io.BytesIO:
+    """
+    Génère le triptyque graphique officiel Staff RCA (3 colonnes côte à côte) :
+    - Colonne 1 : 5 de devant
+    - Colonne 2 : 3ème Ligne
+    - Colonne 3 : Trois-quarts (3/4)
+    Histogramme à barres groupées pour chaque séance historique :
+    - Barre Bleue (#3498db / Bleu roi) : Volume / Distance totale (m)
+    - Barre Rouge / Bordeaux (#c0392b) : HSR (> 20 km/h ou Z3) (m)
+    - Barre Verte (#2ecc71 / Vert flash) : VHSR / Sprint (> 25 km/h ou Z5) (m)
+    Étiquettes exactes de valeurs en gras au-dessus de chaque barre (ex: 2238, 188, 119).
+    Axe X avec date et adversaire (ex: vendredi 10/10 (RHEU), vendredi 06/11 (VERSAILLES)).
+    Grille horizontale légère alpha=0.2, sans bordure supérieure ni droite.
+    Légende commune en haut : ● Volume  ● HSR  ● VHSR.
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(14.5, 6.8), dpi=200)
+    fig.patch.set_facecolor("#FFFFFF")
+
+    group_defs = [
+        ("5 de devant", "5 DE DEVANT"),
+        ("3ème Ligne", "3ÈME LIGNE"),
+        ("Trois-quarts", "TROIS-QUARTS (3/4)"),
+    ]
+
+    K = len(items_comparatif)
+    x = np.arange(K)
+    w = 0.23 if K >= 4 else (0.25 if K == 3 else 0.28)
+
+    for idx, (grp_key, grp_title) in enumerate(group_defs):
+        ax = axes[idx]
+        ax.set_facecolor("#FAFAFA")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_color("#CBD5E1")
+        ax.spines["bottom"].set_color("#CBD5E1")
+        ax.grid(axis="y", linestyle="--", alpha=0.2, color="#94A3B8", zorder=1)
+
+        v_vol = [it.get("group_metrics", {}).get(grp_key, {}).get("volume", 0.0) for it in items_comparatif]
+        v_hsr = [it.get("group_metrics", {}).get(grp_key, {}).get("hsr", 0.0) for it in items_comparatif]
+        v_vhsr = [it.get("group_metrics", {}).get(grp_key, {}).get("vhsr", 0.0) for it in items_comparatif]
+
+        b_vol = ax.bar(x - w, v_vol, width=w, color="#3498db", edgecolor="none", zorder=3)
+        b_hsr = ax.bar(x, v_hsr, width=w, color="#c0392b", edgecolor="none", zorder=3)
+        b_vhsr = ax.bar(x + w, v_vhsr, width=w, color="#2ecc71", edgecolor="none", zorder=3)
+
+        for bars, vals in [(b_vol, v_vol), (b_hsr, v_hsr), (b_vhsr, v_vhsr)]:
+            for rect, val in zip(bars, vals):
+                if val > 0:
+                    h = rect.get_height()
+                    ax.annotate(
+                        f"{int(round(val))}",
+                        xy=(rect.get_x() + rect.get_width() / 2, h),
+                        xytext=(0, 3),
+                        textcoords="offset points",
+                        ha="center",
+                        va="bottom",
+                        fontsize=7.8,
+                        fontweight="bold",
+                        color="#1E293B",
+                    )
+
+        ax.set_title(grp_title, fontsize=11.5, fontweight="bold", color="#1F4E79", pad=12)
+        ax.set_xticks(x)
+        x_labels = [it.get("label_x", it.get("label", "")) for it in items_comparatif]
+        ax.set_xticklabels([lbl.replace(" (", "\n(") for lbl in x_labels], fontsize=8.2, fontweight="bold", color="#334155")
+
+        max_v = max(max(v_vol or [100.0]), 100.0)
+        ax.set_ylim(0, max_v * 1.18)
+        ax.tick_params(axis="x", length=0)
+        ax.tick_params(axis="y", labelsize=8, color="#94A3B8")
+
+    leg_elements = [
+        Line2D([0], [0], marker="o", color="w", markerfacecolor="#3498db", markersize=9, label="Volume (m)"),
+        Line2D([0], [0], marker="o", color="w", markerfacecolor="#c0392b", markersize=9, label="HSR (> 20 km/h) (m)"),
+        Line2D([0], [0], marker="o", color="w", markerfacecolor="#2ecc71", markersize=9, label="VHSR (> 25 km/h) (m)"),
+    ]
+    fig.legend(
+        handles=leg_elements,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.98),
+        ncol=3,
+        frameon=False,
+        fontsize=10.0,
+    )
+
+    fig.subplots_adjust(top=0.88, bottom=0.14, left=0.06, right=0.97, wspace=0.25)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def render_comparatif_triptyque_seances_pdf_page(
+    pdf: Any,
+    items_comparatif: List[Dict[str, Any]],
+    target_day: str = "Vendredi",
+    week_num: Optional[int] = None,
+) -> None:
+    """
+    Rend la page de comparaison historique multi-séances au format triptyque Staff RCA :
+    - En-tête de section (Titre + Sous-titre dynamique)
+    - 3 colonnes graphiques côte à côte (5 de devant, 3ème Ligne, Trois-quarts)
+    - Histogrammes groupés Volume, HSR, VHSR
+    - Pleine largeur A4 Paysage sans tableau compact
+    """
+    if not items_comparatif:
+        pdf.set_xy(12.0, 30.0)
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(273.0, 10.0, safe_latin1("Aucune donnée comparative disponible pour ce jour."), align="C")
+        return
+
+    y_top = 19.5
+    has_priors = len(items_comparatif) >= 2
+    if not has_priors:
+        pdf.set_fill_color(254, 243, 199)
+        pdf.set_draw_color(245, 158, 11)
+        pdf.rect(12.0, y_top, 273.0, 5.5, style="FD")
+        pdf.set_xy(12.0, y_top)
+        pdf.set_font("Helvetica", "B", 7.5)
+        pdf.set_text_color(146, 64, 14)
+        info_txt = f"HISTORIQUE : Aucune séance antérieure enregistrée pour un {target_day.lower()}. Données de la séance affichées seules."
+        pdf.cell(273.0, 5.5, safe_latin1(info_txt), align="C")
+        y_chart = y_top + 7.0
+        h_chart = 168.0
+    else:
+        y_chart = y_top + 1.5
+        h_chart = 173.0
+
+    try:
+        buf_chart = generer_graphique_comparatif_triptyque_postes_matplotlib(
+            items_comparatif=items_comparatif,
+            target_day=target_day,
+        )
+        pdf.image(buf_chart, x=12.0, y=y_chart, w=273.0, h=h_chart)
+    except Exception as e:
+        print(f"Erreur graphique triptyque comparatif PDF : {e}")
 
 
 def render_comparatif_historique_pdf_page(

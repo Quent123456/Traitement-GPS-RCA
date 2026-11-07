@@ -3963,22 +3963,25 @@ def generer_rapport_pdf_coachs(
         )
 
     # -------------------------------------------------------------------------
-    # PAGE 8 (OPTIONNELLE) : ANALYSE COMPARATIVE HISTORIQUE DU MÊME JOUR
+    # PAGE 8 (OPTIONNELLE) : RETOUR JOURNÉE — ANALYSE COMPARATIVE HISTORIQUE DU MÊME JOUR (TRIPTYQUE STAFF RCA)
     # -------------------------------------------------------------------------
     if inclure_comparatif:
-        target_day = weekly_memory.detect_day_of_week(date_seance)
+        target_day = weekly_memory.detect_day_of_week(date_seance) or "Vendredi"
+        dt_curr = weekly_memory.parse_session_date(date_seance)
+        curr_week = dt_curr.isocalendar()[1] if dt_curr else 45
         items_comp = weekly_memory.recuperer_historique_seances_meme_jour(
             session_date_or_day=date_seance,
             df_current=df_indiv,
-            n_max=nb_comparatif,
+            n_max=min(4, nb_comparatif),
+            current_notes_or_tag=synthese_note or "",
         )
-        pdf.current_subtitle = f"ANALYSE COMPARATIVE HISTORIQUE — MULTI-SÉANCES ({target_day.upper()}S)"
+        pdf.current_subtitle = f"RETOUR JOURNÉE — COMPARAISON AVEC LES DERNIERS {target_day.upper()}S (SEMAINE {curr_week})"
         pdf.add_page()
-        weekly_memory.render_comparatif_historique_pdf_page(
+        weekly_memory.render_comparatif_triptyque_seances_pdf_page(
             pdf=pdf,
             items_comparatif=items_comp,
-            type_label="Séance",
             target_day=target_day,
+            week_num=curr_week,
         )
 
     return bytes(pdf.output())
@@ -5964,14 +5967,38 @@ def main() -> None:
 
     with col_pdf:
         st.markdown("#### 🏉 Rapport PDF pour les Coachs")
-        # Récupération de la date de séance si disponible
-        session_date_val = None
+        # Récupération et sélection stricte de la date de séance (source unique de vérité)
+        detected_date_raw = None
         if df_splits_valides is not None:
             c_date = find_column(df_splits_valides, ["Date", "Session Date", "Date de séance", "Date de seance"])
             if c_date and c_date in df_splits_valides.columns:
                 s_d = df_splits_valides[c_date].dropna().astype(str).str.strip()
                 if not s_d.empty:
-                    session_date_val = s_d.iloc[0]
+                    detected_date_raw = s_d.iloc[0]
+
+        parsed_session_dt = weekly_memory.parse_session_date(detected_date_raw)
+        init_date = parsed_session_dt if parsed_session_dt is not None else datetime.date(2026, 11, 6)
+
+        c_dt1, c_dt2 = st.columns([1.6, 2.0])
+        with c_dt1:
+            selected_session_date = st.date_input(
+                "📅 Date de la séance :",
+                value=init_date,
+                key="session_date_picker",
+                help="Date de la séance servant de référence stricte pour l'historique et la semaine d'archivage (immunisée contre le jour de traitement).",
+            )
+        session_date_val = selected_session_date
+
+        with c_dt2:
+            JOURS_FR = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+            day_name_detected = JOURS_FR[selected_session_date.weekday()]
+            y_iso, w_iso, _ = selected_session_date.isocalendar()
+            st.markdown(
+                f"<div style='margin-top:28px;font-size:0.90rem;font-weight:700;color:#1F4E79;'>"
+                f"🏉 Jour détecté : <u>{day_name_detected}</u> (Semaine {w_iso} — {y_iso})"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
         # Gestion et mise en cache de la note narrative basée sur l'effectif global de la séance (df_indiv)
         cache_key = f"synthese_global_{len(df_indiv)}_{session_date_val}"
@@ -6003,7 +6030,7 @@ def main() -> None:
                 "Inclure la comparaison historique dans le rapport PDF",
                 value=False,
                 key="chk_comp_daily",
-                help="Ajoute une page comparative multi-séances du même jour de la semaine (graphique d'évolution & tableau de synthèse) à la fin du document.",
+                help="Ajoute une page comparative multi-séances du même jour de la semaine (triptyque Staff RCA par groupe de postes) à la fin du document.",
             )
         nb_seances_comp = 4
         if inclure_comp_d:
@@ -6011,11 +6038,11 @@ def main() -> None:
                 nb_seances_comp = st.slider(
                     "Nombre de séances / semaines à comparer",
                     min_value=2,
-                    max_value=8,
+                    max_value=4,
                     value=4,
                     step=1,
                     key="slider_comp_daily",
-                    help="Sélectionne le nombre de séances du même jour de la semaine à comparer (entre 2 et 8 pour conserver un affichage A4 optimal).",
+                    help="Sélectionne le nombre de séances du même jour de la semaine à comparer (jusqu'à 4 séances pour un affichage en triptyque optimal).",
                 )
 
         pdf_bytes = generer_rapport_pdf_coachs(
@@ -6027,7 +6054,7 @@ def main() -> None:
             inclure_comparatif=inclure_comp_d,
             nb_comparatif=nb_seances_comp,
         )
-        clean_date_tag = re.sub(r"[^0-9a-zA-Z]", "_", str(session_date_val or datetime.date.today().strftime("%d_%m_%Y")))
+        clean_date_tag = session_date_val.strftime("%d_%m_%Y") if isinstance(session_date_val, (datetime.date, datetime.datetime)) else re.sub(r"[^0-9a-zA-Z]", "_", str(session_date_val))
         pdf_filename = f"Rapport_Seance_GPS_RCA_{clean_date_tag}.pdf"
 
         lbl_pages = "8 pages A4 Paysage" if inclure_comp_d else "7 pages A4 Paysage"
@@ -6054,7 +6081,7 @@ def main() -> None:
             unsafe_allow_html=True,
         )
 
-        curr_year, curr_week = weekly_memory.get_current_iso_week()
+        curr_year_s, curr_week_s, _ = (selected_session_date.isocalendar() if selected_session_date else weekly_memory.get_current_iso_week() + (1,))
         c_arch1, c_arch2, c_arch3 = st.columns([1.5, 2.0, 2.5])
 
         with c_arch1:
@@ -6062,22 +6089,22 @@ def main() -> None:
                 "Semaine ISO :",
                 min_value=1,
                 max_value=53,
-                value=int(curr_week),
+                value=int(curr_week_s),
                 step=1,
                 key="arch_week_num_input",
-                help="Numéro de semaine ISO (1 à 53)",
+                help="Numéro de semaine ISO dérivé de la date de séance",
             )
             sel_year = st.number_input(
                 "Année :",
                 min_value=2024,
                 max_value=2035,
-                value=int(curr_year),
+                value=int(curr_year_s),
                 step=1,
                 key="arch_year_input",
             )
 
         with c_arch2:
-            day_idx = datetime.date.today().weekday()
+            day_idx = selected_session_date.weekday() if selected_session_date else 0
             # 0=Lundi, 1=Mardi, 2=Mercredi, 3=Jeudi, 4=Vendredi, 5=Samedi, 6=Dimanche
             default_day_idx = 0
             if day_idx == 1:
@@ -6086,7 +6113,7 @@ def main() -> None:
                 default_day_idx = 1  # Mercredi
             elif day_idx == 4:
                 default_day_idx = 2  # Vendredi
-            elif day_idx == 6:
+            elif day_idx in [5, 6]:
                 default_day_idx = 3  # Dimanche
             else:
                 default_day_idx = 0
@@ -6125,7 +6152,7 @@ def main() -> None:
                 )
 
             if st.button("✅ Enregistrer ce rapport dans la mémoire de la semaine", type="primary", use_container_width=True, key="btn_save_weekly_memory"):
-                clean_date_val = format_readable_date(session_date_val) if session_date_val else datetime.date.today().strftime("%d/%m/%Y")
+                clean_date_val = selected_session_date.strftime("%d/%m/%Y") if selected_session_date else datetime.date(2026, 11, 6).strftime("%d/%m/%Y")
                 success, msg = weekly_memory.save_session_to_memory(
                     df_indiv=df_indiv,
                     year=int(sel_year),
