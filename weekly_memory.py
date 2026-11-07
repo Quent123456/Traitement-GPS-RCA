@@ -252,6 +252,7 @@ def save_session_to_memory(
     overwrite: bool = True,
     pdf_bytes: Optional[bytes] = None,
     group_stats: Optional[Dict[str, Any]] = None,
+    adversaire: str = "",
 ) -> Tuple[bool, str]:
     """
     Sauvegarde manuellement une séance validée dans la mémoire hebdomadaire.
@@ -317,12 +318,16 @@ def save_session_to_memory(
     elif os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 1000:
         has_pdf = True
 
+    adv_clean = str(adversaire or "").strip().upper()
+
     existing_sessions[session_id] = {
         "session_id": session_id,
         "day_type": clean_day,
         "date": clean_date,
         "recorded_at": datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
         "notes": notes,
+        "Adversaire": adv_clean,
+        "adversaire": adv_clean,
         "num_players": len(df_indiv),
         "total_distance_km": round(total_dist_km, 2),
         "total_hi_m": round(total_hi_m, 1),
@@ -1506,52 +1511,42 @@ def _parse_date_to_obj(
 
 def extraire_adversaire_seance(
     date_obj: Optional[datetime.date],
-    day_name: str,
+    day_name: str = "",
+    adversaire: str = "",
     notes: str = "",
     week_num: Optional[int] = None,
 ) -> str:
     """
-    Extrait l'adversaire ou le tag de la séance (ex: VERSAILLES, EVREUX, SALLES, RHEU, AURAY)
-    à partir des notes/titres ou du calendrier officiel RCA.
+    Extrait le nom de l'adversaire selon la règle du sprint :
+    1. Si `adversaire` est explicitement défini (non vide), l'utiliser en majuscules.
+    2. Règle de rétrocompatibilité (CRITIQUE) :
+       - Si la date de la séance correspond au vendredi de la S43 (ex: 23/10 ou semaine 43), l'adversaire par défaut est "EVREUX".
+       - Si la date correspond au vendredi de la S45 (ex: 06/11 ou semaine 45), l'adversaire par défaut est "VERSAILLES".
+    3. Pour toutes les autres dates : utilise la valeur du champ Adversaire lue dans la base historique.
+       Si elle est vide, retourne une chaîne vide.
     """
-    notes_clean = str(notes or "").strip()
+    adv_clean = str(adversaire or "").strip()
+    if adv_clean:
+        return adv_clean.upper()
 
-    # 1. Recherche d'un tag entre parenthèses dans les notes (ex: "(VERSAILLES)")
-    m_par = re.search(r"\(([A-Za-zÀ-ÿ0-9_ -]+)\)", notes_clean)
-    if m_par:
-        tag = m_par.group(1).strip()
-        if tag.lower() not in ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]:
-            return tag.upper()
+    # Détection si c'est un vendredi
+    is_friday = ("vendredi" in str(day_name or "").lower())
+    if date_obj is not None and date_obj.weekday() == 4:
+        is_friday = True
 
-    # 2. Recherche d'un pattern après "vs" ou "-" (ex: "- AURAY", "vs Versailles")
-    m_vs = re.search(r"(?:vs\.?|-)\s*([A-Za-zÀ-ÿ0-9_-]+)", notes_clean, re.IGNORECASE)
-    if m_vs:
-        tag = m_vs.group(1).strip()
-        if tag.lower() not in ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]:
-            return tag.upper()
-
-    # 3. Recherche de mots-clés d'adversaires connus dans les notes
-    for kw in ["versailles", "evreux", "salles", "rheu", "auray", "gennevilliers", "courbevoie"]:
-        if kw in notes_clean.lower():
-            return kw.upper()
-
-    # 4. Résolution par date exacte JJ/MM dans le calendrier RCA
-    if date_obj is not None:
-        d_key = date_obj.strftime("%d/%m")
-        if d_key in CALENDRIER_ADVERSAIRES_RCA:
-            return CALENDRIER_ADVERSAIRES_RCA[d_key]
-
-        w_calc = week_num or date_obj.isocalendar()[1]
-        cal_key = (date_obj.year, w_calc)
-        if cal_key in CALENDRIER_ADVERSAIRES_RCA:
-            return CALENDRIER_ADVERSAIRES_RCA[cal_key]
-
-    # 5. Repli sur le numéro de semaine si disponible
-    if week_num is not None:
-        cal_key = (2026, week_num)
-        if cal_key in CALENDRIER_ADVERSAIRES_RCA:
-            return CALENDRIER_ADVERSAIRES_RCA[cal_key]
-        return f"S{week_num}"
+    # Règle de rétrocompatibilité pour S43 et S45 (Vendredis historiques)
+    if is_friday:
+        if date_obj is not None:
+            y, w, _ = date_obj.isocalendar()
+            d_str = date_obj.strftime("%d/%m")
+            if w == 43 or d_str == "23/10":
+                return "EVREUX"
+            if w == 45 or d_str == "06/11":
+                return "VERSAILLES"
+        if week_num == 43:
+            return "EVREUX"
+        if week_num == 45:
+            return "VERSAILLES"
 
     return ""
 
@@ -1559,15 +1554,24 @@ def extraire_adversaire_seance(
 def formater_libelle_seance_x(
     date_obj: datetime.date,
     day_name: str,
+    adversaire: str = "",
     notes: str = "",
     week_num: Optional[int] = None,
 ) -> str:
     """
-    Formate le libellé pour l'axe X des graphiques (ex: 'vendredi 10/10 (RHEU)', 'vendredi 06/11 (VERSAILLES)').
+    Formate le libellé pour l'axe X des graphiques comparatifs :
+    Format : {jour_semaine} {jour/mois} + ' ({ADVERSAIRE})' si un adversaire est défini.
+    Si l'adversaire est vide, n'affiche que la date sans parenthèses.
     """
     j_str = (day_name or "séance").strip().lower()
     d_str = date_obj.strftime("%d/%m") if date_obj else ""
-    opp = extraire_adversaire_seance(date_obj, day_name, notes, week_num=week_num)
+    opp = extraire_adversaire_seance(
+        date_obj=date_obj,
+        day_name=day_name,
+        adversaire=adversaire,
+        notes=notes,
+        week_num=week_num,
+    )
     if opp:
         return f"{j_str} {d_str} ({opp})"
     return f"{j_str} {d_str}".strip()
@@ -1783,6 +1787,7 @@ def recuperer_historique_seances_meme_jour(
     df_current: pd.DataFrame,
     n_max: int = 4,
     current_notes_or_tag: str = "",
+    current_adversaire: str = "",
 ) -> List[Dict[str, Any]]:
     """
     Extrait l'historique des N dernières séances enregistrées correspondant au même jour de la semaine
@@ -1837,7 +1842,14 @@ def recuperer_historique_seances_meme_jour(
                     df_s = pd.DataFrame(p_list)
                     label_str = f"{target_day} {s_dt.strftime('%d/%m')}"
                     short_str = f"{s_dt.strftime('%d/%m')}"
-                    label_x = formater_libelle_seance_x(s_dt, target_day, s.get("notes", ""), week_num=w)
+                    adv_s = s.get("Adversaire") or s.get("adversaire") or s.get("opponent") or ""
+                    label_x = formater_libelle_seance_x(
+                        date_obj=s_dt,
+                        day_name=target_day,
+                        adversaire=adv_s,
+                        notes=s.get("notes", ""),
+                        week_num=w,
+                    )
 
                     matched_sessions[date_key] = {
                         "date_key": date_key,
@@ -1856,7 +1868,13 @@ def recuperer_historique_seances_meme_jour(
     curr_date_key = dt_curr.strftime("%Y-%m-%d")
     curr_label = f"{target_day} {dt_curr.strftime('%d/%m')}"
     curr_short = f"{dt_curr.strftime('%d/%m')}"
-    curr_label_x = formater_libelle_seance_x(dt_curr, target_day, current_notes_or_tag, week_num=curr_iso_week)
+    curr_label_x = formater_libelle_seance_x(
+        date_obj=dt_curr,
+        day_name=target_day,
+        adversaire=current_adversaire,
+        notes=current_notes_or_tag,
+        week_num=curr_iso_week,
+    )
 
     matched_sessions[curr_date_key] = {
         "date_key": curr_date_key,

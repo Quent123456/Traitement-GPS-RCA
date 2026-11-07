@@ -3625,6 +3625,7 @@ def generer_rapport_pdf_coachs(
     config_objectifs: Optional[Dict[str, Dict[str, float]]] = None,
     inclure_comparatif: bool = False,
     nb_comparatif: int = 4,
+    adversaire: str = "",
 ) -> bytes:
     """
     Génère un rapport PDF multi-pages complet et aéré de 7 pages au format Paysage (Landscape),
@@ -3974,6 +3975,7 @@ def generer_rapport_pdf_coachs(
             df_current=df_indiv,
             n_max=min(4, nb_comparatif),
             current_notes_or_tag=synthese_note or "",
+            current_adversaire=adversaire,
         )
         pdf.current_subtitle = f"RETOUR JOURNÉE — COMPARAISON AVEC LES DERNIERS {target_day.upper()}S (SEMAINE {curr_week})"
         pdf.add_page()
@@ -5940,6 +5942,7 @@ def main() -> None:
     st.dataframe(df_display, use_container_width=True, hide_index=True)
 
     st.markdown("### 📥 Télécharger les Fichiers de Séance")
+    adversaire_input = ""
     col_excel, col_pdf = st.columns(2)
 
     with col_excel:
@@ -6045,6 +6048,8 @@ def main() -> None:
                     help="Sélectionne le nombre de séances du même jour de la semaine à comparer (jusqu'à 4 séances pour un affichage en triptyque optimal).",
                 )
 
+        adversaire_input = st.text_input("Adversaire du week-end (Optionnel, ex: RHEU, CAEN)", value="", key="adversaire_weekend_input")
+
         pdf_bytes = generer_rapport_pdf_coachs(
             df_indiv=df_indiv,
             date_seance=session_date_val,
@@ -6053,6 +6058,7 @@ def main() -> None:
             config_objectifs=active_objectifs,
             inclure_comparatif=inclure_comp_d,
             nb_comparatif=nb_seances_comp,
+            adversaire=adversaire_input,
         )
         clean_date_tag = session_date_val.strftime("%d_%m_%Y") if isinstance(session_date_val, (datetime.date, datetime.datetime)) else re.sub(r"[^0-9a-zA-Z]", "_", str(session_date_val))
         pdf_filename = f"Rapport_Seance_GPS_RCA_{clean_date_tag}.pdf"
@@ -6163,6 +6169,7 @@ def main() -> None:
                     overwrite=overwrite_choice,
                     pdf_bytes=pdf_bytes,
                     group_stats=moyennes_groupes,
+                    adversaire=adversaire_input,
                 )
                 if success:
                     st.success(f"🎉 {msg}")
