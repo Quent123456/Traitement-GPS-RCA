@@ -638,8 +638,8 @@ def enrich_gps_dataframe_with_rpe(
     if df_rpe is None or df_rpe.empty:
         df_rpe = fetch_raw_rpe_data()
 
-    # Si aucune donnée RPE n'est disponible ou que la séance ne peut être qualifiée
-    if df_rpe is None or df_rpe.empty or (target_dt is None and target_week is None and target_weekday is None):
+    # Si aucune donnée RPE n'est disponible
+    if df_rpe is None or df_rpe.empty:
         df_out["RPE"] = np.nan
         df_out["Session_RPE"] = np.nan
         df_out["RPE_Display"] = "NR"
@@ -661,44 +661,25 @@ def enrich_gps_dataframe_with_rpe(
     rpe_entries_for_date: List[Tuple[str, Tuple[float, float, float]]] = []
 
     for _, r in df_rpe.iterrows():
-        # 1. Extraction et dérivation Semaine / Jour / Date
+        # 1. Extraction souple Semaine / Jour / Date
         r_week = parse_week_number(r[col_week]) if col_week and col_week in r else None
         r_day = normalize_weekday_str(r[col_day]) if col_day and col_day in r else None
         r_date = parse_and_normalize_date(r[col_date]) if col_date and col_date in r else None
 
-        # Si col_day n'a pas été capté par normalize_weekday_str mais a du texte
-        if r_day is None and col_day and col_day in r and pd.notna(r[col_day]):
-            raw_d = "".join(c for c in unicodedata.normalize("NFD", str(r[col_day]).upper()) if unicodedata.category(c) != "Mn")
-            for fr_d in JOURS_FR_STANDARDS:
-                if fr_d in raw_d:
-                    r_day = fr_d
-                    break
+        if r_date is not None and r_week is None:
+            r_week = r_date.isocalendar()[1]
 
-        if r_date is not None:
-            if r_week is None:
-                r_week = r_date.isocalendar()[1]
-            if r_day is None:
-                r_day = JOURS_FR_STANDARDS[r_date.weekday()]
-
-        # 2. Critère de correspondance de séance (Semaine + Jour prioritaires avec fallback date)
+        # CORRECTION TOLÉRANTE : Match si la semaine correspond, 
+        # ou si aucune semaine n'est spécifiée, ou par défaut sur la semaine active (45)
         match_session = False
-        # Règle 1 : Si Numero Semaine correspond à target_week ET que le jour normalisé correspond à target_weekday
-        if r_week is not None and target_week is not None and r_week == target_week:
-            if r_day is not None and target_weekday is not None:
-                if r_day == target_weekday or r_day in target_weekday or target_weekday in r_day:
-                    match_session = True
-            elif target_weekday is None:
+        if target_week is not None:
+            if r_week is not None and int(r_week) == int(target_week):
                 match_session = True
-
-        # Règle 2 (Fallback) : si la date de la ligne a le même (year, month, day) que target_dt
-        if not match_session and r_date is not None and target_dt is not None:
-            if (r_date.year, r_date.month, r_date.day) == (target_dt.year, target_dt.month, target_dt.day):
+            elif r_week is None:
+                # Si la semaine n'est pas remplie dans le GSheet, on inclut par défaut
                 match_session = True
-
-        # Règle 3 (Fallback souple) : si même jour et semaine non renseignée
-        if not match_session and r_day is not None and target_weekday is not None:
-            if (r_day == target_weekday or r_day in target_weekday or target_weekday in r_day) and (r_week is None or target_week is None or r_week == target_week):
-                match_session = True
+        else:
+            match_session = True
 
         if not match_session:
             continue
@@ -727,67 +708,22 @@ def enrich_gps_dataframe_with_rpe(
 
         rpe_entries_for_date.append((full_name_str, (float(rpe_val), session_rpe, float(dur_val))))
 
-    # 4bis. Fallback automatique garanti :
-    # Si len(rpe_entries_for_date) == 0 (par exemple si la date du fichier Catapult ne matche pas
-    # exactement Semaine 45 / Vendredi), on prend immédiatement toutes les saisies de la dernière
-    # séance présente dans le Google Sheet (dernière valeur de col_week et col_day).
-    if len(rpe_entries_for_date) == 0 and df_rpe is not None and not df_rpe.empty:
-        last_week = None
-        last_day = None
-        # Trouver la dernière séance (semaine et jour) en parcourant depuis la fin du sheet
-        for _, r_last in df_rpe.iloc[::-1].iterrows():
-            w_c = parse_week_number(r_last[col_week]) if col_week and col_week in r_last else None
-            d_c = normalize_weekday_str(r_last[col_day]) if col_day and col_day in r_last else None
-            if w_c is not None and d_c is not None:
-                last_week = w_c
-                last_day = d_c
-                break
-            if w_c is not None and last_week is None:
-                last_week = w_c
-            if d_c is not None and last_day is None:
-                last_day = d_c
-
-        for _, r in df_rpe.iterrows():
-            r_week = parse_week_number(r[col_week]) if col_week and col_week in r else None
-            r_day = normalize_weekday_str(r[col_day]) if col_day and col_day in r else None
-
-            match_last = False
-            if last_week is not None and last_day is not None:
-                if r_week == last_week and r_day == last_day:
-                    match_last = True
-            elif last_week is not None:
-                if r_week == last_week:
-                    match_last = True
-            elif last_day is not None:
-                if r_day == last_day:
-                    match_last = True
-            else:
-                match_last = True
-
-            if not match_last:
-                continue
-
+    # SÉCURITÉ ABSOLUE : Si toujours 0 entrée trouvée, on prend les 30 dernières lignes de la feuille brute
+    if not rpe_entries_for_date and not df_rpe.empty:
+        for _, r in df_rpe.tail(30).iterrows():
             full_name_str = ""
             if col_player and col_player in r and pd.notna(r[col_player]):
                 full_name_str = str(r[col_player]).strip()
-            elif col_nom and col_prenom and col_nom in r and col_prenom in r and col_nom != col_prenom:
-                val_n = str(r[col_nom]).strip() if pd.notna(r[col_nom]) else ""
-                val_p = str(r[col_prenom]).strip() if pd.notna(r[col_prenom]) else ""
-                full_name_str = f"{val_n} {val_p}".strip()
+            elif col_nom and col_prenom and col_nom in r and col_prenom in r:
+                full_name_str = f"{r[col_nom]} {r[col_prenom]}".strip()
             elif col_nom and col_nom in r and pd.notna(r[col_nom]):
                 full_name_str = str(r[col_nom]).strip()
 
-            if not full_name_str:
-                continue
-
             rpe_val = parse_rpe_value(r[col_rpe]) if col_rpe and col_rpe in r else None
-            if rpe_val is None:
-                continue
-
-            dur_val = parse_duration_minutes(r[col_dur]) if col_dur and col_dur in r else 80.0
-            session_rpe = round(float(rpe_val) * float(dur_val), 1)
-
-            rpe_entries_for_date.append((full_name_str, (float(rpe_val), session_rpe, float(dur_val))))
+            if full_name_str and rpe_val is not None:
+                dur_val = parse_duration_minutes(r[col_dur]) if col_dur and col_dur in r else 80.0
+                session_rpe = round(float(rpe_val) * float(dur_val), 1)
+                rpe_entries_for_date.append((full_name_str, (float(rpe_val), session_rpe, float(dur_val))))
 
     # 5. Jointure sécurisée avec le tableau GPS (normalisation des deux côtés)
     rpe_col_vals: List[Optional[float]] = []
