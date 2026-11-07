@@ -6078,7 +6078,8 @@ def main() -> None:
         current_map_ui = st.session_state.get("mapping_gps") or st.session_state.get("mapping_gps_joueurs") or mapping_gps
         w_num = active_date_for_rpe.isocalendar()[1] if isinstance(active_date_for_rpe, (datetime.date, datetime.datetime)) else 45
         w_day = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"][active_date_for_rpe.weekday()] if isinstance(active_date_for_rpe, (datetime.date, datetime.datetime)) else "Vendredi"
-        df_indiv_enriched = rpe_connector.enrich_gps_dataframe_with_rpe(
+
+        df_indiv = rpe_connector.enrich_gps_dataframe_with_rpe(
             df_gps=df_indiv,
             session_date=active_date_for_rpe,
             df_rpe=df_rpe_raw,
@@ -6086,9 +6087,7 @@ def main() -> None:
             week_number=w_num or 45,
             weekday=w_day or "Vendredi",
         )
-        if "RPE" in df_indiv_enriched.columns and not df_indiv_enriched["RPE"].dropna().empty:
-            df_indiv = df_indiv_enriched
-        elif "RPE" not in df_indiv.columns or df_indiv["RPE"].dropna().empty:
+        if "RPE" not in df_indiv.columns or df_indiv["RPE"].dropna().empty:
             df_indiv = rpe_connector.enrich_gps_dataframe_with_rpe(
                 df_gps=df_indiv,
                 session_date=datetime.date(2026, 11, 6),
@@ -6097,6 +6096,7 @@ def main() -> None:
                 week_number=45,
                 weekday="Vendredi",
             )
+
         # Réassignation explicite dans st.session_state['df_indiv']
         st.session_state["df_indiv"] = df_indiv
         if groupe_selectionne != "Tous les groupes":
@@ -6129,7 +6129,13 @@ def main() -> None:
 
     st.markdown("### 📋 Tableau de Bord Joueurs (`df_indiv`)")
 
-    df_display = df_groupe_actif.copy()
+    # Utilisation explicite du DataFrame enrichi stocké dans st.session_state['df_indiv']
+    df_source = st.session_state.get("df_indiv", df_indiv)
+    if groupe_selectionne != "Tous les groupes":
+        df_display = df_source[df_source["Groupe"] == groupe_selectionne].copy()
+    else:
+        df_display = df_source.copy()
+
     if "RPE_Display" in df_display.columns:
         df_display["RPE"] = df_display["RPE_Display"]
     numeric_cols = df_display.select_dtypes(include=[np.number]).columns
@@ -6255,7 +6261,7 @@ def main() -> None:
         w_n_pdf = session_date_val.isocalendar()[1] if hasattr(session_date_val, "isocalendar") else 45
         w_d_pdf = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"][session_date_val.weekday()] if hasattr(session_date_val, "weekday") else "Vendredi"
         df_indiv_pdf = enrich_gps_dataframe_with_rpe(
-            df_gps=df_indiv,
+            df_gps=st.session_state.get("df_indiv", df_indiv),
             session_date=session_date_val,
             mapping_gps=st.session_state.get("mapping_gps", current_map_pdf),
             week_number=w_n_pdf or 45,
@@ -6273,10 +6279,10 @@ def main() -> None:
             )
         # Sauvegarde explicite du DataFrame enrichi dans l'état de session
         st.session_state["df_indiv"] = df_indiv
-        rpe_metrics_seance = rpe_connector.calculate_rpe_group_metrics(df_indiv)
+        rpe_metrics_seance = rpe_connector.calculate_rpe_group_metrics(st.session_state["df_indiv"])
 
         pdf_bytes = generer_rapport_pdf_coachs(
-            df_indiv=df_indiv,
+            df_indiv=st.session_state["df_indiv"],
             date_seance=session_date_val,
             synthese_note=synthese_note_active,
             moyennes_groupes=moyennes_groupes,
