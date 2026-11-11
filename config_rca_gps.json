@@ -23,9 +23,9 @@
     "22": "CARPENTIER Joseph",
     "18": "SAINTOMER Lucas"
   },
-  "derniere_mise_a_jour": "11/11/2026 14:00:33",
+  "derniere_mise_a_jour": "11/11/2026 14:00:35",
   "nb_boitiers": 22,
-  "last_validated_file_sig": "DB 061126.xlsx_68169",
+  "last_validated_file_sig": "DB 101126.xlsx_70876",
   "splits_participation": {
     "PECQUERY Thomas:::Split 1": true,
     "PECQUERY Thomas:::Split 2": true,
@@ -83,8 +83,8 @@
     "PREVOTE Olivier:::Split 2": true,
     "PREVOTE Olivier:::Split 3": true,
     "PREVOTE Olivier:::Split 4": true,
-    "LESPINASSE Lucien:::Split 1": true,
-    "LESPINASSE Lucien:::Split 2": true,
+    "LESPINASSE Lucien:::Split 1": false,
+    "LESPINASSE Lucien:::Split 2": false,
     "LESPINASSE Lucien:::Split 3": true,
     "LESPINASSE Lucien:::Split 4": true,
     "PREVOST Thomas:::Split 1": true,
@@ -270,6 +270,22 @@
     "MZE Mouhayam:::Split 6": true,
     "SALUA Landry:::Split 1": true,
     "SALUA Landry:::Split 2": true,
-    "SALUA Landry:::Split 3": true
+    "SALUA Landry:::Split 3": true,
+    "PELESEUMA Ope:::Split 6": true,
+    "SALUA Landry:::Split 4": true,
+    "SALUA Landry:::Split 5": true,
+    "SALUA Landry:::Split 6": true,
+    "WAEYAERT Thomas:::Split 6": true,
+    "GENERMONT Roméo:::Split 6": true,
+    "SANTONI Stephan:::Split 1": true,
+    "SANTONI Stephan:::Split 2": true,
+    "SANTONI Stephan:::Split 3": true,
+    "SANTONI Stephan:::Split 4": true,
+    "SANTONI Stephan:::Split 5": true,
+    "SANTONI Stephan:::Split 6": true,
+    "LESPINASSE Lucien:::Split 5": true,
+    "LESPINASSE Lucien:::Split 6": true,
+    "DAULT Bastien:::Split 6": true,
+    "CARPENTIER Joseph:::Split 6": true
   }
 }
